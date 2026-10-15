@@ -63,8 +63,15 @@ if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
-# WS_DEBUG=1 logs the launch steps to $TMPDIR/ws-launch.log
-LOG(){ [ "${WS_DEBUG:-}" = "1" ] && echo "$(date '+%H:%M:%S') $*" >>"$TMP/ws-launch.log"; }
+# WS_DEBUG=1 logs the launch steps to logs/YYYY_MM_DD/launch.log
+LOG(){
+  if [ "${WS_DEBUG:-}" = "1" ]; then
+    _log_date=$(date '+%Y_%m_%d')
+    _log_dir="$ROOT/logs/$_log_date"
+    mkdir -p "$_log_dir" 2>/dev/null || true
+    echo "$(date '+%H:%M:%S') $*" >>"$_log_dir/launch.log"
+  fi
+}
 
 case "$MODE" in screenshot)
     # /screenshot (Hyper+X) with no daemon running (a warm daemon gets the

@@ -186,7 +186,7 @@ mod appkit {
             search.setFocusRingType(NSFocusRingType::None);
             search.setFont(Some(&NSFont::systemFontOfSize(15.0)));
             search.setTextColor(Some(&colors.text.to_nscolor()));
-            search.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+            crate::ui::field::set_themed_placeholder(&search, &colors, 15.0, placeholder);
             search.setFrame(NSRect::new(NSPoint::new(18.0, 12.0), NSSize::new(width - 36.0, 22.0)));
             search.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
             frame.root.addSubview(&search);

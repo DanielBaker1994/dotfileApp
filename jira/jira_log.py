@@ -1,6 +1,6 @@
 """jira_log.py - where the poller IS and what Jira actually answered.
 
-debug.log  ~/.cache/jira/debug.log (python `logging`, rotated 10MB x 5).
+debug.log  logs/YYYY_MM_DD/jira-debug.log (python `logging`, date-based rolling).
            One line per event, each tagged with the run and the stage path:
              2026-09-25 12:27:03.412 DEBUG run=20260925-122703-889 [directory/labels/KAN]
                  jira_api.get:262  GET https://... -> 200 1.84s 48,210B raw=0142
@@ -40,11 +40,11 @@ import jira_config  # noqa: E402
 import jira_paths  # noqa: E402
 import jsonmgr  # noqa: E402
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pylib"))
+import log_hub  # noqa: E402
+
 _LOGGING_DEFAULTS = jsonmgr.load("jira/defaults")["logging"]
 
-DEBUG_LOG = jira_paths.cache_file("debugLog")
-DEBUG_LOG_MAX = _LOGGING_DEFAULTS["debug_log_max"]
-DEBUG_LOG_BACKUPS = _LOGGING_DEFAULTS["debug_log_backups"]
 RAW_DIR = jira_paths.cache_file("raw")
 
 LOG = logging.getLogger("jira")
@@ -79,13 +79,12 @@ class _Formatter(logging.Formatter):
 
 
 def setup(label: str, argv: list | None = None, cfg=None, cache_dir: str | None = None) -> str:
-    """Open debug.log (+ the raw store) for this process. Idempotent.
+    """Open jira-debug.log (+ the raw store) for this process. Idempotent.
     cache_dir: another product's cache (confluence/) instead of ~/.cache/jira."""
-    global RUN_ID, RAW, DEBUG_LOG, RAW_DIR
+    global RUN_ID, RAW, RAW_DIR
     if RUN_ID:
         return RUN_ID
     if cache_dir:
-        DEBUG_LOG = os.path.join(cache_dir, "debug.log")
         RAW_DIR = os.path.join(cache_dir, "raw")
     RUN_ID = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     level = "DEBUG"
@@ -93,13 +92,18 @@ def setup(label: str, argv: list | None = None, cfg=None, cache_dir: str | None 
         level = str(cfg["logLevel"] or "DEBUG").upper()
         secret(cfg["token"] or "")
     try:
+        # Use date-based log directory
+        component = "confluence-debug" if cache_dir and "confluence" in cache_dir else "jira-debug"
+        DEBUG_LOG = str(log_hub.log_path(component))
         os.makedirs(os.path.dirname(DEBUG_LOG), exist_ok=True)
-        h = logging.handlers.RotatingFileHandler(DEBUG_LOG, maxBytes=DEBUG_LOG_MAX,
-                                                 backupCount=DEBUG_LOG_BACKUPS, encoding="utf-8")
+        # Write header with file info
+        with open(DEBUG_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"# Log file: {DEBUG_LOG} (pid {os.getpid()}, started {time.strftime('%Y-%m-%d %H:%M:%S')})\n")
+        h = logging.FileHandler(DEBUG_LOG, encoding="utf-8")
         os.chmod(DEBUG_LOG, 0o600)
     except OSError:
         return RUN_ID
-    h.setFormatter(_Formatter("%(asctime)s.%(msecs)03d %(levelname)-5s run=%(run)s [%(where)s] "
+    h.setFormatter(_Formatter("%(asctime)s.%(msecs)03d %(levelname)-5s [%(name)s] run=%(run)s [%(where)s] "
                               "%(module)s.%(funcName)s:%(lineno)d  %(message)s", "%Y-%m-%d %H:%M:%S"))
     h.addFilter(_Where())
     LOG.addHandler(h)

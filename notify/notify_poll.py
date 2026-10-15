@@ -36,7 +36,11 @@ import jsonmgr  # noqa: E402
 CACHE = os.environ.get("NOTIFY_CACHE_DIR") or os.path.expanduser("~/.cache/notifications")
 STATE = os.path.join(CACHE, "state.json")
 LOCK = os.path.join(CACHE, "poll.lock")
-LOG = os.path.join(CACHE, "poll.log")
+
+# Add pylib to path for log_hub
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pylib"))
+import log_hub  # noqa: E402
+LOG = str(log_hub.log_path("notifications-poll"))
 
 # the [notifications] defaults live in notify/defaults.json and load here
 _ALL = jsonmgr.load("notify/defaults")
@@ -60,7 +64,7 @@ def sources(cfg: dict) -> list[str]:
 
 
 def log(msg: str) -> None:
-    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(time.strftime("%F %T ") + msg + "\n")
 

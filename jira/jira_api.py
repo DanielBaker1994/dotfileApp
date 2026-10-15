@@ -93,6 +93,7 @@ import jira_config  # noqa: E402
 import jira_paths  # noqa: E402
 import jira_log  # noqa: E402
 import jsonmgr  # noqa: E402
+import log_hub  # noqa: E402
 
 # request-resilience knobs, the requested field list and the log rotation size
 # live in jira/defaults.json (one home; a proxied site can tune them there)
@@ -106,7 +107,7 @@ STATE_FILE = jira_paths.cache_file("state")
 VERSIONS_FILE = jira_paths.cache_file("versions")
 DIRECTORY_FILE = jira_paths.cache_file("directory")   # the pickers' lists
 DUMP_DIR = jira_paths.cache_file("dumps")
-CURL_LOG = jira_paths.cache_file("curlLog")
+CURL_LOG = str(log_hub.log_path("jira-curl"))
 CURL_LOG_MAX = _DEFAULTS["logging"]["curl_log_max"]  # rotate: keep the newest ~2MB past 5MB
 CURL_DUMP = jira_paths.cache_file("curlDump")     # --verbose: curl per api_endpoints entry
 TRACE_FILE = jira_paths.cache_file("trace")   # --verbose: timestamped request trace

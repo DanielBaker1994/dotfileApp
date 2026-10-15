@@ -65,6 +65,9 @@ Usage:
   jira_poll.py --projects '*'     run every enabled endpoint now ("all"
                                   works too unless a job is named "all")
   jira_poll.py --projects SAM1,releases   run these endpoints now
+  jira_poll.py --job NAME         run ONE endpoint now, whatever its
+                                  schedule (Force Poll of that job; a
+                                  disabled job runs too)
   jira_poll.py --init             full sync of the (selected/all) endpoints
                                   (resumes an interrupted full sync)
   jira_poll.py --rebuild          start from scratch: wipe the issue cache,
@@ -109,6 +112,10 @@ Usage:
                                   file for the sidebar's LABELS pin
                                   (both: config.json + the tabs rewritten
                                   from local data at once; no request, no lock)
+  jira_poll.py --board-view ID    the board's issues (from the cache, via its
+                                  pinned board-ID job) as its tab file
+                                  (jira_boards/board-ID.json); local, no
+                                  request, no lock (the board must be pinned)
   jira_poll.py --window 2h        explicit window override (implies now)
   jira_poll.py --dry-run          print the plan (due, windows, JQL fields);
                                   no network, no writes
@@ -145,6 +152,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_api  # noqa: E402
+import log_hub  # noqa: E402
 import jira_config  # noqa: E402
 import jira_log  # noqa: E402
 import jira_status  # noqa: E402
@@ -158,8 +166,7 @@ _DEFAULTS = jsonmgr.load("jira/defaults")
 LEGACY_POLL_STATE = jira_paths.cache_file("legacyPollState")
 KEYS_DIR = jira_paths.cache_file("keysDir")
 FIELDS_SEEN = jira_paths.cache_file("fieldsSeen")
-POLL_LOG = jira_paths.cache_file("pollLog")
-POLL_LOG_MAX = _DEFAULTS["logging"]["poll_log_max"]  # rotate: keep the newest half past 2MB
+POLL_LOG = str(log_hub.log_path("jira-poll"))
 ERROR_RETRY = _DEFAULTS["poll"]["error_retry"]  # a failed endpoint is retried (resumed) after min(window, 5m)
 _POLL_DEFAULTS = _DEFAULTS["poll_defaults"]  # ad-hoc endpoint windows + page size
 SYNC = "sync"           # the shared issue-cache sync: status entry + checkpoint name
@@ -170,13 +177,7 @@ QUIET = False
 def log(line: str) -> None:
     """Append to poll.log (no secrets: messages never carry the token)."""
     try:
-        os.makedirs(jira_config.CACHE_DIR, exist_ok=True)
-        if os.path.exists(POLL_LOG) and os.path.getsize(POLL_LOG) > POLL_LOG_MAX:
-            with open(POLL_LOG, "rb") as fh:
-                fh.seek(-POLL_LOG_MAX // 2, os.SEEK_END)
-                tail = fh.read()
-            with open(POLL_LOG, "wb") as fh:
-                fh.write(tail[tail.find(b"\n") + 1:])
+        os.makedirs(os.path.dirname(POLL_LOG), exist_ok=True)
         with open(POLL_LOG, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {line}\n")
     except OSError:
@@ -251,8 +252,8 @@ def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
          "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
          "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None,
-         "release_view": None, "label_view": None, "board_sprint": None,
-         "import_filters": False, "my_work": False}
+         "release_view": None, "label_view": None, "board_sprint": None, "job": "",
+         "board_view": None, "import_filters": False, "my_work": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -274,6 +275,8 @@ def parse_args(argv: list) -> dict:
             o["window"] = val()
         elif name in ("--projects", "--endpoint", "--endpoints"):
             o["projects"] = val()
+        elif name == "--job":
+            o["job"] = val()
         elif name == "--dry-run":
             o["dry"] = True
         elif name == "--quiet":
@@ -301,6 +304,8 @@ def parse_args(argv: list) -> dict:
             return o
         elif name == "--label-view":
             o["label_view"] = val()
+        elif name == "--board-view":
+            o["board_view"] = val()
         elif name == "--sprints":
             o["sprints"] = val()
         elif name == "--board-sprint-keys":
@@ -1522,6 +1527,35 @@ def label_view(name: str) -> int:
     return 0
 
 
+def board_view(bid: str) -> int:
+    """--board-view ID: a board's tab file, shaped from the issue cache with
+    its own pinned `board-<ID>` job (its key set + columns) ->
+    BOARD_DIR/board-<ID>.json. Local only (no request, no lock), like
+    --release-view / --label-view. A board that is not pinned has no job to
+    shape from -> {ok:false, problems}. Prints {ok, dir, file, count}."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    ep = next((e for e in cfg.endpoints if e.get("name") == f"board-{bid}"), None)
+    if not ep or not ep.get("boardJql"):
+        msg = f"board {bid} is not pinned"
+        print(json.dumps({"ok": False, "problems": [msg]}))
+        print(f"jira-poll: {msg}", file=sys.stderr)
+        return 1
+    board_dir = side_dir(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT, jira_config.BOARD_DIR)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    cache = cache if isinstance(cache, dict) else {}
+    _, pkeys = job_fields(ep, team)
+    items = shape(issues_for(ep, cache, team), pkeys)
+    f = ep.get("file") or f"board-{bid}.json"
+    jira_api.write_json(os.path.join(board_dir, f), items, mode=0o644)
+    print(json.dumps({"ok": True, "dir": board_dir, "file": f, "count": len(items)}))
+    return 0
+
+
 def strip_order(jql: str) -> str:
     return re.sub(r"\s+ORDER\s+BY\s+.*$", "", jql or "", flags=re.I | re.S).strip()
 
@@ -2244,6 +2278,8 @@ def main(argv: list) -> int:
         return release_view(o["release_view"])
     if o["label_view"] is not None:
         return label_view(o["label_view"])
+    if o["board_view"] is not None:
+        return board_view(o["board_view"])
     if o.get("pin_label"):
         return edit_pinned_labels(*o["pin_label"])
     if o.get("pin_board"):
@@ -2287,6 +2323,11 @@ def main(argv: list) -> int:
                   file=sys.stderr)
             return 2
         o["projects"] = ",".join(names)
+        o["force"] = True
+    if o["job"]:
+        # --job NAME: Force Poll of one endpoint now, whatever its schedule
+        # (a disabled job runs too - the name is explicit).
+        o["projects"] = o["job"]
         o["force"] = True
     if o["rebuild"]:
         # the flag first: if another poll holds the lock, the next tick rebuilds

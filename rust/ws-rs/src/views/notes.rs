@@ -2738,7 +2738,7 @@ mod macos {
                     crate::views::file_popup::show(&p1, None);
                 }),
                 MenuEntry::Separator,
-                MenuEntry::item("Copy Image Path", move || {
+                MenuEntry::item("Copy Absolute Path", move || {
                     copy_text_to_clipboard(&p2);
                     crate::ui::toast::show(&format!("Copied {t}"), "doc.on.clipboard");
                 }),

@@ -3217,6 +3217,9 @@ pub fn register(registry: &mut Registry, enabled: bool) {
             "views",
         ));
     }
+    // `do:jira-config:job:<name>` / `do:jira-config:state` — the Config
+    // surface's per-job selection, verifiable headless.
+    crate::views::jira_config::register(registry);
 }
 
 /// The embeddable content view for the shared host window.
@@ -3609,6 +3612,25 @@ mod macos {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn register_wires_the_per_job_config_hooks() {
+        // The `do:jira-config:*` hooks register whether or not the palette
+        // entry does.
+        let mut r = Registry::new();
+        register(&mut r, false);
+        assert_eq!(
+            r.dispatch_test_do("jira-config:job:issues"),
+            Some(json!({"job": "issues"}))
+        );
+        assert!(r.dispatch_test_do("jira-config:state").unwrap().get("job").is_some());
+        assert!(r.palette_commands().iter().all(|c| c.id != "jira-config"));
+        // Enabled: the palette row joins the same hooks.
+        let mut r2 = Registry::new();
+        register(&mut r2, true);
+        assert!(r2.palette_commands().iter().any(|c| c.id == "jira-config"));
+        assert!(r2.dispatch_test_do("jira-config:state").is_some());
+    }
 
     fn col() -> ListColumn {
         ListColumn {

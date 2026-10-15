@@ -145,7 +145,8 @@ pub enum UiCommand {
     Board(BoardCmd),
     /// `jira-poll on`'s checks finished: (ok, message).
     JiraEnable(bool, String),
-    /// `JiraSetupWindow.show(controller:reason:)`.
+    /// `jira-poll on` found the config incomplete (`enableJiraChecked`): open
+    /// the Jira Config surface, whose Connection / Setup form is inline.
     JiraSetup(Option<String>),
     /// `do:jira-dashboard` / the palette "Jira Config" — select the Config
     /// surface of the Jira view (`Tickets | Config` pill).
@@ -1341,7 +1342,7 @@ impl SwitcherController {
         };
         std::thread::spawn(move || {
             // `enableJiraChecked`: a missing / incomplete config opens the
-            // setup window with the reason instead of refusing.
+            // Jira Config surface with the reason instead of refusing.
             let cmd = match jp::enable_check() {
                 EnableCheck::Ok => UiCommand::JiraEnable(true, String::new()),
                 EnableCheck::Setup(reason) => UiCommand::JiraSetup(Some(reason)),
@@ -3857,6 +3858,52 @@ mod daemon_ui {
         ui
     }
 
+    // -- canonical file-action rows (R4) --------------------------------------
+    //
+    // Context menus used to hand-roll these actions with different wording and
+    // ordering per surface. These helpers give every surface one label and one
+    // closure; callers assemble them in the canonical order
+    // (open → view → copy → edit → navigation).
+
+    /// "Open in Notes": show the file in the Notes view.
+    fn file_action_open_in_notes(
+        path: &str,
+        weak: &objc2::rc::Weak<DaemonUi>,
+    ) -> crate::ui::menu_kit::MenuEntry {
+        let p = path.to_string();
+        let w = weak.clone();
+        crate::ui::menu_kit::MenuEntry::item("Open in Notes", move || {
+            if let Some(ui) = w.load() {
+                ui.open_in_notes(&p);
+            }
+        })
+    }
+
+    /// "Copy Absolute Path": the path text to the pasteboard + the standard toast.
+    fn file_action_copy_path(path: &str) -> crate::ui::menu_kit::MenuEntry {
+        let p = path.to_string();
+        crate::ui::menu_kit::MenuEntry::item("Copy Absolute Path", move || {
+            copy_text_to_pasteboard(&p);
+            crate::ui::toast::show(&format!("Copied {}", tilde_path(&p)), "doc.on.clipboard");
+        })
+    }
+
+    /// "Copy File": the file itself on the pasteboard (so Finder pastes it).
+    fn file_action_copy_file(path: &str) -> crate::ui::menu_kit::MenuEntry {
+        let p = path.to_string();
+        crate::ui::menu_kit::MenuEntry::item("Copy File", move || {
+            copy_files_toast(&[p]);
+        })
+    }
+
+    /// "Reveal in Files": show the path in the app's own Files view.
+    fn file_action_reveal(path: &str) -> crate::ui::menu_kit::MenuEntry {
+        let p = path.to_string();
+        crate::ui::menu_kit::MenuEntry::item("Reveal in Files", move || {
+            reveal_in_files(&[p]);
+        })
+    }
+
     impl DaemonUi {
         fn apply_pending(&self) {
             // `onVimExit`: `:q` / a crash rebuilds the pane on the same note.
@@ -3894,10 +3941,20 @@ mod daemon_ui {
                         UiCommand::Board(cmd) => self.board_cmd(cmd),
                         UiCommand::JiraEnable(ok, msg) => self.ivars().controller.jira_enable_result(ok, &msg),
                         UiCommand::JiraSetup(reason) => {
-                            let ctrl = self.ivars().controller.clone();
-                            crate::ui::jira_setup::show(
-                                reason.as_deref(),
-                                Box::new(move || ctrl.jira_enable_result(true, "")),
+                            // No separate popup any more: open the Jira Config
+                            // surface (its Connection / Setup form is inline)
+                            // and surface the reason as a toast + log line.
+                            if let Some(r) = &reason {
+                                self.ivars()
+                                    .controller
+                                    .log(&format!("jira: setup needed: {}", r.replace('\n', "; ")));
+                                crate::ui::toast::show(
+                                    r.lines().next().unwrap_or("Jira setup needed"),
+                                    "exclamationmark.triangle.fill",
+                                );
+                            }
+                            self.ivars().controller.show_jira_tab(
+                                crate::views::jira_view::JiraSurface::Config,
                             );
                         }
                         UiCommand::JiraTab(tab) => self.apply_jira_tab(tab),
@@ -7647,19 +7704,13 @@ mod daemon_ui {
             use crate::ui::menu_kit::{popup, MenuEntry};
             let Some(Some(r)) = self.ai_surface(|a| a.model.rules.get(i).cloned()) else { return };
             let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let (p1, p3, p4) = (r.path.clone(), r.path.clone(), r.path.clone());
-            let (w1, w2, w3) = (weak.clone(), weak.clone(), weak.clone());
+            let (w2, w3) = (weak.clone(), weak.clone());
             let (r2, r3) = (r.clone(), r.clone());
             popup(
                 vec![
-                    MenuEntry::item("Open in Notes", move || {
-                        if let Some(ui) = w1.load() {
-                            ui.open_in_notes(&p1);
-                        }
-                    }),
-                    MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
-                    MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p4)),
+                    file_action_open_in_notes(&r.path, &weak),
                     MenuEntry::Separator,
+                    file_action_copy_path(&r.path),
                     MenuEntry::item("Duplicate…", move || {
                         if let Some(ui) = w2.load() {
                             ui.ai_new_rule(Some(r2));
@@ -7672,7 +7723,7 @@ mod daemon_ui {
                         let r = r3.clone();
                         crate::ui::sheet::alert_sheet(
                             &window,
-                            &format!("Delete “{}”?", r.name),
+                            &format!("Delete \"{}\"?", r.name),
                             &format!("{} goes to the Trash.", r.file()),
                             &["Move to Trash", "Cancel"],
                             move |b| {
@@ -7692,6 +7743,8 @@ mod daemon_ui {
                             },
                         );
                     }),
+                    MenuEntry::Separator,
+                    file_action_reveal(&r.path),
                 ],
                 None,
                 x,
@@ -9861,12 +9914,11 @@ mod daemon_ui {
                             "force poll",
                         ),
                         A::Stop => self.jira_config_run(vec!["--cancel".into()], "stop poll"),
-                        A::Setup => {
-                            let ctrl = self.ivars().controller.clone();
-                            crate::ui::jira_setup::show(
-                                None,
-                                Box::new(move || ctrl.jira_enable_result(true, "")),
-                            );
+                        A::SetupSaved => {
+                            // The embedded form already saved + validated the
+                            // login; turn polling on and refresh the dashboard.
+                            self.ivars().controller.jira_enable_result(true, "");
+                            self.jira_config_refresh();
                         }
                         A::Refresh => self.jira_config_refresh(),
                     }
@@ -10208,6 +10260,21 @@ mod daemon_ui {
             true
         }
 
+        /// `true` when the shared window's first responder is an editable
+        /// `NSText` (a field editor: the search box or the embedded setup form).
+        fn jira_text_focused(&self) -> bool {
+            self.ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .and_then(|st| st.window.firstResponder())
+                .is_some_and(|r| {
+                    as_any(&*r)
+                        .downcast_ref::<objc2_app_kit::NSText>()
+                        .is_some_and(|t| t.isEditable())
+                })
+        }
+
         /// The list window's Jira keys (`hostShortcutKey` + `listKey`):
         /// Cmd+I issue panel, Ctrl+Space tick, Tab / Shift+Tab, Home / End /
         /// Page Up / Page Down, Cmd+F live search.
@@ -10236,6 +10303,12 @@ mod daemon_ui {
                     true
                 }
                 48 if !key.cmd && !key.ctrl && !key.opt => {
+                    // A focused text field (the search box, the embedded setup
+                    // form) owns Tab so it moves between fields; only the list
+                    // itself moves on Tab.
+                    if self.jira_text_focused() {
+                        return false;
+                    }
                     self.jira_surface(|l| jira_move(l, if key.shift { -1 } else { 1 }));
                     true
                 }
@@ -11052,8 +11125,8 @@ mod daemon_ui {
         }
 
         /// `PopupTextView.menu(for:)`: the plain notes editor's right-click.
-        /// On an image link: Open Full Size and Copy Image Path; then Copy
-        /// Absolute Path (the note) and Open file at path….
+        /// On an image link: Open Full Size, then Copy Absolute Path (the
+        /// image); then Copy Absolute Path (the note) and Open file at path….
         fn notes_editor_menu(&self, idx: usize) {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
             let Some((image, note, view)) = self.notes_surface(|s| {
@@ -11071,17 +11144,11 @@ mod daemon_ui {
                         ui.notes_open_image(p);
                     }
                 }));
-                e.push(MenuEntry::item("Copy Image Path", move || {
-                    copy_text_to_pasteboard(&path);
-                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&path)), "doc.on.clipboard");
-                }));
                 e.push(MenuEntry::Separator);
+                e.push(file_action_copy_path(&path));
             }
             if let Some(note) = note {
-                e.push(MenuEntry::item("Copy Absolute Path", move || {
-                    copy_text_to_pasteboard(&note);
-                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&note)), "doc.on.clipboard");
-                }));
+                e.push(file_action_copy_path(&note));
             }
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             e.push(MenuEntry::item("Open file at path…", move || {
@@ -11150,22 +11217,12 @@ mod daemon_ui {
             ];
             if let Some(p) = path {
                 e.push(MenuEntry::Separator);
-                let (p1, p2, p3, p4, w) = (p.clone(), p.clone(), p.clone(), p.clone(), weak.clone());
                 if !std::path::Path::new(&p).is_dir() {
-                    e.push(MenuEntry::item("Open in Notes", move || {
-                        if let Some(ui) = w.load() {
-                            ui.open_in_notes(&p1);
-                        }
-                    }));
+                    e.push(file_action_open_in_notes(&p, &weak));
                 }
-                e.push(MenuEntry::item("Copy File", move || {
-                    copy_files_toast(&[p2]);
-                }));
-                e.push(MenuEntry::item("Copy Absolute Path", move || {
-                    copy_text_to_pasteboard(&p3);
-                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&p3)), "doc.on.clipboard");
-                }));
-                e.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])));
+                e.push(file_action_copy_path(&p));
+                e.push(file_action_copy_file(&p));
+                e.push(file_action_reveal(&p));
                 e.push(MenuEntry::Separator);
             }
             e.push(edit("Select All", sel!(selectAll:)));

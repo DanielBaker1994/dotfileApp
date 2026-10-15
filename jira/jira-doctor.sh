@@ -281,10 +281,10 @@ else
 fi
 
 head_ "== logs =="
-# ONE inventory of every log/data file (bin/ws-logs; also standalone). Never a
+# ONE inventory of log files (bin/ws-logs --logs-only; also standalone). Never a
 # failure: missing files are the normal case, so this only ever reports.
 if [ -x "$WS_ROOT/bin/ws-logs" ]; then
-    "$WS_ROOT/bin/ws-logs" --no-header || warn "ws-logs could not list the log files (non-fatal)"
+    "$WS_ROOT/bin/ws-logs" --logs-only --no-header || warn "ws-logs could not list the log files (non-fatal)"
 else
     warn "bin/ws-logs missing — cannot list the log files (restore the repo's bin/)"
 fi

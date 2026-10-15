@@ -27,8 +27,8 @@
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/jira-poll.out.log</string>
+    <string>__WS_CONFIG__/logs/jira-poll-stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/jira-poll.err.log</string>
+    <string>__WS_CONFIG__/logs/jira-poll-stderr.log</string>
 </dict>
 </plist>

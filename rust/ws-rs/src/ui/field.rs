@@ -11,10 +11,60 @@ mod appkit {
     use crate::ui::style;
     use crate::ui::theme::PopupColors;
     use objc2::rc::Retained;
-    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{NSAutoresizingMaskOptions, NSFocusRingType, NSFont, NSTextField, NSView};
     use objc2_app_kit::{NSControlTextEditingDelegate, NSTextFieldDelegate};
+    use objc2_app_kit::{NSFontAttributeName, NSForegroundColorAttributeName};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSAttributedString, NSAttributedStringKey, NSDictionary};
+    use objc2::runtime::AnyObject;
+
+    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
+        unsafe { &*(obj as *const T as *const AnyObject) }
+    }
+
+    /// Build an attributed placeholder forced to the theme's `dim` colour so
+    /// the text does not resolve against the window's effectiveAppearance.
+    pub fn build_attributed_placeholder(
+        colors: &PopupColors,
+        font_size: f64,
+        text: &str,
+    ) -> Retained<NSAttributedString> {
+        let font = NSFont::systemFontOfSize(font_size);
+        let color = colors.dim.to_nscolor();
+        let keys: [&NSAttributedStringKey; 2] =
+            unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+        let objs: [&AnyObject; 2] = [as_any(&*font), as_any(&*color)];
+        let attrs = NSDictionary::from_slices(&keys, &objs);
+        unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(text),
+                Some(&attrs),
+            )
+        }
+    }
+
+    /// Apply an attributed placeholder to a text field's cell (AppKit only
+    /// honours attributed placeholders set on the cell, not the field).
+    pub fn set_attributed_placeholder(field: &NSTextField, attr: &NSAttributedString) {
+        let cell: Option<Retained<AnyObject>> = unsafe { msg_send![field, cell] };
+        if let Some(cell) = cell {
+            let _: () = unsafe { msg_send![&*cell, setPlaceholderAttributedString: &*attr] };
+        }
+    }
+
+    /// One-shot: build an attributed placeholder from the theme's `dim` colour
+    /// and install it on the field's cell.
+    pub fn set_themed_placeholder(
+        field: &NSTextField,
+        colors: &PopupColors,
+        font_size: f64,
+        text: &str,
+    ) {
+        let attr = build_attributed_placeholder(colors, font_size, text);
+        set_attributed_placeholder(field, &attr);
+    }
 
     /// Build the box (`container`) + its field. Size the container; the field
     /// tracks its width and stays vertically centered.
@@ -46,7 +96,8 @@ mod appkit {
         let line = (font.ascender() - font.descender() + font.leading()).ceil() + 2.0;
         field.setFont(Some(&font));
         field.setTextColor(Some(&colors.text.to_nscolor()));
-        field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+        let attr = build_attributed_placeholder(colors, font_size, placeholder);
+        set_attributed_placeholder(&field, &attr);
         if let Some(cell) = field.cell() {
             cell.setScrollable(true);
             cell.setWraps(false);

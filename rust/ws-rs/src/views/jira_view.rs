@@ -942,10 +942,40 @@ impl JiraList {
     }
 
     pub fn open_board(&mut self, id: &str) -> bool {
-        let Some(path) = self.board_path(id) else { return false };
-        if !Path::new(&path).exists() {
+        let Some(cached) = self.board_path(id) else {
+            self.board_error(id, "board path unavailable");
             return false;
-        }
+        };
+        let path = if Path::new(&cached).exists() {
+            cached
+        } else {
+            // No cached tab file yet: build it from the issue cache on demand,
+            // like the sibling pins (`--release-view` / `--label-view` /
+            // `--my-work`). Never fail silently.
+            match crate::views::jira::run_jira_poll(&["--board-view", id], None) {
+                Ok(out) => match (
+                    out.get("dir").and_then(Value::as_str),
+                    out.get("file").and_then(Value::as_str),
+                ) {
+                    (Some(dir), Some(file)) => {
+                        let p = format!("{dir}/{file}");
+                        if !Path::new(&p).exists() {
+                            self.board_error(id, "board not synced yet");
+                            return false;
+                        }
+                        p
+                    }
+                    _ => {
+                        self.board_error(id, "board not synced yet");
+                        return false;
+                    }
+                },
+                Err(err) => {
+                    self.board_error(id, &err);
+                    return false;
+                }
+            }
+        };
         // `openBoard` pins a board that is not pinned yet (the sidebar's
         // "Boards" rows), then shows its cached issues.
         let from_list = self.on_board_list();
@@ -958,6 +988,15 @@ impl JiraList {
         self.compute_board_columns();
         self.back_to_board_list = from_list;
         true
+    }
+
+    /// Surface an on-demand board open failure instead of the old silent
+    /// `false`: the Jira sidebar's status line (always), plus a toast on macOS.
+    fn board_error(&mut self, id: &str, msg: &str) {
+        let text = format!("Board {id}: {msg}");
+        self.status_line = Some((text.clone(), PopupTone::Warning));
+        #[cfg(target_os = "macos")]
+        crate::ui::toast::show(&text, "exclamationmark.triangle");
     }
 
     /// One Esc in the list (`onEscape`): clear the query, else go back from

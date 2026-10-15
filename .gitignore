@@ -3,6 +3,9 @@ kitchen-sink.app/
 .build/
 .agents/
 
+# logs (date-based rolling)
+logs/
+
 # Linux cross-check (bin/linux-check.sh) cargo target (also covered by .build/)
 .build/linux-target/
 

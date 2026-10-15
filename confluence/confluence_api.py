@@ -58,7 +58,10 @@ import jsonmgr  # noqa: E402
 # the favourites key table + the search expand string live in confluence/defaults.json
 _DEFAULTS = jsonmgr.load("confluence/defaults")
 
-jira_api.CURL_LOG = os.path.join(cc.CACHE_DIR, "curl.log")
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pylib"))
+import log_hub  # noqa: E402
+jira_api.CURL_LOG = str(log_hub.log_path("confluence-curl"))
 COOLDOWN_FILE = os.path.join(cc.CACHE_DIR, "ratelimit.json")
 USERS_FILE = os.path.join(cc.CACHE_DIR, "users.json")
 HL_OPEN, HL_CLOSE = "@@@hl@@@", "@@@endhl@@@"

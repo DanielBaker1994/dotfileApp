@@ -1113,9 +1113,7 @@ mod macos {
 
         // Search / query field.
         let search = NSTextField::textFieldWithString(&NSString::from_str(query), mtm);
-        search.setPlaceholderString(Some(&NSString::from_str(
-            "",
-        )));
+        crate::ui::field::set_themed_placeholder(&search, colors, 13.0, "");
         search.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         search.setBezeled(true);
         search.setEditable(true);

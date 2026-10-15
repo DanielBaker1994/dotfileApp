@@ -210,4 +210,37 @@ clear_cstemp
 [ "$DIST" = 1 ] && exit 0
 
 "$DIR/grant-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true
+
+# Clean up orphaned log files from their old ~/.cache locations
+for f in \
+    "$HOME/.cache/ws-crash.log" \
+    "$HOME/.cache/ws-aero.log" \
+    "$HOME/.cache/aero-debug" \
+    "$HOME/.cache/ws-auth-debug" \
+    "$HOME/.cache/ws-auth.log" \
+    "$HOME/.cache/ws-voice-debug.log" \
+    "$HOME/.cache/jira/poll.log" \
+    "$HOME/.cache/jira/debug.log" \
+    "$HOME/.cache/jira/debug.log.1" \
+    "$HOME/.cache/jira/debug.log.2" \
+    "$HOME/.cache/jira/debug.log.3" \
+    "$HOME/.cache/jira/debug.log.4" \
+    "$HOME/.cache/jira/debug.log.5" \
+    "$HOME/.cache/jira/curl.log" \
+    "$HOME/.cache/confluence/debug.log" \
+    "$HOME/.cache/confluence/debug.log.1" \
+    "$HOME/.cache/confluence/debug.log.2" \
+    "$HOME/.cache/confluence/curl.log" \
+    "$HOME/.cache/notifications/poll.log" \
+    "$HOME/.cache/kitchen-sink/settings-hub.log" \
+    "/tmp/ws-debug.log" \
+    "${TMPDIR:-/tmp}/ws-launch.log" \
+    "/tmp/jira-poll.out.log" \
+    "/tmp/jira-poll.err.log"; do
+    [[ -f "$f" ]] && rm -f "$f"
+done
+
+# Echo the log directory path
+echo "📝 Log directory: $ROOT/logs"
+
 exit 0

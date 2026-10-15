@@ -33,10 +33,10 @@ palette-first = "filefast, paths, text-table, prettyprint"
 switcher-width = 760
 detail-name = "jira-detail"
 
-crash-log = "~/.cache/ws-crash.log"
-
-debug-flag = "~/.cache/aero-debug"
-aero-log = "~/.cache/ws-aero.log"
+# Log paths: all logs now live in logs/YYYY_MM_DD/*.log (see pylib/log_hub.py)
+# These config keys are kept for compatibility but point to the repo's logs/ dir.
+# Log paths are managed by pylib/log_hub.py
+# All logs go to logs/YYYY_MM_DD/*.log (date-based rolling)
 
 voice-locale = "en-US"
 screenshot-apps = "org.flameshot, pl.maketheweb.cleanshotx, cc.ffitch.shottr, com.skitch.skitch"
@@ -219,7 +219,7 @@ image-rows = 10
 
 start-drawer = "none"
 font-size = 22
-sidebar-width = 234
+sidebar-width = 263.5
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -250,14 +250,14 @@ start = "recent"
 
 sort = "created"
 sort-order = "desc"
-background-color = "192330"
-header-color = "0F141C"
-browser-background = "99171A20"
-text-color = "CDCECF"
-dim-color = "AEAFB0"
-highlight-color = "2B3B51"
-accent-color = "719CD6"
-palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
+background-color = 262335
+header-color = 171520
+browser-background = 99262335
+text-color = "F0EFF5"
+dim-color = "9D98C4"
+highlight-color = 463465
+accent-color = "FF7EDB"
+palette = "36F9F6, 72F1B8, FEDE5D, FE4450, 03EDF9"
 
 [jira]
 enabled = true
@@ -267,13 +267,13 @@ type = "list"
 name = "jira"
 title = ""
 
-header-color = "0F141C"
-background-color = "192330"
-text-color = "CDCECF"
-dim-color = "AEAFB0"
-highlight-color = "2B3B51"
-accent-color = "719CD6"
-palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
+header-color = "19172A"
+background-color = 232136
+text-color = "E0DEF4"
+dim-color = "908CAA"
+highlight-color = "44415A"
+accent-color = "EA9A97"
+palette = "C4A7E7, 9CCFD8, F6C177, EB6F92, 3E8FB0"
 
 sources = "~/.cache/kitchen-sink/jira_json"
 
@@ -301,7 +301,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 168
+sidebar-width = 273.9
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -326,7 +326,7 @@ width = 1400
 height = 900
 
 split = 0.42
-sidebar-width = 210
+sidebar-width = 256.6
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -632,8 +632,69 @@ enable-label = "Enable Jira"
 disable-label = "Disable Jira"
 force-poll-label = "Force Poll"
 stop-poll-label = "Stop Poll"
-setup-button-label = "Setup…"
 refresh-button-label = "Refresh"
+poll-jobs-title = "Poll jobs"
+files-title = "Files"
+loading = "Loading…"
+loading-jobs = "Loading poll jobs…"
+no-jobs = "No poll jobs configured — set the connection above."
+loading-paths = "Loading paths…"
+job-detail-title = "Job"
+job-select-hint = "Select a job on the left to edit it."
+job-schedule-label = "Schedule"
+job-schedule-placeholder = "e.g. 10m, 1h, 1d"
+job-enabled-label = "Enabled"
+job-jql-label = "JQL"
+job-jql-placeholder = "extra JQL (blank = shared sync)"
+job-args-label = "Args"
+job-args-placeholder = "key=value, key=value"
+job-columns-label = "Columns"
+job-columns-placeholder = "field:Title:width, … (or JSON)"
+job-force-label = "Poll Now"
+job-save-label = "Save"
+job-columns-button-label = "Set Columns"
+job-delete-label = "Delete"
+job-saved = "✓ saved {name}"
+job-deleted = "✓ deleted {name}"
+job-polled = "✓ polled {name}"
+job-running = "Running {name}…"
+job-failed = "✗ {error}"
+setup-section-title = "Connection / Setup"
+setup-intro = "Paste your token — the auth type is detected on Test / Save. Server / Data Center personal access tokens go out as Authorization: Bearer; a Jira Cloud API token also needs the account email."
+setup-site-label = "Site URL"
+setup-site-placeholder = "https://jira.example.com"
+setup-email-label = "Email (Cloud only)"
+setup-email-placeholder = "only for *.atlassian.net — blank for a personal access token"
+setup-token-label = "Token"
+setup-token-placeholder = "personal access token / API token"
+setup-token-kept = "token set — leave blank to keep it"
+setup-projects-label = "Projects in scope"
+setup-projects-placeholder = "e.g. SAM1, KAN — required; every query stays inside these"
+setup-max-label = "Max results"
+setup-max-placeholder = "25"
+setup-max-default = 25
+setup-test-label = "Test Connection"
+setup-curl-label = "Copy curl"
+setup-curl-tooltip = "Copy the login test (GET /rest/api/2/myself) as a curl command"
+setup-save-label = "Save & Enable"
+setup-auth-basic = "email + API token (Cloud)"
+setup-auth-bearer = "Bearer token (Server / Data Center)"
+setup-testing = "Testing (detecting the auth type)…"
+setup-detecting = "Detecting the auth type…"
+setup-connected = "✓ Connected as {user} — {auth}"
+setup-test-failed = "✗ {error}"
+setup-detect-hint = " — Copy curl to reproduce in a terminal"
+setup-site-required = "✗ Site URL must start with https://"
+setup-bad-keys = "✗ Not a project key: {keys} — use keys like SAM1, KAN"
+setup-need-project = "✗ Enter at least one project in scope — every query is limited to these projects"
+setup-save-failed = "✗ save failed: {error}"
+setup-projects-failed = "✗ projects in scope not saved: {error}"
+setup-login-failed = "✗ saved, but login failed: {error} — polling stays off"
+setup-enabling = "✓ Connected as {user} — {auth} — enabling…"
+setup-curl-copied = "curl copied (includes the token) — paste into a terminal to test the login."
+setup-curl-failed = "✗ {error}"
+setup-saves-to = "Saves to {path} (chmod 600)."
+setup-env-note = "Using JIRA_{key} from the environment — save will persist it into config.json."
 
 [notifications]
 enabled = true

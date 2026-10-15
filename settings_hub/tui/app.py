@@ -738,7 +738,12 @@ class View:
 # ------------------------------------------------------------------ run
 def _log_time(msg: str):
     try:
-        with open(os.path.join(paths.cache_dir(), "settings-hub.log"), "a", encoding="utf-8") as fh:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "pylib"))
+        import log_hub
+        log_file = str(log_hub.log_path("settings-hub"))
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as fh:
             fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass

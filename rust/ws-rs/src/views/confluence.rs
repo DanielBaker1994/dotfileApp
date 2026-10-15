@@ -2103,7 +2103,7 @@ pub mod macos {
         let field_w = (strip_w - 24.0 - 360.0).max(80.0);
 
         let search = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        search.setPlaceholderString(Some(&NSString::from_str("Search Confluence")));
+        crate::ui::field::set_themed_placeholder(&search, &colors, 13.0, "Search Confluence");
         search.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         search.setBezeled(true);
         search.setEditable(true);
