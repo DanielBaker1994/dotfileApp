@@ -1,8 +1,7 @@
 //! Menu-bar menu, ported from `kitchen_sink.swift`
 //! (`AppDelegate.installStatusMenus` / `installMainMenu`, `MenuTarget`,
-//! `menuNeedsUpdate`, `SwitcherController.addGlobalWindowItems`, the
-//! `globalGroupTag` marker, `headerStyleMenuItem`,
-//! `showJiraDashboard`, `toggleJiraPoll`).
+//! `menuNeedsUpdate`, `headerStyleMenuItem`, `showJiraDashboard`,
+//! `toggleJiraPoll`).
 //!
 //! The structure is a plain [`MenuSpec`] so it can be checked without AppKit.
 //! The AppKit half ([`build_status_menu`], [`install_status_item`],
@@ -10,14 +9,11 @@
 //! through a [`MenuTarget`] `define_class!` callback. One [`MenuTarget`]
 //! drives both the status item and the main menu's File ▸ "Reset Window Size"
 //! row; File ▸ "Close Window" stays on the responder chain. The Swift
-//! controller methods (`toggleJiraPoll`, `showJiraDashboard`,
-//! `addGlobalWindowItems`…) don't exist in the Rust port yet: the callback the
-//! host passes is where the ported ones are dispatched.
+//! controller methods (`toggleJiraPoll`, `showJiraDashboard`…) don't exist in
+//! the Rust port yet: the callback the host passes is where the ported ones
+//! are dispatched.
 
 use crate::ui::theme::HeaderStyle;
-
-/// Swift `MenuTarget.globalGroupTag` — the dynamic insertion marker.
-pub const GLOBAL_GROUP_TAG: i64 = 7402;
 
 /// The stable, testable id of every menu item (mirrors the Swift selector).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,10 +22,6 @@ pub enum MenuAction {
     ResetWindowSize,
     CloseWindow,
     Quit,
-    ToggleTerminal,
-    ToggleNotes,
-    ToggleJiraWindow,
-    OpenWindow,
 }
 
 impl MenuAction {
@@ -41,10 +33,6 @@ impl MenuAction {
             MenuAction::ResetWindowSize => 2,
             MenuAction::CloseWindow => 3,
             MenuAction::Quit => 4,
-            MenuAction::ToggleTerminal => 5,
-            MenuAction::ToggleNotes => 6,
-            MenuAction::ToggleJiraWindow => 7,
-            MenuAction::OpenWindow => 8,
             MenuAction::SetHeaderStyle(style) => {
                 let idx = HeaderStyle::ALL.iter().position(|s| *s == style).unwrap_or(0);
                 Self::HEADER_STYLE_BASE + idx as i64
@@ -59,10 +47,6 @@ impl MenuAction {
             2 => MenuAction::ResetWindowSize,
             3 => MenuAction::CloseWindow,
             4 => MenuAction::Quit,
-            5 => MenuAction::ToggleTerminal,
-            6 => MenuAction::ToggleNotes,
-            7 => MenuAction::ToggleJiraWindow,
-            8 => MenuAction::OpenWindow,
             i if i >= Self::HEADER_STYLE_BASE => {
                 let idx = (i - Self::HEADER_STYLE_BASE) as usize;
                 MenuAction::SetHeaderStyle(*HeaderStyle::ALL.get(idx)?)
@@ -163,6 +147,7 @@ impl MenuItemSpec {
 pub struct SubmenuSpec {
     pub title: String,
     pub tag: Option<i64>,
+    pub tooltip: Option<String>,
     pub items: Vec<MenuNode>,
 }
 
@@ -228,31 +213,22 @@ impl MenuSpec {
     }
 }
 
-/// The live values the menu reflects (mirrors the globals `menuNeedsUpdate`
-/// reads: `HeaderStyle.current`, `jiraEnabledInConfig()`, and the window shown
-/// flags).
+/// The live values the menu reflects (mirrors the global `menuNeedsUpdate`
+/// reads: `HeaderStyle.current`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuSettings {
     pub header_style: HeaderStyle,
-    pub jira_enabled: bool,
-    pub terminal_shown: bool,
-    pub notes_shown: bool,
-    pub jira_shown: bool,
 }
 
 impl Default for MenuSettings {
     fn default() -> Self {
         MenuSettings {
             header_style: HeaderStyle::Flat,
-            jira_enabled: true,
-            terminal_shown: false,
-            notes_shown: false,
-            jira_shown: false,
         }
     }
 }
 
-/// Swift `HeaderStyle.allCases` → the "Header Style ▸" rows.
+/// Swift `HeaderStyle.allCases` → the "Header Bar Style ▸" rows.
 fn header_style_submenu(current: HeaderStyle) -> SubmenuSpec {
     let items = HeaderStyle::ALL
         .iter()
@@ -264,54 +240,27 @@ fn header_style_submenu(current: HeaderStyle) -> SubmenuSpec {
         })
         .collect();
     SubmenuSpec {
-        title: "Header Style".to_string(),
+        title: "Header Bar Style".to_string(),
         tag: None,
+        tooltip: Some(
+            "The header bar's shape/treatment — separate from the colour Theme presets"
+                .to_string(),
+        ),
         items,
     }
 }
 
-/// Swift `addGlobalWindowItems`: the "Global Window Options ▸" submenu. Its
-/// only child is the "Header Style ▸" submenu — the Swift "Hide When Focus Is
-/// Lost" toggle is not ported (the AeroSpace focus watcher is missing; see
-/// "Known gaps" in `AGENTS.md`).
-fn global_window_options(settings: &MenuSettings) -> SubmenuSpec {
-    SubmenuSpec {
-        title: "Global Window Options".to_string(),
-        tag: Some(GLOBAL_GROUP_TAG),
-        items: vec![MenuNode::Submenu(header_style_submenu(settings.header_style))],
-    }
-}
-
-/// Build the menu-bar menu (`installStatusMenus` + `addGlobalWindowItems`).
+/// Build the menu-bar menu (`installStatusMenus`).
 ///
 /// Only the rows whose actions are actually wired (`main.rs::status_menu_action`)
 /// are kept — the Swift menu's dead placeholder rows (Setup, Compare,
 /// Confluence, AI, Health Checks, Reset Defaults, Vim Mode, Config Issues,
-/// Jira poll/dashboard) are gone; the palette covers those features.
+/// Jira poll/dashboard) and its per-view window toggles are gone; the palette
+/// and the header nav cover those features.
 pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
     let mut items = Vec::new();
 
-    items.push(MenuNode::Submenu(global_window_options(settings)));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ToggleJiraWindow, "Toggle Jira Window")
-            .key("j", Modifiers::CMD)
-            .checked(settings.jira_shown)
-            .hidden(!settings.jira_enabled),
-    ));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ToggleTerminal, "Toggle Terminal")
-            .key("t", Modifiers::CMD_OPT)
-            .checked(settings.terminal_shown),
-    ));
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ToggleNotes, "Toggle Notes")
-            .key("n", Modifiers::CMD)
-            .checked(settings.notes_shown),
-    ));
+    items.push(MenuNode::Submenu(header_style_submenu(settings.header_style)));
     items.push(MenuNode::Separator);
 
     items.push(MenuNode::Item(
@@ -319,10 +268,6 @@ pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
         // window handles it), so only one row owns it.
         MenuItemSpec::action(MenuAction::CloseWindow, "Close Window"),
     ));
-    items.push(MenuNode::Separator);
-
-    // The app's own window (the Hyper+S palette's last row, "Kitchen Sink").
-    items.push(MenuNode::Item(MenuItemSpec::action(MenuAction::OpenWindow, "Kitchen Sink")));
     items.push(MenuNode::Separator);
 
     items.push(MenuNode::Item(
@@ -443,6 +388,9 @@ mod appkit {
                 if let Some(tag) = sub.tag {
                     item.setTag(tag as isize);
                 }
+                if let Some(tip) = &sub.tooltip {
+                    item.setToolTip(Some(&NSString::from_str(tip)));
+                }
                 let submenu = NSMenu::new(mtm);
                 submenu.setAutoenablesItems(false);
                 for child in &sub.items {
@@ -517,8 +465,8 @@ mod appkit {
     /// `installStatusMenus`: a square status item whose menu is `spec`.
     ///
     /// `handler` is the click-routing callback — it replaces the Swift
-    /// `MenuTarget` `@objc` methods (`toggleJiraPoll`, `showJiraDashboard`,
-    /// `addGlobalWindowItems`…), which the Rust port doesn't have yet.
+    /// `MenuTarget` `@objc` methods (`toggleJiraPoll`, `showJiraDashboard`…),
+    /// which the Rust port doesn't have yet.
     pub fn install_status_item(
         mtm: MainThreadMarker,
         spec: &MenuSpec,
@@ -651,10 +599,6 @@ mod tests {
             MenuAction::ResetWindowSize,
             MenuAction::CloseWindow,
             MenuAction::Quit,
-            MenuAction::ToggleTerminal,
-            MenuAction::ToggleNotes,
-            MenuAction::ToggleJiraWindow,
-            MenuAction::OpenWindow,
         ];
         let mut seen = std::collections::HashSet::new();
         for action in actions {
@@ -682,44 +626,22 @@ mod tests {
         let spec = build_menu_spec(&MenuSettings::default());
         assert_eq!(
             spec.top_titles(),
-            vec![
-                "Global Window Options",
-                "—",
-                "Toggle Jira Window",
-                "—",
-                "Toggle Terminal",
-                "Toggle Notes",
-                "—",
-                "Close Window",
-                "—",
-                "Kitchen Sink",
-                "—",
-                "Quit",
-            ]
+            vec!["Header Bar Style", "—", "Close Window", "—", "Quit"]
         );
+        // The header-style submenu is a direct top-level node now that the
+        // single-child "Global Window Options" wrapper is gone.
+        assert!(matches!(spec.items[0], MenuNode::Submenu(_)));
 
         // Every row is actionable and wired to a handler in `main.rs`.
         let actions: Vec<MenuAction> = spec.flatten().iter().map(|item| item.action).collect();
-        for required in [
-            MenuAction::ToggleJiraWindow,
-            MenuAction::ToggleTerminal,
-            MenuAction::ToggleNotes,
-            MenuAction::CloseWindow,
-            MenuAction::OpenWindow,
-            MenuAction::Quit,
-        ] {
+        for required in [MenuAction::CloseWindow, MenuAction::Quit] {
             assert!(actions.contains(&required), "missing {required:?}");
         }
-        // The two documented submenus exist (Header Style nested).
-        assert!(spec.find_submenu("Global Window Options").is_some());
-        assert!(spec.find_submenu("Header Style").is_some());
+        // The one documented submenu exists.
+        assert!(spec.find_submenu("Header Bar Style").is_some());
 
         let pos = |a: MenuAction| actions.iter().position(|x| *x == a).unwrap();
-        assert!(pos(MenuAction::ToggleJiraWindow) < pos(MenuAction::ToggleTerminal));
-        assert!(pos(MenuAction::ToggleTerminal) < pos(MenuAction::ToggleNotes));
-        assert!(pos(MenuAction::ToggleNotes) < pos(MenuAction::CloseWindow));
-        assert!(pos(MenuAction::CloseWindow) < pos(MenuAction::OpenWindow));
-        assert!(pos(MenuAction::OpenWindow) < pos(MenuAction::Quit));
+        assert!(pos(MenuAction::CloseWindow) < pos(MenuAction::Quit));
 
         // ⌘W is owned by File ▸ "Close Window" (`install_main_menu`), so the
         // status row carries no key equivalent; the reset row lives only in
@@ -742,18 +664,13 @@ mod tests {
         };
         let spec = build_menu_spec(&settings);
 
-        let global = spec
-            .find_submenu("Global Window Options")
-            .expect("global window options submenu");
-        assert_eq!(global.tag, Some(GLOBAL_GROUP_TAG));
-        // Header Style is the submenu's only child now that the
-        // hide-on-focus-loss toggle is gone.
-        assert_eq!(global.items.len(), 1);
-        assert!(matches!(global.items[0], MenuNode::Submenu(_)));
-
         let header = spec
-            .find_submenu("Header Style")
-            .expect("header style submenu");
+            .find_submenu("Header Bar Style")
+            .expect("header bar style submenu");
+        assert_eq!(
+            header.tooltip.as_deref(),
+            Some("The header bar's shape/treatment — separate from the colour Theme presets")
+        );
         assert_eq!(header.items.len(), HeaderStyle::ALL.len());
         let rows: Vec<&MenuItemSpec> = header
             .items
@@ -768,28 +685,6 @@ mod tests {
             assert_eq!(rows[i].title, style.label());
             assert_eq!(rows[i].checked, *style == HeaderStyle::Aurora);
         }
-    }
-
-    #[test]
-    fn jira_row_visibility_follows_settings() {
-        let by_action = |spec: &MenuSpec, action: MenuAction| -> MenuItemSpec {
-            spec.flatten()
-                .into_iter()
-                .find(|item| item.action == action)
-                .unwrap_or_else(|| panic!("missing {action:?}"))
-                .clone()
-        };
-        let off = build_menu_spec(&MenuSettings {
-            jira_enabled: false,
-            ..MenuSettings::default()
-        });
-        assert!(by_action(&off, MenuAction::ToggleJiraWindow).hidden);
-
-        let on = build_menu_spec(&MenuSettings {
-            jira_enabled: true,
-            ..MenuSettings::default()
-        });
-        assert!(!by_action(&on, MenuAction::ToggleJiraWindow).hidden);
     }
 
     #[cfg(target_os = "macos")]

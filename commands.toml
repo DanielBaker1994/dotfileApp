@@ -193,7 +193,8 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 
 [notes]
 enabled = true
-in-palette = false
+in-palette = true
+label = "Notes"
 type = "note"
 name = "notes"
 pdf-css = "~/.dotfiles/markdown_generator/friendly_document_styling.css"
@@ -232,7 +233,8 @@ font = "Hack Nerd Font Mono"
 [files]
 enabled = true
 aliases = "Finder"
-in-palette = false
+in-palette = true
+label = "Files"
 type = "files"
 name = "files"
 title = ""
@@ -259,7 +261,8 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
 [jira]
 enabled = true
-in-palette = false
+in-palette = true
+label = "Jira"
 type = "list"
 name = "jira"
 title = ""
@@ -316,7 +319,8 @@ table-sort = "project:desc"
 
 [confluence]
 enabled = true
-in-palette = false
+in-palette = true
+label = "Confluence"
 
 width = 1400
 height = 900
@@ -328,7 +332,8 @@ sidebar-max-width = 480
 
 [ai]
 enabled = true
-in-palette = false
+in-palette = true
+label = "AI"
 fm-bin = "/usr/bin/fm"
 
 pandoc-bin = "/opt/homebrew/bin/pandoc"
@@ -352,7 +357,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
 [compare]
 enabled = true
-in-palette = false
+in-palette = true
 label = "Compare"
 sidebar-width = 210
 sidebar-min-width = 140

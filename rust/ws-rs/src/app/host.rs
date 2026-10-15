@@ -7102,8 +7102,7 @@ mod daemon_ui {
             if t.is_folder {
                 e.push(MenuEntry::item(if t.expanded { "Collapse" } else { "Expand" }, open));
             } else {
-                let title = if t.has_left && t.has_right { "Open (Compare)" } else { "Open in Text Compare" };
-                e.push(MenuEntry::item(title, open));
+                e.push(MenuEntry::item("Open in Text Compare", open));
             }
             e.push(MenuEntry::Separator);
             for (title, from, move_, enabled) in [
@@ -9552,7 +9551,7 @@ mod daemon_ui {
             let mut out = Vec::new();
             if v == SlotView::Jira {
                 let w1 = objc2::rc::Weak::from_retained(&self.retain());
-                out.push(MenuEntry::item("Search Jira…  ⌘F", move || {
+                out.push(MenuEntry::item("Search Jira…", move || {
                     if let Some(ui) = w1.load() {
                         ui.jira_toggle_search();
                     }
@@ -9602,15 +9601,21 @@ mod daemon_ui {
                     }
                 }));
                 out.push(MenuEntry::Separator);
-                for (t, m) in [("Copy for Outlook", PaneMode::Outlook), ("Copy for Webex", PaneMode::Webex)] {
-                    let w = wk();
-                    out.push(MenuEntry::item(t, move || {
-                        if let Some(ui) = w.load() {
-                            ui.ai_surface(|a| a.model.set_mode(m));
-                            ui.ai_event(AIEvent::Copy);
-                        }
-                    }));
-                }
+                let w = wk();
+                let copy_outlook = MenuEntry::item("Outlook", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_surface(|a| a.model.set_mode(PaneMode::Outlook));
+                        ui.ai_event(AIEvent::Copy);
+                    }
+                });
+                let w = wk();
+                let copy_webex = MenuEntry::item("Webex", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_surface(|a| a.model.set_mode(PaneMode::Webex));
+                        ui.ai_event(AIEvent::Copy);
+                    }
+                });
+                out.push(MenuEntry::submenu("Copy for", vec![copy_outlook, copy_webex]));
                 let w = wk();
                 out.push(MenuEntry::item("Copy as Markdown", move || {
                     if let Some(ui) = w.load() {
@@ -11128,35 +11133,27 @@ mod daemon_ui {
             let mut e = vec![
                 if selection.is_some() { edit("Copy", sel!(copy:)) } else { MenuEntry::disabled("Copy") },
                 edit("Paste", sel!(paste:)),
-                MenuEntry::Separator,
             ];
-            match path {
-                Some(p) => {
-                    let (p1, p2, p3, p4, w) = (p.clone(), p.clone(), p.clone(), p.clone(), weak.clone());
-                    if !std::path::Path::new(&p).is_dir() {
-                        e.push(MenuEntry::item("Open in Notes", move || {
-                            if let Some(ui) = w.load() {
-                                ui.open_in_notes(&p1);
-                            }
-                        }));
-                    }
-                    e.push(MenuEntry::item("Copy File", move || {
-                        copy_files_toast(&[p2]);
+            if let Some(p) = path {
+                e.push(MenuEntry::Separator);
+                let (p1, p2, p3, p4, w) = (p.clone(), p.clone(), p.clone(), p.clone(), weak.clone());
+                if !std::path::Path::new(&p).is_dir() {
+                    e.push(MenuEntry::item("Open in Notes", move || {
+                        if let Some(ui) = w.load() {
+                            ui.open_in_notes(&p1);
+                        }
                     }));
-                    e.push(MenuEntry::item("Copy Absolute Path", move || {
-                        copy_text_to_pasteboard(&p3);
-                        crate::ui::toast::show(&format!("Copied {}", tilde_path(&p3)), "doc.on.clipboard");
-                    }));
-                    e.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])));
                 }
-                None => {
-                    for t in ["Open in Notes", "Copy File", "Copy Absolute Path", "Reveal in Files"] {
-                        e.push(MenuEntry::disabled(t));
-                    }
-                    e.push(MenuEntry::disabled("Select a file path to use these"));
-                }
+                e.push(MenuEntry::item("Copy File", move || {
+                    copy_files_toast(&[p2]);
+                }));
+                e.push(MenuEntry::item("Copy Absolute Path", move || {
+                    copy_text_to_pasteboard(&p3);
+                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&p3)), "doc.on.clipboard");
+                }));
+                e.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])));
+                e.push(MenuEntry::Separator);
             }
-            e.push(MenuEntry::Separator);
             e.push(edit("Select All", sel!(selectAll:)));
             crate::ui::menu_kit::popup_at(e, x, y);
         }
@@ -13522,9 +13519,12 @@ enabled = true
 
     #[test]
     fn palette_mirrors_commands_toml_order_and_gates() {
-        // Mirrors the shipped commands.toml: `in-palette = false` views stay
-        // out, palette-first rows lead (the live Swift daemon lists exactly
-        // this sequence).
+        // Mirrors the shipped commands.toml: the views are listed (their
+        // labels show), `in-palette = false` sections (screenshot / terminal)
+        // stay out, and palette-first rows lead (the live daemon now lists the
+        // views as well as the tools). The skip-listed views (confluence / ai /
+        // compare) are added by their dedicated blocks, so each must appear
+        // exactly once.
         let fixture = "\
 [filefast]
 enabled = true
@@ -13536,11 +13536,13 @@ label = \"Find Recent Files\"
 
 [notes]
 enabled = true
-in-palette = false
+in-palette = true
+label = \"Notes\"
 
 [jira]
 enabled = true
-in-palette = false
+in-palette = true
+label = \"Jira\"
 
 [prettyprint]
 enabled = true
@@ -13548,15 +13550,27 @@ label = \"Pretty Print\"
 
 [screenshot]
 enabled = true
-label = \"Screenshot\"
+in-palette = false
 
 [terminal]
 enabled = true
-label = \"Terminal\"
+in-palette = false
 
 [health-checks]
 enabled = true
 label = \"Health Checks\"
+
+[confluence]
+enabled = true
+label = \"Confluence\"
+
+[ai]
+enabled = true
+label = \"AI\"
+
+[compare]
+enabled = true
+label = \"Compare\"
 ";
         let mut c = controller();
         c.register_views_from_text(fixture);
@@ -13568,12 +13582,24 @@ label = \"Health Checks\"
                 "Create File",
                 "Find Recent Files",
                 "Pretty Print",
-                "Screenshot",
-                "Terminal",
+                "Notes",
+                "Jira",
                 "Health Checks",
+                "Confluence",
+                "AI",
+                "Compare",
                 "Kitchen Sink",
             ]
         );
+        // The dedicated `listed()` blocks are the only place a view could be
+        // added twice — assert each one shows up exactly once.
+        for title in ["Notes", "Jira", "Confluence", "AI", "Compare"] {
+            assert_eq!(
+                titles.iter().filter(|t| *t == title).count(),
+                1,
+                "{title} must appear exactly once"
+            );
+        }
     }
 
     #[test]

@@ -31,13 +31,13 @@ pub const TYPES: [(&str, &str); 6] = [
     ("Everything", "page,blogpost,attachment,comment"),
 ];
 pub const MODIFIED: [(&str, &str); 5] = [
-    ("any time", ""),
-    ("past 7 days", "7d"),
-    ("past 30 days", "30d"),
-    ("past 90 days", "90d"),
-    ("past year", "1y"),
+    ("Any time", ""),
+    ("Past 7 days", "7d"),
+    ("Past 30 days", "30d"),
+    ("Past 90 days", "90d"),
+    ("Past year", "1y"),
 ];
-pub const SORTS: [(&str, &str); 2] = [("relevance", "relevance"), ("recently modified", "recent")];
+pub const SORTS: [(&str, &str); 2] = [("Relevance", "relevance"), ("Recently modified", "recent")];
 
 pub fn title_for(items: &[(&str, &str)], value: &str) -> String {
     items.iter().find(|(_, v)| *v == value).map(|(t, _)| t.to_string()).unwrap_or_else(|| value.to_string())
@@ -939,7 +939,12 @@ mod tests {
     #[test]
     fn choice_titles_map_values() {
         assert_eq!(title_for(&TYPES, "page,blogpost"), "Pages + blogs");
-        assert_eq!(title_for(&MODIFIED, "30d"), "past 30 days");
+        assert_eq!(title_for(&MODIFIED, "30d"), "Past 30 days");
+        // The default (empty wire value) is the label the chip shows at rest.
+        assert_eq!(title_for(&MODIFIED, ""), "Any time");
+        assert_eq!(title_for(&SORTS, "relevance"), "Relevance");
+        assert_eq!(title_for(&SORTS, "recent"), "Recently modified");
+        // An unknown value falls back to the raw value.
         assert_eq!(title_for(&SORTS, "x"), "x");
     }
 

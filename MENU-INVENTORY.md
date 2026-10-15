@@ -66,30 +66,23 @@ and there is no dead item anywhere. (Fixed — see §8 remediation log.)
 
 ## 2. Status-item menu (☰) — `build_menu_spec`, `app/menu.rs:300-340`
 
-Spec lives in `MenuSettings` (`menu.rs:234`); the click handler is `status_menu_action`
-(`main.rs:259-285`). The **same `NSMenu`** is what the header icon pops as "App Menu…".
+Spec lives in `MenuSettings` (`menu.rs`); the click handler is `status_menu_action`
+(`main.rs`). After round 2 the status menu is deliberately minimal — the views and the
+"Kitchen Sink" window row live in the palette instead (§8b).
 
 ```
-Global Window Options ▸            (menu.rs:277, tag = GLOBAL_GROUP_TAG 7402)
-  Header Style ▸                   (7 rows; now its only child)  menu.rs:257-272   → header-style:<x>
-     Quiet / Flat / Accent Edge / Accent Stripe / Tinted / Glow / Aurora   (theme.rs label())
+Header Bar Style ▸   (7 rows: Quiet / Flat / Accent Edge / Accent Stripe / Tinted / Glow / Aurora)
 ──────────
-Toggle Jira Window      ⌘J        (checked; hidden when Jira off)  menu.rs:307  → hotkey(Jira)
+Close Window         (no key; ⌘W lives on File ▸ Close Window)
 ──────────
-Toggle Terminal         ⌥⌘T       (checked)        menu.rs:315  → do_action("toggle-terminal")
-Toggle Notes            ⌘N        (checked)        menu.rs:320  → hotkey(Notes)
-──────────
-Close Window            (no key)  menu.rs:314  → controller.hide("menu")   [⌘W lives on File ▸ Close Window]
-──────────
-Kitchen Sink                      menu.rs:332  → controller.toggle()
-──────────
-Quit                    ⌘Q        menu.rs:336  → NSApplication.terminate
+Quit                 ⌘Q
 ```
 
-Note the doc-comment at `menu.rs:294-299`: the Swift menu's dead placeholder rows were
-deliberately dropped because *"the palette covers those features."* Three view toggles
-survived anyway. The "Hide When Focus Is Lost" row (id 1) has since been removed too — the
-feature is not ported, so the id is retired (see §8).
+History: the Swift menu's dead placeholder rows were dropped because *"the palette covers those
+features"*, and the "Hide When Focus Is Lost" row (id 1) was removed because the feature is not
+ported (id retired — §8b). Round 2 then removed the three view toggles, the "Kitchen Sink" row and
+the single-child "Global Window Options" wrapper, and renamed "Header Style" → "Header Bar Style"
+(§8b). The status menu is no longer nested inside the header icon menu (F2).
 
 ---
 
@@ -107,8 +100,8 @@ Only three views add rows today. Files, Notes, Paths, Terminal, Compare add **no
 
 **Jira** (`host.rs:9366-9387`)
 ```
-Search Jira…  ⌘F                    host.rs:9368
-Group By ▸                          host.rs:9373  (see §5, reused)
+Search Jira…                        host.rs  (the ⌘F hint was dropped in round 2 — §8b)
+Group By ▸                          host.rs  (see §5, reused)
 ──────────
 Import Favourite Filters            host.rs:9378
 Open Jira Config Window             host.rs:9384
@@ -121,9 +114,8 @@ Edit “{rule}” in Notes              host.rs:9401  (only when a rule is selec
 Open Rules Folder                   host.rs:9407
 Reload Rules                         host.rs:9412
 ──────────
-Copy for Outlook                    host.rs:9422
-Copy for Webex                      host.rs:9422
-Copy as Markdown                    host.rs:9432
+Copy for ▸                          host.rs  (Outlook / Webex — one submenu since round 2)
+Copy as Markdown                    host.rs
 Copy Command                        host.rs:9443
 ```
 
@@ -222,7 +214,7 @@ Copy File / Copy Absolute Path / ── / Open in Notes / Reveal in Files   host
   ```
 - **Prose reading view** (`ProseWebView.rightMouseDown` → `show_context_menu`
   `views/notes_prose.rs:472`, also wired for the pop-out `notes.rs:3061`):
-  `Copy File Path / Copy PDF Path` `notes_prose.rs:480-487`.
+  `Copy Absolute Path / Copy PDF Path` `notes_prose.rs` (renamed from "Copy File Path" in round 2 — §8b).
 - **Vim image overlay** (`vim_image_menu` `views/notes.rs:2705`):
   `Open Full Size / ── / Copy Image Path / Copy Image / Reveal in Files` `notes.rs:2716-2727`.
 - **Notes-drawer terminal** (`terminal_right_click` `host.rs:10846` → `terminal_menu`
@@ -242,7 +234,7 @@ Copy File / Copy Absolute Path / ── / Open in Notes / Reveal in Files   host
   ── / Remove from Recent / Remove All Missing (n) / Clear All Recents` `host.rs:6845-6877`.
 - **Folder tree** (`compare_folder_menu` `host.rs:6952`, `popup` `:7095`):
   ```
-  Collapse·Expand / Open (Compare)|Open in Text Compare      host.rs:6988-6991
+  Collapse·Expand / Open in Text Compare                    host.rs  (one stable label since round 2)
   ──────────
   Copy to Right  ⌥→ / Copy to Left  ⌥← / Move to Right  ⌃⌥R / Move to Left  ⌃⌥L   host.rs:6995-6998
   ──────────
@@ -306,7 +298,7 @@ helper-down fallback row `:6348`.
 
 | Surface | Reach it | Rows / source | Code |
 |---|---|---|---|
-| **Command palette** | global **Hyper+S**, CLI `show` | `commands.toml` rows with `enabled=true` + `in-palette≠false`, minus `COMMAND_SECTION_SKIPS` (`host.rs:36`); today that is **Create File, Find Recent Files, Text to Table, Pretty Print, Jira Config Window**, plus **Kitchen Sink** (`host.rs:892`) | `show_palette` `host.rs:4082`; model `views/switcher.rs:764`; `build_palette` `host.rs:829-908` |
+| **Command palette** | global **Hyper+S**, CLI `show` | the six views (**Notes, Files, Jira, Confluence, AI, Compare** — listed since round 2) plus the tool rows (**Create File, Find Recent Files, Text to Table, Pretty Print, Health Checks, Jira Config Window**) and **Kitchen Sink**. Built from `commands.toml` rows with `enabled=true` + `in-palette≠false`, minus `COMMAND_SECTION_SKIPS` (`host.rs:36`) | `show_palette` `host.rs`; model `views/switcher.rs`; `build_palette` `host.rs` |
 | **View switcher** | **Ctrl+B W** (also `do:switcher`) | view names only, `host.rs:4267-4272` (Files/Notes/Confluence/Compare/AI/Jira); commands are explicitly emptied (`host.rs:4288`) | `switcher.rs:215`, `SwitchUi` `switcher.rs:482` |
 | **Cmd+K action picker** — Compare | ⌘K in Compare | "Compare actions": New Comparison / Next·Prev Difference / Copy Right·Left / Swap Sides / Reload / Save Left·Right / Undo (`host.rs:9992-10013`) | `compare_actions` `host.rs:9984`; card `ui/action_picker.rs` |
 | **Cmd+K action picker** — Jira | ⌘K in Jira | "Actions for {what}": Open in browser / Copy URL and title / Copy to clipboard / Add·Remove favorites / Pin labels to sidebar / Show release issues / Favorite·Unfavorite release / Blacklist·Restore release (`host.rs:10116-10153`) | `jira_actions` `host.rs:10062` |
@@ -438,40 +430,56 @@ image menu (`notes.rs:2705`) offer overlapping image/path actions with three spe
 `host.rs`, so they drift independently.
 **Seam:** unify on one builder.
 
-### F14 — The `/terminal` tool panel has no context menu at all
-`views/terminal.rs` defines no menu (only a `mouseDown:` handler `:792`), while the
-notes-drawer terminal has a full one (`host.rs:10860`). Same widget, different affordances.
-**Seam:** `views/terminal.rs`.
+### F14 — ~~The `/terminal` tool panel has no context menu at all~~ (withdrawn — not a defect)
+**Correction made in round 2:** there is no `/terminal` tool panel in the Rust port. `ToolKind`
+(`views/tools.rs:36`) has only PrettyPrint / Filefast / HealthChecks / TextTable; the `[terminal]`
+section in `commands.toml` is a leftover, and `terminal` routes to the notes **drawer** terminal
+(`toggle_terminal_panel` → `flip_terminal_panel`). There is one terminal surface and it already has
+the menu, so this finding was wrong and is withdrawn. (Adding a menu to a second panel would first
+mean building that panel.)
 
-### F15 — Two independent appearance systems in two different menus
+### F15 — Two independent appearance systems in two different menus — **fixed in round 2**
 "Header Style" (7 options, status menu `menu.rs:257-272`) and "Theme" (~30 presets, header
 menu `host.rs:6077`) both change the app's look and live in different entry points. Users
 will not know which to reach for.
 **Seam:** `menu.rs:257`, `host.rs:6012-6077`.
+**Round 2:** the submenu is renamed **"Header Bar Style ▸"** with a tooltip distinguishing it from
+the colour Theme presets, and the single-child "Global Window Options" wrapper is gone. Full
+consolidation (one appearance home) was deliberately not attempted.
 
-### F16 — The palette is a tools launcher, the status menu is a view switcher
+### F16 — The palette is a tools launcher, the status menu is a view switcher — **fixed in round 2**
 Views set `in-palette = false` (`commands.toml:196`, `:232`, `:260`, `:314`, `:323`, `:347`)
 so Hyper+S lists Create File / Find Recent Files / Text to Table / Pretty Print / Jira Config
 Window — not Notes/Files/Jira. The view toggles live in the status menu instead. The name
 "command palette" promises the union.
 **Seam:** `build_palette` `host.rs:829-908`, `commands.toml` `in-palette` flags.
+**Round 2:** the six views are now listed (with `label`s), and the status menu's view toggles were
+removed (F3) — so the palette is the one command surface. `[screenshot]`/`[terminal]` stay gated.
 
-### F17 — Jira header rows duplicate the palette and the shortcut
+### F17 — Jira header rows duplicate the palette and the shortcut — **partly fixed in round 2**
 `Search Jira…  ⌘F` (`host.rs:9368`) duplicates the ⌘F router; `Open Jira Config Window`
 (`host.rs:9384`) duplicates the palette `jira-config` row (`commands.toml:610`,
 `host.rs:1191`). Small, but they widen the "where do I change this?" surface.
 **Seam:** `view_icon_entries` `host.rs:9366-9387`.
+**Round 2:** the embedded `⌘F` was dropped from the title (the key belongs to the router; the row
+has no real key equivalent). The two actions themselves were kept for discoverability — deleting
+them was judged too aggressive.
 
-### F18 — Confluence chip values are lower-case against a Title-Case app
+### F18 — Confluence chip values are lower-case against a Title-Case app — **fixed in round 2**
 `any time`, `past 7 days`, `relevance`, `recently modified` (`confluence_view.rs:33-40`)
 next to `Pages + blogs`, `All spaces` (`:26`, `host.rs:8363`).
 **Seam:** `views/confluence_view.rs:25-40`.
+**Round 2:** the `MODIFIED`/`SORTS` display titles are now "Any time / Past 7 days / … / Relevance /
+Recently modified" (wire values untouched), and the strip's seeded labels
+(`views/confluence.rs:2143-2144`) were brought in line.
 
-### F19 — "Open (Compare)" vs "Open in Text Compare" changes with state
+### F19 — "Open (Compare)" vs "Open in Text Compare" changes with state — **fixed in round 2**
 One row whose label flips on whether both sides exist (`host.rs:6990`). A row that is
 sometimes one command and sometimes another is a low-grade surprise; two rows (one
 disabled) would be clearer.
 **Seam:** `compare_folder_menu` `host.rs:6990`.
+**Round 2:** the row is always titled "Open in Text Compare" (the closure was already identical in
+both cases).
 
 ### F20 — Jira sidebar right-click is a silent no-op
 `JiraEvent::Sidebar(_) => {}` (`host.rs:9682`) swallows the event the sidebar emits
@@ -479,14 +487,15 @@ disabled) would be clearer.
 isn't — unlike Files, Notes, Compare and AI.
 **Seam:** `host.rs:9682`.
 
-### F21 — `pane-shot` preview window has no menu / surface
+### F21 — `pane-shot` preview window has no menu / surface (deferred in round 2)
 `[pane-shot]` exists in `commands.toml:179` and `paneShot` in state, but there is no
-preview menu (listed as a known gap in `AGENTS.md`). Not redundant — a consistency hole.
+preview window at all in the Rust port (`pane_shot_message` renders to a PNG and delivers it).
+Attaching a menu means building the window first — a feature, not a menu cleanup. **Deferred.**
 
-### F22 — Minor: `App Menu…`, `No rules`, casing, ellipses
-`App Menu…` (§F2), AI "Copy for Outlook / Copy for Webex / Copy as Markdown / Copy Command"
-is four copy rows in one menu (`host.rs:9422-9447`), and ellipsis styles vary
-(`Rename…  F2` vs `Duplicate…` vs `Open Full Size`).
+### F22 — Minor: `App Menu…`, `No rules`, casing, ellipses — **fixed in rounds 1–2**
+`App Menu…` was removed in round 1 (F2), and the AI pane's four copy rows are now `Copy for ▸`
+(Outlook / Webex) + "Copy as Markdown" + "Copy Command" (round 2). Remaining: ellipsis styles vary
+(`Rename…  F2` vs `Duplicate…` vs `Open Full Size`) — cosmetic, left alone.
 
 ---
 
@@ -506,10 +515,29 @@ Fixes landed for the eight findings above, implemented by delegated agents and c
 | F11 | deleted the duplicate "Show in Enclosing Folder" row (it called the same `reveal_in_files` as "Reveal in Files") | `app/host.rs` `files_row_menu` |
 | F20 | the Jira sidebar right-click now opens `Open / ── / Unpin`; the pin dispatch was extracted so the menu and a plain click cannot diverge | `app/host.rs` `jira_event` |
 
-**Still open (not in this round):** F1 (the "Kitchen Sink" row/palette entry), F3 (the arbitrary
-Notes/Jira/Terminal subset), F5 (Quit twice), F8 (`Open Config` naming), F12–F19, F21, F22 — plus
-the deeper half of F10 (generating the ⌘/ sheet from the key router instead of documenting it by
-hand) and the wider label unification behind F11.
+### Round 2 (Oct 14 2026) — Tier 1 + 2
+
+| Finding | Change | Where |
+|---|---|---|
+| F1 | dropped the "Kitchen Sink" row from the status menu (the palette keeps its `window` entry) | `app/menu.rs`, `main.rs` |
+| F3 | dropped "Toggle Jira Window" / "Toggle Terminal" / "Toggle Notes" and their variants/ids/arms | `app/menu.rs`, `main.rs` |
+| F15 | flattened the single-child "Global Window Options" wrapper; renamed "Header Style" → "Header Bar Style" (+ tooltip); `GLOBAL_GROUP_TAG` removed | `app/menu.rs` |
+| F16 | the palette now lists the six views (`in-palette = true` + `label`) | `commands.toml`, `app/host.rs` (test) |
+| F12 | the terminal menu no longer opens four disabled rows when no path is selected | `app/host.rs` `terminal_menu` |
+| F17 | dropped the embedded `⌘F` from the Jira menu row title | `app/host.rs` `view_icon_entries` |
+| F19 | one stable label, "Open in Text Compare" | `app/host.rs` `compare_folder_menu` |
+| F18 | `MODIFIED`/`SORTS` display titles Title-cased (+ the strip's seeded labels) | `views/confluence_view.rs`, `views/confluence.rs` |
+| F22 | AI copy rows folded into `Copy for ▸` | `app/host.rs` `view_icon_entries` |
+| F13 | the prose menu's "Copy File Path" → "Copy Absolute Path" | `views/notes_prose.rs` |
+| F14 | **withdrawn** — no `/terminal` tool panel exists | — |
+| F21 | **deferred** — needs the preview window built first | — |
+
+One review-driven rework: the prose menu's added "Reveal in Files" row was **removed** — it is a
+silent no-op in the prose pop-out, which runs in a separate process with no daemon UI.
+
+**Still open:** F5 (Quit twice — judged *not* a defect: a status-item Quit beside the app-menu Quit
+is normal macOS), F8 (`Open Config` naming), F21 (deferred), plus the deeper half of F10
+(generating the ⌘/ sheet from the key router) and the wider label unification behind F11.
 
 ---
 

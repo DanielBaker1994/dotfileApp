@@ -267,14 +267,7 @@ fn install_status_item(mtm: objc2::MainThreadMarker, controller: &Arc<SwitcherCo
 /// Route the menu clicks (status item and main menu) onto the controller.
 fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::MenuAction) {
     use app::menu::MenuAction;
-    use app::registry::SlotView;
     match action {
-        MenuAction::ToggleNotes => controller.hotkey(SlotView::Notes),
-        MenuAction::ToggleJiraWindow => controller.hotkey(SlotView::Jira),
-        MenuAction::OpenWindow => controller.toggle(),
-        MenuAction::ToggleTerminal => {
-            let _ = controller.do_action("toggle-terminal");
-        }
         MenuAction::CloseWindow => controller.hide("menu"),
         MenuAction::ResetWindowSize => {
             let _ = controller.do_action("reset-size");

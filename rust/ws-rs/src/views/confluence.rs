@@ -2140,8 +2140,8 @@ pub mod macos {
             ("All spaces", 190.0),
             ("Any contributor", 190.0),
             ("Type: Pages + blogs", 150.0),
-            ("Modified: any time", 140.0),
-            ("Sort: relevance", 120.0),
+            ("Modified: Any time", 140.0),
+            ("Sort: Relevance", 120.0),
         ] {
             let chip = label(mtm, text, 12.0, false, colors.dim);
             chip.setFrame(NSRect::new(

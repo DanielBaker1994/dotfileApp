@@ -1461,6 +1461,11 @@ mod macos {
     /// The palette is wider than the switcher: two panes side by side.
     pub const PALETTE_WIDTH: f64 = 680.0;
 
+    /// The palette lists more rows than the view switcher (all commands +
+    /// the views + the window), so it has its own, taller cap — the shared
+    /// `MAX_ROWS` would clip the last row.
+    pub const PALETTE_MAX_ROWS: usize = 16;
+
     /// `splitMid(_:)`.
     pub fn split_mid(width: f64) -> f64 {
         (width * 0.46).round()
@@ -1569,7 +1574,7 @@ mod macos {
                 (model.rows().len(), model.selection)
             };
             self.ivars().rows_view.set_count(n, sel);
-            let h = crate::ui::list_panel::panel_height(n, ROW_HEIGHT, MAX_ROWS);
+            let h = crate::ui::list_panel::panel_height(n, ROW_HEIGHT, PALETTE_MAX_ROWS);
             let panel = &self.ivars().panel;
             let f = panel.frame();
             let top = f.origin.y + f.size.height;
@@ -1876,7 +1881,7 @@ mod macos {
             }
             if let Some(panel) = &self.window {
                 let count = self.model.rows().len();
-                let (w, h) = (PALETTE_WIDTH, crate::ui::list_panel::panel_height(count, ROW_HEIGHT, MAX_ROWS));
+                let (w, h) = (PALETTE_WIDTH, crate::ui::list_panel::panel_height(count, ROW_HEIGHT, PALETTE_MAX_ROWS));
                 panel.setContentSize(NSSize::new(w, h));
                 if let Some(host) = host {
                     let (x, y) = panel_origin(host, (w, h));
@@ -1899,7 +1904,7 @@ mod macos {
 
             let colors = crate::ui::theme::PopupThemeDefaults::colors();
             let list = ListPanel::new(mtm, colors, PALETTE_WIDTH, ROW_HEIGHT, PALETTE_SEARCH_PLACEHOLDER);
-            let h = list.height(self.model.rows().len(), MAX_ROWS);
+            let h = list.height(self.model.rows().len(), PALETTE_MAX_ROWS);
             let config = PopupConfig {
                 name: "palette".to_string(),
                 frame: crate::ui::popup::CardFrame { x: 0.0, y: 0.0, width: PALETTE_WIDTH, height: h },

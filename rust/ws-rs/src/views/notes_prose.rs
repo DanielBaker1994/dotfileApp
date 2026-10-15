@@ -477,7 +477,7 @@ mod appkit {
         let (n1, n2) = (note.to_string(), note.to_string());
         popup_context(
             vec![
-                MenuEntry::item("Copy File Path", move || {
+                MenuEntry::item("Copy Absolute Path", move || {
                     let _ = crate::platform::set_text(&n1);
                     crate::ui::toast::show(&format!("Copied {}", tilde(&n1)), "doc.on.clipboard");
                 }),
