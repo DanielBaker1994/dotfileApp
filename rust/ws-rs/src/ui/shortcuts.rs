@@ -3,6 +3,13 @@
 //! window, a centered card titled "Keyboard Shortcuts" with key caps on the
 //! left and what they do on the right, grouped by view. Rows come from the
 //! `[shortcuts]` section of commands.toml (`"view: keys" = "what"`).
+//!
+//! The sheet is a human-maintained description, not the source of truth for
+//! the bindings: nothing checks it against the keys that actually respond. The
+//! bindings live elsewhere — the in-window key router (`route_key_event` /
+//! `ui::popup::route_key`), the global hotkey modes (`hotkey::HOTKEY_MODES`,
+//! launched via `bin/kitchen_sink.sh`), and the Hyper+KEY bindings in
+//! `config/aerospace/aerospace.toml` — and are not derived from these rows.
 
 /// One `[shortcuts]` row: `"view: keys" = "what"`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,6 +453,44 @@ x = 1
         assert_eq!(sheet_key(0, false, false), SheetKey::Ignore);
     }
 
+    /// `(keys, what)` pairs documented under the shared `all:` group *and*
+    /// under a specific view — a stale copy of a shared row. Two specific
+    /// views may legitimately document the same pair.
+    fn all_group_leaks(entries: &[ShortcutEntry]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for e in entries.iter().filter(|e| e.view == "all") {
+            if entries.iter().any(|p| p.view != "all" && p.keys == e.keys && p.what == e.what) {
+                out.push((e.keys.clone(), e.what.clone()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn all_group_pair_is_not_repeated_under_a_view() {
+        // A well-formed sheet keeps the shared `all:` rows out of the views.
+        assert!(all_group_leaks(&parse_entries(CONF)).is_empty());
+
+        // The real regression: the Cmd+/ row copied out of `all:` into a view.
+        let leaked = r#"
+[shortcuts]
+"all: Cmd+/" = "this list"
+"ai: Cmd+/" = "this list"
+"#;
+        assert_eq!(
+            all_group_leaks(&parse_entries(leaked)),
+            vec![("Cmd+/".to_string(), "this list".to_string())]
+        );
+
+        // Two specific views may legitimately share a row (e.g. files + jira).
+        let shared_by_views = r#"
+[shortcuts]
+"files: Home / End / PgUp / PgDn" = "jump in the list"
+"jira: Home / End / PgUp / PgDn" = "jump in the list"
+"#;
+        assert!(all_group_leaks(&parse_entries(shared_by_views)).is_empty());
+    }
+
     #[test]
     fn real_config_has_every_view() {
         let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../commands.toml")).unwrap_or_default();
@@ -456,5 +501,9 @@ x = 1
         for v in ["all", "notes", "files", "jira", "compare", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
             assert!(e.iter().any(|x| x.view == v), "no [shortcuts] rows for {v}");
         }
+        // A shared `all:` row must not be copied into a view (guards against
+        // re-adding "ai: Cmd+/" = "this list").
+        let leaks = all_group_leaks(&e);
+        assert!(leaks.is_empty(), "shared `all:` rows copied into a view: {leaks:?}");
     }
 }

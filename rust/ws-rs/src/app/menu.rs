@@ -7,10 +7,12 @@
 //! The structure is a plain [`MenuSpec`] so it can be checked without AppKit.
 //! The AppKit half ([`build_status_menu`], [`install_status_item`],
 //! [`install_main_menu`]) turns a spec into `NSMenu`s and routes clicks
-//! through a [`MenuTarget`] `define_class!` callback. The Swift controller
-//! methods (`toggleJiraPoll`, `showJiraDashboard`, `addGlobalWindowItems`…)
-//! don't exist in the Rust port yet: the callback the host passes to
-//! [`install_status_item`] is the seam where they will be dispatched.
+//! through a [`MenuTarget`] `define_class!` callback. One [`MenuTarget`]
+//! drives both the status item and the main menu's File ▸ "Reset Window Size"
+//! row; File ▸ "Close Window" stays on the responder chain. The Swift
+//! controller methods (`toggleJiraPoll`, `showJiraDashboard`,
+//! `addGlobalWindowItems`…) don't exist in the Rust port yet: the callback the
+//! host passes is where the ported ones are dispatched.
 
 use crate::ui::theme::HeaderStyle;
 
@@ -20,7 +22,6 @@ pub const GLOBAL_GROUP_TAG: i64 = 7402;
 /// The stable, testable id of every menu item (mirrors the Swift selector).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
-    ToggleHideOnFocusLoss,
     SetHeaderStyle(HeaderStyle),
     ResetWindowSize,
     CloseWindow,
@@ -37,7 +38,6 @@ impl MenuAction {
 
     pub fn id(self) -> i64 {
         match self {
-            MenuAction::ToggleHideOnFocusLoss => 1,
             MenuAction::ResetWindowSize => 2,
             MenuAction::CloseWindow => 3,
             MenuAction::Quit => 4,
@@ -54,7 +54,8 @@ impl MenuAction {
 
     pub fn from_id(id: i64) -> Option<MenuAction> {
         Some(match id {
-            1 => MenuAction::ToggleHideOnFocusLoss,
+            // 1 was `ToggleHideOnFocusLoss`; hide-on-focus-loss is not ported
+            // (see "Known gaps" in `AGENTS.md`), so the id is retired.
             2 => MenuAction::ResetWindowSize,
             3 => MenuAction::CloseWindow,
             4 => MenuAction::Quit,
@@ -228,11 +229,10 @@ impl MenuSpec {
 }
 
 /// The live values the menu reflects (mirrors the globals `menuNeedsUpdate`
-/// reads: `settings.hideOnFocusLoss`, `HeaderStyle.current`,
-/// `jiraEnabledInConfig()`, and the window shown flags).
+/// reads: `HeaderStyle.current`, `jiraEnabledInConfig()`, and the window shown
+/// flags).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuSettings {
-    pub hide_on_focus_loss: bool,
     pub header_style: HeaderStyle,
     pub jira_enabled: bool,
     pub terminal_shown: bool,
@@ -243,7 +243,6 @@ pub struct MenuSettings {
 impl Default for MenuSettings {
     fn default() -> Self {
         MenuSettings {
-            hide_on_focus_loss: true,
             header_style: HeaderStyle::Flat,
             jira_enabled: true,
             terminal_shown: false,
@@ -271,23 +270,15 @@ fn header_style_submenu(current: HeaderStyle) -> SubmenuSpec {
     }
 }
 
-/// Swift `addGlobalWindowItems`: the "Global Window Options ▸" submenu, with
-/// the "Header Style ▸" submenu nested inside it.
+/// Swift `addGlobalWindowItems`: the "Global Window Options ▸" submenu. Its
+/// only child is the "Header Style ▸" submenu — the Swift "Hide When Focus Is
+/// Lost" toggle is not ported (the AeroSpace focus watcher is missing; see
+/// "Known gaps" in `AGENTS.md`).
 fn global_window_options(settings: &MenuSettings) -> SubmenuSpec {
     SubmenuSpec {
         title: "Global Window Options".to_string(),
         tag: Some(GLOBAL_GROUP_TAG),
-        items: vec![
-            MenuNode::Item(
-                MenuItemSpec::action(
-                    MenuAction::ToggleHideOnFocusLoss,
-                    "Hide When Focus Is Lost",
-                )
-                .checked(settings.hide_on_focus_loss)
-                .tooltip("On: the window hides when you switch to another app. Off: it stays until ✕, Cmd+W, the hotkey or Esc (when the view's \"Esc Hides Window\" is on)"),
-            ),
-            MenuNode::Submenu(header_style_submenu(settings.header_style)),
-        ],
+        items: vec![MenuNode::Submenu(header_style_submenu(settings.header_style))],
     }
 }
 
@@ -324,7 +315,9 @@ pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
     items.push(MenuNode::Separator);
 
     items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::CloseWindow, "Close Window").key("w", Modifiers::CMD),
+        // No key equivalent: ⌘W belongs to File ▸ "Close Window" (the key
+        // window handles it), so only one row owns it.
+        MenuItemSpec::action(MenuAction::CloseWindow, "Close Window"),
     ));
     items.push(MenuNode::Separator);
 
@@ -399,15 +392,6 @@ mod appkit {
             #[unsafe(method(menuAction:))]
             fn menu_action(&self, sender: &NSMenuItem) {
                 if let Some(action) = MenuAction::from_id(sender.tag() as i64) {
-                    // A plain on/off row flips its own checkmark (Swift
-                    // rebuilt the menu with the new `state:`).
-                    if action == MenuAction::ToggleHideOnFocusLoss {
-                        sender.setState(if sender.state() == NSControlStateValueOn {
-                            NSControlStateValueOff
-                        } else {
-                            NSControlStateValueOn
-                        });
-                    }
                     if let Some(cb) = self.ivars().handler.borrow().as_ref() {
                         cb(action);
                     }
@@ -579,24 +563,21 @@ mod appkit {
         item
     }
 
-    fn add_reset_size(mtm: MainThreadMarker, menu: &NSMenu, target: Option<&MenuTarget>) {
-        let item = add_leaf(
-            mtm,
-            menu,
-            "Reset Window Size",
-            target.map(|_| sel!(menuAction:)),
-            "0",
-        );
-        if let Some(target) = target {
-            item.setTag(MenuAction::ResetWindowSize.id() as isize);
-            unsafe { item.setTarget(Some(as_any(target))) };
-        }
+    fn add_reset_size(mtm: MainThreadMarker, menu: &NSMenu, target: &MenuTarget) {
+        let item = add_leaf(mtm, menu, "Reset Window Size", Some(sel!(menuAction:)), "0");
+        item.setTag(MenuAction::ResetWindowSize.id() as isize);
+        unsafe { item.setTarget(Some(as_any(target))) };
         item.setToolTip(Some(ns_string!("Reset all windows to their default size")));
     }
 
     /// `installMainMenu` — the standard AppKit main menu (About / File / Edit
-    /// / Window). Items without an explicit action ride the responder chain;
-    /// "Reset Window Size" targets `target` when supplied.
+    /// / Window). Items without an explicit action ride the responder chain, so
+    /// File ▸ "Close Window" (⌘W) reaches the key window: `performClose:` on the
+    /// shared window funnels to the controller's close request (hide), while
+    /// transient overlays (tool panels, Quick Look, sheets) close themselves.
+    ///
+    /// Only File ▸ "Reset Window Size" goes through `target`; the row (and its
+    /// separator) is omitted when `target` is `None` (the `prose` child).
     pub fn install_main_menu(mtm: MainThreadMarker, target: Option<&MenuTarget>) {
         let app = NSApplication::sharedApplication(mtm);
         let main_menu = NSMenu::new(mtm);
@@ -617,9 +598,17 @@ mod appkit {
         let file_item = NSMenuItem::new(mtm);
         let file_menu = NSMenu::new(mtm);
         file_menu.setTitle(ns_string!("File"));
+        // File ▸ "Close Window" owns ⌘W and rides the responder chain: the key
+        // window decides. `performClose:` on the shared window already funnels
+        // to the controller's close request (hide), and it lets transient
+        // overlays (tool panels, Quick Look, sheets) close themselves instead
+        // of hiding the window behind them. Only "Reset Window Size" needs the
+        // target; it is omitted for the target-less `prose` child.
         add_leaf(mtm, &file_menu, "Close Window", Some(sel!(performClose:)), "w");
-        file_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_reset_size(mtm, &file_menu, target);
+        if let Some(target) = target {
+            file_menu.addItem(&NSMenuItem::separatorItem(mtm));
+            add_reset_size(mtm, &file_menu, target);
+        }
         file_item.setSubmenu(Some(&file_menu));
         main_menu.addItem(&file_item);
 
@@ -659,7 +648,6 @@ mod tests {
     #[test]
     fn action_ids_round_trip() {
         let actions = [
-            MenuAction::ToggleHideOnFocusLoss,
             MenuAction::ResetWindowSize,
             MenuAction::CloseWindow,
             MenuAction::Quit,
@@ -678,6 +666,8 @@ mod tests {
             let action = MenuAction::SetHeaderStyle(style);
             assert_eq!(MenuAction::from_id(action.id()), Some(action));
         }
+        // Id 1 (the retired hide-on-focus-loss toggle) no longer decodes.
+        assert_eq!(MenuAction::from_id(1), None);
         assert_eq!(MenuAction::from_id(-1), None);
         assert_eq!(MenuAction::from_id(999), None);
         assert_eq!(HeaderStyle::ALL.len(), 7);
@@ -730,6 +720,18 @@ mod tests {
         assert!(pos(MenuAction::ToggleNotes) < pos(MenuAction::CloseWindow));
         assert!(pos(MenuAction::CloseWindow) < pos(MenuAction::OpenWindow));
         assert!(pos(MenuAction::OpenWindow) < pos(MenuAction::Quit));
+
+        // ⌘W is owned by File ▸ "Close Window" (`install_main_menu`), so the
+        // status row carries no key equivalent; the reset row lives only in
+        // the main menu, never in this spec.
+        let close = spec
+            .flatten()
+            .into_iter()
+            .find(|item| item.action == MenuAction::CloseWindow)
+            .expect("close row");
+        assert!(close.key_equivalent.is_empty());
+        assert_eq!(close.modifiers, Modifiers::NONE);
+        assert!(!actions.contains(&MenuAction::ResetWindowSize));
     }
 
     #[test]
@@ -744,13 +746,10 @@ mod tests {
             .find_submenu("Global Window Options")
             .expect("global window options submenu");
         assert_eq!(global.tag, Some(GLOBAL_GROUP_TAG));
-        let hide = match &global.items[0] {
-            MenuNode::Item(item) => item,
-            other => panic!("expected the hide item, got {other:?}"),
-        };
-        assert_eq!(hide.action, MenuAction::ToggleHideOnFocusLoss);
-        assert!(hide.checked);
-        assert!(matches!(global.items[1], MenuNode::Submenu(_)));
+        // Header Style is the submenu's only child now that the
+        // hide-on-focus-loss toggle is gone.
+        assert_eq!(global.items.len(), 1);
+        assert!(matches!(global.items[0], MenuNode::Submenu(_)));
 
         let header = spec
             .find_submenu("Header Style")

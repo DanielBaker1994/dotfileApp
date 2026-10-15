@@ -188,7 +188,18 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         // The Swift app is a regular app (menu bar + status item), not an
         // accessory — mirror that so the shared window is launchable.
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-        app::menu::install_main_menu(mtm, None);
+        // The main menu's File ▸ "Reset Window Size" row routes through the
+        // same click handler as the status item; File ▸ "Close Window" (⌘W)
+        // stays on the responder chain. The target is leaked on purpose:
+        // `NSMenuItem.target` is weak, so it must outlive the menu (which lives
+        // for the whole process).
+        {
+            use app::menu::{install_main_menu, MenuTarget};
+            let c = controller.clone();
+            let target = MenuTarget::new(mtm, move |action| status_menu_action(&c, action));
+            install_main_menu(mtm, Some(&target));
+            std::mem::forget(target);
+        }
         install_status_item(mtm, &controller);
 
         // The socket thread enqueues UI commands; the main-thread timer drains
@@ -243,7 +254,6 @@ fn install_status_item(mtm: objc2::MainThreadMarker, controller: &Arc<SwitcherCo
     use app::menu::{build_menu_spec, install_status_item, MenuSettings};
     let settings = controller.settings();
     let menu_settings = MenuSettings {
-        hide_on_focus_loss: settings.hide_on_focus_loss,
         header_style: crate::ui::theme::HeaderStyle::from_raw(settings.header_style.raw())
             .unwrap_or_default(),
         ..MenuSettings::default()
@@ -254,8 +264,7 @@ fn install_status_item(mtm: objc2::MainThreadMarker, controller: &Arc<SwitcherCo
     std::mem::forget(handle);
 }
 
-/// Route the status-menu clicks onto the controller (a growing subset of the
-/// Swift `MenuTarget` handlers; anything else is a no-op for now).
+/// Route the menu clicks (status item and main menu) onto the controller.
 fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::MenuAction) {
     use app::menu::MenuAction;
     use app::registry::SlotView;
@@ -267,9 +276,8 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
             let _ = controller.do_action("toggle-terminal");
         }
         MenuAction::CloseWindow => controller.hide("menu"),
-        MenuAction::ToggleHideOnFocusLoss => {
-            let (on, _) = controller.focus_loss_settings();
-            controller.set_hide_on_focus_loss(!on, true);
+        MenuAction::ResetWindowSize => {
+            let _ = controller.do_action("reset-size");
         }
         MenuAction::SetHeaderStyle(style) => {
             let _ = controller.do_action(&format!("header-style:{}", style.raw_value()));
@@ -280,7 +288,10 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
                 objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
             }
         }
-        _ => {}
+        // Off macOS the menus (and this dispatcher) are never installed, but
+        // the match must still cover `Quit` there.
+        #[cfg(not(target_os = "macos"))]
+        MenuAction::Quit => {}
     }
 }
 

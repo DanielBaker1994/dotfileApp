@@ -5987,8 +5987,8 @@ mod daemon_ui {
 
         /// The notes sidebar: select / close / "+" / rail / row menu.
         /// The header app-icon menu (`onChromeIconClick`): Theme ▸ and the
-        /// window settings (`addWindowSettingsItems`), Open Config, the
-        /// shortcuts list, then the app menu.
+        /// window settings (`addWindowSettingsItems`), Open Config, then the
+        /// shortcuts list.
         fn header_icon_menu(&self, view: &NSView, x: f64, y: f64) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::ui::theme::{grouped_by_tone, HexColor, ThemePreset};
@@ -6065,7 +6065,6 @@ mod daemon_ui {
             }));
 
             let w1 = objc2::rc::Weak::from_retained(&self.retain());
-            let w2 = objc2::rc::Weak::from_retained(&self.retain());
             let w3 = objc2::rc::Weak::from_retained(&self.retain());
             let conf = self.ivars().controller.settings().commands_conf_path();
             let c = self.ivars().controller.clone();
@@ -6085,11 +6084,6 @@ mod daemon_ui {
                         ui.route_reset_size();
                     }
                 }),
-                MenuEntry::item("Reset Default Colors", move || {
-                    if let Some(ui) = w2.load() {
-                        ui.reset_theme(section);
-                    }
-                }),
                 MenuEntry::Separator,
                 MenuEntry::item("Open Config", move || {
                     c.set_pending_note_external(conf.to_string_lossy().into_owned());
@@ -6099,11 +6093,6 @@ mod daemon_ui {
                     if let Some(ui) = w3.load() {
                         ui.show_shortcuts();
                     }
-                }),
-                MenuEntry::Separator,
-                MenuEntry::item("App Menu…", {
-                    let view = view.retain();
-                    move || crate::app::menu::pop_status_menu(&view, x, y)
                 }),
             ]);
             popup(entries, Some(view), x, y);
@@ -9489,7 +9478,7 @@ mod daemon_ui {
 
         fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
             use crate::ui::sidebar::SidebarEvent;
-            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
+            use crate::views::jira_view::{JiraEvent as E, BOARD_PREFIX};
             match ev {
                 E::Click { row, double } => {
                     // A group header toggles, "load N more…" pages in.
@@ -9647,28 +9636,12 @@ mod daemon_ui {
                     self.jira_surface(|l| l.select_tab(i));
                 }
                 E::Sidebar(SidebarEvent::Pinned(key)) => {
-                    let err = self.jira_surface(|l| -> Option<String> {
-                        if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
-                            return l.open_my_work(id).err();
-                        }
-                        if key == BOARD_LIST_KEY {
-                            l.show_board_list();
-                            return None;
-                        }
-                        if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
-                            return (!l.open_board(id)).then(|| format!("board {id} not synced yet"));
-                        }
-                        if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
-                            return (!l.open_view(spec)).then(|| format!("board view {spec} not synced yet"));
-                        }
-                        if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
-                            return l.open_label(name).err();
-                        }
-                        l.open_release(&key).err()
-                    });
-                    if let Some(Some(e)) = err {
+                    if let Some(e) = self.jira_open_pin_key(&key) {
                         self.ivars().controller.log(&format!("jira: {e}"));
                     }
+                }
+                E::Sidebar(SidebarEvent::MenuPinned(key, x, y)) => {
+                    self.jira_sidebar_menu(&key, x, y);
                 }
                 E::Sidebar(SidebarEvent::Rail(_)) => {
                     let st = self.ivars().state.borrow();
@@ -9678,6 +9651,66 @@ mod daemon_ui {
                 }
                 E::Sidebar(_) => {}
             }
+        }
+
+        /// Dispatch a Jira sidebar pin key: my-work / board list / board /
+        /// board view / label, else release. `Some(msg)` is an error worth
+        /// logging (a not-yet-synced target). Shared by the plain pin click and
+        /// the sidebar row menu's "Open", so the two cannot diverge.
+        fn jira_open_pin_key(&self, key: &str) -> Option<String> {
+            use crate::views::jira_view::{BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
+            self.jira_surface(|l| -> Option<String> {
+                if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
+                    return l.open_my_work(id).err();
+                }
+                if key == BOARD_LIST_KEY {
+                    l.show_board_list();
+                    return None;
+                }
+                if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
+                    return (!l.open_board(id)).then(|| format!("board {id} not synced yet"));
+                }
+                if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
+                    return (!l.open_view(spec)).then(|| format!("board view {spec} not synced yet"));
+                }
+                if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
+                    return l.open_label(name).err();
+                }
+                l.open_release(key).err()
+            })
+            .flatten()
+        }
+
+        /// Right-click on a Jira sidebar pin: "Open" (the same dispatch a plain
+        /// click runs) plus "Unpin" for a pinned board view.
+        fn jira_sidebar_menu(&self, key: &str, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::views::jira_view::VIEW_PREFIX;
+            let spec = key.strip_prefix(VIEW_PREFIX).map(str::to_string);
+            let pinned = spec.as_deref().is_some_and(|s| {
+                self.jira_surface(|l| l.pinned_views.iter().any(|v| v.as_str() == s)).unwrap_or(false)
+            });
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let k = key.to_string();
+            let mut entries = vec![MenuEntry::item("Open", move || {
+                if let Some(ui) = weak.load() {
+                    if let Some(e) = ui.jira_open_pin_key(&k) {
+                        ui.ivars().controller.log(&format!("jira: {e}"));
+                    }
+                }
+            })];
+            if pinned {
+                if let Some(s) = spec {
+                    let w = objc2::rc::Weak::from_retained(&self.retain());
+                    entries.push(MenuEntry::Separator);
+                    entries.push(MenuEntry::item("Unpin", move || {
+                        if let Some(ui) = w.load() {
+                            ui.jira_surface(|l| l.toggle_pin_view(&s));
+                        }
+                    }));
+                }
+            }
+            popup(entries, None, x, y);
         }
 
         /// Every 10 s while Jira is up: the sidebar badges / sync line and
@@ -10346,10 +10379,6 @@ mod daemon_ui {
             {
                 let ps = paths.clone();
                 entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&ps)));
-            }
-            if can_perform(Action::Enclosing, &ctx) && !many {
-                let ps = paths.clone();
-                entries.push(MenuEntry::item("Show in Enclosing Folder", move || reveal_in_files(&ps)));
             }
             if rows_sel.len() == 2 && rows_sel[0].1 == rows_sel[1].1 {
                 let (l, r) = (rows_sel[0].0.clone(), rows_sel[1].0.clone());
