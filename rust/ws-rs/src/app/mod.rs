@@ -7,6 +7,7 @@ pub mod jira_poll;
 pub mod host;
 #[cfg(target_os = "macos")]
 pub mod live_panes;
+pub mod logging;
 pub mod menu;
 pub mod paths;
 pub mod process_run;

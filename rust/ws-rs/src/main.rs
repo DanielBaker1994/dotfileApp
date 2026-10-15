@@ -58,7 +58,7 @@ fn main() {
                 configure_helper();
                 let opts = views::notes::ProseLaunchOptions::parse(&args[2..]);
                 if let Err(e) = views::notes::ProseProcess::run(&opts) {
-                    eprintln!("{e}");
+                    app::logging::ws_log(&format!("{e}"));
                     std::process::exit(2);
                 }
                 // The floating window needs its own run loop (mirrors
@@ -146,7 +146,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
     let _server = match CommandServer::start(&sock, controller.clone()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("kitchen-sink: cannot bind command socket {sock}: {e}");
+            app::logging::ws_log(&format!("cannot bind command socket {sock}: {e}"));
             std::process::exit(1);
         }
     };
@@ -156,7 +156,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         // launch presentation. `state`/`do:`/raw verbs run inline on the
         // socket thread; parking keeps `_server` (and the caller's `_lock`)
         // alive so the process stays the single daemon instance.
-        eprintln!("kitchen-sink (rust) headless daemon: socket {sock}");
+        app::logging::ws_log(&format!("kitchen-sink (rust) headless daemon: socket {sock}"));
         loop {
             std::thread::park();
         }
@@ -220,7 +220,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
             controller.open(app::host::DEFAULT_VIEW);
         }
 
-        eprintln!("kitchen-sink (rust) daemon: socket {sock}");
+        app::logging::ws_log(&format!("kitchen-sink (rust) daemon: socket {sock}"));
         app.run();
     }
 }
@@ -243,7 +243,7 @@ fn run_egui_frontend(controller: Arc<SwitcherController>, mode: Option<&str>, so
         controller.open(app::host::DEFAULT_VIEW);
     }
 
-    eprintln!("kitchen-sink (rust) daemon (egui): socket {sock}");
+    app::logging::ws_log(&format!("kitchen-sink (rust) daemon (egui): socket {sock}"));
     frontend_egui::run(controller, queue, main_queue);
 }
 

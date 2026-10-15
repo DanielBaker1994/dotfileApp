@@ -1394,8 +1394,11 @@ impl SwitcherController {
         inner.ui_push(UiCommand::JiraTab(tab));
     }
 
-    /// Mirrors `controller.log(_:)`.
+    /// Mirrors `controller.log(_:)` — `wsLog`: stderr + the date-based
+    /// daemon log (this was dropped in the Rust port), plus the in-memory
+    /// activity list the Output view shows.
     pub fn log(&self, message: &str) {
+        crate::app::logging::ws_log(message);
         self.inner.lock().unwrap().logs.push(message.to_string());
     }
 

@@ -441,8 +441,9 @@ exported for Python readers).
 - **Repair the stack:** `./ws doctor [--fix]`, `./ws check`, `./ws permissions
   fix`, `./ws links fix`, `./ws home status`. Logs: every log lives in
   `logs/YYYY_MM_DD/*.log` (date-based rolling, `pylib/log_hub.py`;
-  `bin/ws-logs` lists them) — the launch trace (`WS_DEBUG=1`) is
-  `logs/YYYY_MM_DD/launch.log`, and the daemon's stderr goes to the unified log.
+  `bin/ws-logs` lists them) — the app's own log is `logs/YYYY_MM_DD/daemon.log`
+  (Rust `app/logging.rs` `ws_log`, the restored Swift `wsLog`: stderr + file),
+  and the launch trace (`WS_DEBUG=1`) is `logs/YYYY_MM_DD/launch.log`.
 
 ## Gotchas / footguns
 
