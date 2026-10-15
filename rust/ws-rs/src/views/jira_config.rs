@@ -1,16 +1,19 @@
-//! `JiraDashboardWindow` (kitchen_sink.swift), restored as the Rust **Jira
-//! Config** window: the poll-jobs dashboard built on the shared card
-//! scaffolding ([`crate::ui::card::CardWindowController::themed_root`]).
+//! The Jira **Config** surface: the poll-jobs dashboard the Swift
+//! `JiraDashboardWindow` showed, now the `Config` half of the Jira view's
+//! `Tickets | Config` pill (`views/jira_view.rs`) — no separate window.
 //!
-//! The model is already ported in [`crate::views::jira`] (`Describe` /
-//! `DescribeJob` / the dashboard helpers); this module is only the AppKit
-//! window. Data comes from `jira_poll.py --describe` (no network, no writes).
+//! The pure, config-driven model lives here ([`JiraConfigSettings`],
+//! [`job_rows`], [`next_poll`], [`status_line`], [`file_paths`]); the AppKit
+//! half ([`appkit::JiraConfigBodyView`]) paints the status line, every poll
+//! job with its interval + last run, the config / status / log paths and the
+//! Enable / Disable, Force Poll, Stop Poll, Setup…, Refresh controls, in place
+//! of the ticket list.
 //!
-//! It renders a status line (polling on/off, last run, next poll), every poll
-//! job with its interval and last-run time, the config / status / cache file
-//! paths, and the poll controls (Enable / Disable, Force Poll, Stop Poll,
-//! Setup…, Refresh). All user-facing strings and sizes come from
-//! `commands.toml [jira-config]` (rule 3) — see [`JiraConfigSettings`].
+//! Data comes from `jira_poll.py --describe` (no network, no writes) but the
+//! fetch is owned by the host (`app/host.rs`), which hands the parse back
+//! through `JiraView::set_config_result`; the body only renders and reports
+//! control presses as [`JiraConfigAction`]s. All user-facing strings and the
+//! auto-refresh interval come from `commands.toml [jira-config]` (rule 3).
 
 use std::collections::HashMap;
 
@@ -20,16 +23,29 @@ use crate::views::jira::{Describe, DescribeJob};
 // Pure config + view model (AppKit-free, unit-tested)
 // ===========================================================================
 
-/// `[jira-config]` — the window's user-facing strings and sizes, read back
-/// from `commands.toml` (rule 3).
+/// A Config-tab control press, reported to the host as `JiraEvent::Config`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JiraConfigAction {
+    /// Enable / Disable Jira (`jira-poll-on` / `jira-poll-off`).
+    Enable,
+    /// Poll every enabled job now (`jira_poll.py --force`).
+    Force,
+    /// Stop the running poll (`jira_poll.py --cancel`).
+    Stop,
+    /// Open the Jira setup window.
+    Setup,
+    /// Re-read `jira_poll.py --describe`.
+    Refresh,
+}
+
+/// `[jira-config]` — the surface's user-facing strings and the auto-refresh
+/// interval, read back from `commands.toml` (rule 3).
 #[derive(Clone, Debug, PartialEq)]
 pub struct JiraConfigSettings {
-    pub title: String,
-    pub width: f64,
-    pub height: f64,
-    pub min_width: f64,
-    pub min_height: f64,
-    /// Auto-refresh period in seconds while the window is visible.
+    /// The pill's two segment labels.
+    pub tickets_label: String,
+    pub config_label: String,
+    /// Auto-refresh period in seconds while the Config tab is selected.
     pub refresh: f64,
     pub enable_label: String,
     pub disable_label: String,
@@ -42,11 +58,8 @@ pub struct JiraConfigSettings {
 impl Default for JiraConfigSettings {
     fn default() -> Self {
         JiraConfigSettings {
-            title: "Jira Config".to_string(),
-            width: 1080.0,
-            height: 720.0,
-            min_width: 860.0,
-            min_height: 520.0,
+            tickets_label: "Tickets".to_string(),
+            config_label: "Config".to_string(),
             refresh: 5.0,
             enable_label: "Enable Jira".to_string(),
             disable_label: "Disable Jira".to_string(),
@@ -85,11 +98,8 @@ impl JiraConfigSettings {
             _ => dv.to_string(),
         };
         JiraConfigSettings {
-            title: s("title", &d.title),
-            width: num("dashboard-width", d.width),
-            height: num("dashboard-height", d.height),
-            min_width: num("dashboard-min-width", d.min_width),
-            min_height: num("dashboard-min-height", d.min_height),
+            tickets_label: s("tickets-label", &d.tickets_label),
+            config_label: s("config-label", &d.config_label),
             refresh: num("dashboard-refresh", d.refresh),
             enable_label: s("enable-label", &d.enable_label),
             disable_label: s("disable-label", &d.disable_label),
@@ -126,7 +136,7 @@ pub fn parse_section(text: &str, section: &str) -> HashMap<String, String> {
     out
 }
 
-/// One poll job as the window shows it (name + interval + last run + next).
+/// One poll job as the surface shows it (name + interval + last run + next).
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobRow {
     pub name: String,
@@ -137,7 +147,7 @@ pub struct JobRow {
     pub enabled: bool,
 }
 
-/// The `Describe.endpoints` as display rows (the required core of the window).
+/// The `Describe.endpoints` as display rows (the required core of the surface).
 pub fn job_rows(d: &Describe) -> Vec<JobRow> {
     d.endpoints.iter().map(job_row).collect()
 }
@@ -214,7 +224,7 @@ pub fn status_line(
     )
 }
 
-/// The config / status / cache file paths the window lists (existing files
+/// The config / status / cache file paths the surface lists (existing files
 /// first is the caller's concern; empty paths are dropped here).
 pub fn file_paths(d: &Describe) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![
@@ -230,35 +240,34 @@ pub fn file_paths(d: &Describe) -> Vec<(String, String)> {
 }
 
 // ===========================================================================
-// AppKit window
+// AppKit body (drawn into the Jira view's list area)
 // ===========================================================================
 
 #[cfg(target_os = "macos")]
-pub use appkit::show;
+pub use appkit::JiraConfigBodyView;
 
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
-    use crate::app::host::SwitcherController;
-    use crate::ui::card::CardWindowController;
-    use crate::ui::popup::CardFrame;
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{define_class, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSBezelStyle, NSButton, NSControlSize, NSEvent, NSEventMask,
-        NSEventModifierFlags, NSFont, NSLineBreakMode, NSPopUpMenuWindowLevel, NSScrollView,
-        NSText, NSTextField, NSView,
+        NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSControlSize, NSFont, NSLineBreakMode,
+        NSScrollView, NSTextField, NSView,
     };
-    use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
     use std::cell::{Cell, RefCell};
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     const PAD: f64 = 16.0;
     const ROW_H: f64 = 22.0;
     const TITLE_H: f64 = 20.0;
     const LINE_H: f64 = 16.0;
+
+    /// The event sink: one [`JiraConfigAction`] per control press.
+    pub type ActionSink = Rc<dyn Fn(JiraConfigAction)>;
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
@@ -297,325 +306,149 @@ mod appkit {
         }
     }
 
-    pub struct Ivars {
-        window: Retained<crate::ui::card::CardNSWindow>,
-        controller: Arc<SwitcherController>,
-        doc: Retained<FlippedView>,
+    pub struct BodyIvars {
         scroll: Retained<NSScrollView>,
+        doc: Retained<FlippedView>,
         describe: RefCell<Option<Describe>>,
         load_error: RefCell<String>,
-        busy: Cell<bool>,
-        timer: RefCell<Option<Retained<NSTimer>>>,
-        monitor: RefCell<Option<Retained<AnyObject>>>,
         settings: JiraConfigSettings,
-        colors: PopupColors,
+        colors: Cell<PopupColors>,
+        /// The auto-refresh timer (`[jira-config] dashboard-refresh`), live for
+        /// the life of the view; it only fires while the tab is selected.
+        timer: RefCell<Option<Retained<NSTimer>>>,
+        sink: RefCell<Option<ActionSink>>,
+        /// True while the Config tab is the selected surface.
+        active: Cell<bool>,
     }
 
     define_class!(
-        #[unsafe(super(NSObject))]
+        #[unsafe(super(NSView))]
         #[thread_kind = MainThreadOnly]
-        #[name = "WSJiraConfig"]
-        #[ivars = Ivars]
-        pub struct JiraConfig;
+        #[name = "WSJiraConfigBody"]
+        #[ivars = BodyIvars]
+        pub struct JiraConfigBodyView;
 
-        impl JiraConfig {
+        impl JiraConfigBodyView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            /// Re-wrap the document whenever the Jira view resizes the surface.
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.render();
+            }
+
             #[unsafe(method(enableClicked:))]
             fn enable_clicked(&self, _s: Option<&AnyObject>) {
-                self.toggle_enable();
+                self.emit(JiraConfigAction::Enable);
             }
 
             #[unsafe(method(forceClicked:))]
             fn force_clicked(&self, _s: Option<&AnyObject>) {
-                self.run_script(vec!["--force".into(), "--quiet".into()]);
+                self.emit(JiraConfigAction::Force);
             }
 
             #[unsafe(method(stopClicked:))]
             fn stop_clicked(&self, _s: Option<&AnyObject>) {
-                self.run_script(vec!["--cancel".into()]);
+                self.emit(JiraConfigAction::Stop);
             }
 
             #[unsafe(method(setupClicked:))]
             fn setup_clicked(&self, _s: Option<&AnyObject>) {
-                self.open_setup();
+                self.emit(JiraConfigAction::Setup);
             }
 
             #[unsafe(method(refreshClicked:))]
             fn refresh_clicked(&self, _s: Option<&AnyObject>) {
-                self.refresh();
+                self.emit(JiraConfigAction::Refresh);
             }
         }
 
-        unsafe impl NSObjectProtocol for JiraConfig {}
+        unsafe impl NSObjectProtocol for JiraConfigBodyView {}
     );
 
-    thread_local! {
-        /// The one live window (Swift's `JiraDashboardWindow.live`).
-        static LIVE: RefCell<Option<Retained<JiraConfig>>> = const { RefCell::new(None) };
-    }
-
-    /// `JiraDashboardWindow.show(controller:)` — build once, re-raise after.
-    pub fn show(controller: Arc<SwitcherController>) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        if let Some(w) = LIVE.with(|l| l.borrow().clone()) {
-            w.refresh();
-            NSApplication::sharedApplication(mtm).activate();
-            w.ivars().window.makeKeyAndOrderFront(None);
-            return;
-        }
-        let w = JiraConfig::build(mtm, controller);
-        LIVE.with(|l| *l.borrow_mut() = Some(w.clone()));
-        w.refresh();
-        NSApplication::sharedApplication(mtm).activate();
-        let win = &w.ivars().window;
-        win.center();
-        win.makeKeyAndOrderFront(None);
-    }
-
-    /// Close the live window (chrome ✕ / Esc / Cmd+W), clearing the state flag.
-    fn close_live() {
-        let Some(w) = LIVE.with(|l| l.borrow_mut().take()) else {
-            return;
-        };
-        w.stop_timer();
-        w.drop_monitor();
-        w.ivars().controller.set_jira_config_shown(false);
-        w.ivars().window.orderOut(None);
-    }
-
-    fn label(mtm: MainThreadMarker, text: &str, size: f64, bold: bool, color: Rgba) -> Retained<NSTextField> {
-        let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
-        let f = if bold {
-            NSFont::boldSystemFontOfSize(size)
-        } else {
-            NSFont::systemFontOfSize(size)
-        };
-        l.setFont(Some(&f));
-        l.setTextColor(Some(&color.to_nscolor()));
-        l
-    }
-
-    impl JiraConfig {
-        fn build(mtm: MainThreadMarker, controller: Arc<SwitcherController>) -> Retained<Self> {
-            let settings = JiraConfigSettings::load();
-            let colors = crate::ui::theme::section_colors("jira");
-            let header_color = crate::ui::theme::section_header_color("jira");
-
-            let frame = CardFrame {
-                x: 0.0,
-                y: 0.0,
-                width: settings.width,
-                height: settings.height,
-            };
-            let mut card = CardWindowController::new(
-                mtm,
-                frame,
-                &settings.title,
-                (settings.min_width, settings.min_height),
-            );
-            // The card chrome's ✕ closes only this window.
-            *card.on_slot_hide.borrow_mut() = Some(Box::new(close_live));
-
+    impl JiraConfigBodyView {
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
             let scroll = NSScrollView::new(mtm);
             scroll.setHasVerticalScroller(true);
             scroll.setAutohidesScrollers(true);
             scroll.setDrawsBackground(false);
+            scroll.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
             let doc = FlippedView::new(mtm);
-            doc.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+            doc.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
             scroll.setDocumentView(Some(&doc));
 
-            card.themed_root(
-                &scroll,
-                "jira-config",
-                colors,
-                header_color,
-                None,
-                &settings.title,
-                0.92,
-            );
-            card.window.setLevel(NSPopUpMenuWindowLevel + 1);
-
-            let this = Self::alloc(mtm).set_ivars(Ivars {
-                window: card.window.clone(),
-                controller,
+            let this = Self::alloc(mtm).set_ivars(BodyIvars {
+                scroll: scroll.clone(),
                 doc,
-                scroll,
                 describe: RefCell::new(None),
                 load_error: RefCell::new(String::new()),
-                busy: Cell::new(false),
+                settings: JiraConfigSettings::load(),
+                colors: Cell::new(colors),
                 timer: RefCell::new(None),
-                monitor: RefCell::new(None),
-                settings,
-                colors,
+                sink: RefCell::new(None),
+                active: Cell::new(false),
             });
-            let this: Retained<Self> = unsafe { objc2::msg_send![super(this), init] };
-            this.install_monitor();
-            this.start_timer();
-            this
-        }
-
-        /// `startTimer()` — a repeating refresh while the window is visible
-        /// (the timer's interval is `[jira-config] dashboard-refresh`). The
-        /// block reads the live window, so it holds no strong cycle.
-        fn start_timer(&self) {
-            let secs = self.ivars().settings.refresh.max(2.0);
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            v.addSubview(&scroll);
+            // The timer holds only a Weak: the view owns the timer, so a strong
+            // capture would keep it alive forever.
+            let weak = objc2::rc::Weak::from_retained(&v);
+            let secs = v.ivars().settings.refresh.max(2.0);
             let block = block2::RcBlock::new(move |_t: std::ptr::NonNull<NSTimer>| {
-                let Some(w) = LIVE.with(|l| l.borrow().clone()) else {
+                let Some(body) = weak.load() else {
                     return;
                 };
-                if w.ivars().window.isVisible() {
-                    w.refresh();
+                if body.ivars().active.get() {
+                    body.emit(JiraConfigAction::Refresh);
                 }
             });
-            let timer = unsafe {
-                NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, true, &block)
-            };
-            *self.ivars().timer.borrow_mut() = Some(timer);
+            let timer =
+                unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, true, &block) };
+            *v.ivars().timer.borrow_mut() = Some(timer);
+            v
         }
 
-        fn stop_timer(&self) {
-            if let Some(t) = self.ivars().timer.borrow_mut().take() {
-                t.invalidate();
+        pub fn set_on_action(&self, cb: Box<dyn Fn(JiraConfigAction)>) {
+            *self.ivars().sink.borrow_mut() = Some(Rc::from(cb));
+        }
+
+        /// `true` while the Config tab is selected: the auto-refresh only runs
+        /// then.
+        pub fn set_active(&self, on: bool) {
+            self.ivars().active.set(on);
+        }
+
+        /// The host's `jira_poll.py --describe` result (replaces the status
+        /// line and the job rows; an error keeps the last good payload).
+        pub fn set_result(&self, res: Result<Describe, String>) {
+            match res {
+                Ok(d) => {
+                    *self.ivars().describe.borrow_mut() = Some(d);
+                    *self.ivars().load_error.borrow_mut() = String::new();
+                }
+                Err(e) => *self.ivars().load_error.borrow_mut() = format!("✗ {e}"),
             }
+            self.render();
         }
 
-        /// Esc closes; Cmd+W closes; edit shortcuts reach the field editor
-        /// (rule 1) — the jira_setup installEditShortcuts pattern.
-        fn install_monitor(&self) {
-            let block = block2::RcBlock::new(move |e: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
-                let ev = unsafe { e.as_ref() };
-                let Some((win, is_key)) = LIVE.with(|l| {
-                    l.borrow().as_ref().map(|w| {
-                        let win = w.ivars().window.clone();
-                        let is_key = win.isKeyWindow();
-                        (win, is_key)
-                    })
-                }) else {
-                    return e.as_ptr();
-                };
-                if !is_key {
-                    return e.as_ptr();
-                }
-                let m = ev.modifierFlags();
-                let cmd = m.contains(NSEventModifierFlags::Command);
-                let ctrl = m.contains(NSEventModifierFlags::Control);
-                if ev.keyCode() == 53 {
-                    close_live();
-                    return std::ptr::null_mut();
-                }
-                if cmd && ev.keyCode() == 13 {
-                    // Cmd+W
-                    close_live();
-                    return std::ptr::null_mut();
-                }
-                if !(cmd || ctrl) {
-                    return e.as_ptr();
-                }
-                let Some(fr) = win.firstResponder() else {
-                    return e.as_ptr();
-                };
-                let Some(ed) = (&*fr as &AnyObject).downcast_ref::<NSText>() else {
-                    return e.as_ptr();
-                };
-                match (ev.keyCode(), cmd) {
-                    (9, _) => unsafe { ed.paste(None) },
-                    (8, _) => unsafe { ed.copy(None) },
-                    (0, true) => unsafe { ed.selectAll(None) },
-                    (7, true) => unsafe { ed.cut(None) },
-                    (6, true) => {
-                        if let Some(u) = ed.undoManager() {
-                            u.undo();
-                        }
-                    }
-                    _ => return e.as_ptr(),
-                }
-                std::ptr::null_mut()
-            });
-            let m = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block) };
-            *self.ivars().monitor.borrow_mut() = m;
-        }
-
-        fn drop_monitor(&self) {
-            if let Some(m) = self.ivars().monitor.borrow_mut().take() {
-                unsafe { NSEvent::removeMonitor(&m) };
+        fn emit(&self, a: JiraConfigAction) {
+            let s = self.ivars().sink.borrow().clone();
+            if let Some(s) = s {
+                s(a);
             }
-        }
-
-        // -- actions -------------------------------------------------------
-
-        fn toggle_enable(&self) {
-            let name = if crate::app::jira_poll::enabled_in_config() {
-                "jira-poll-off"
-            } else {
-                "jira-poll-on"
-            };
-            self.ivars().controller.jira_poll(name);
-        }
-
-        fn open_setup(&self) {
-            let ctrl = self.ivars().controller.clone();
-            crate::ui::jira_setup::show(None, Box::new(move || ctrl.jira_enable_result(true, "")));
-        }
-
-        /// Run `jira_poll.py ARGS` off the main thread, then refresh.
-        fn run_script(&self, args: Vec<String>) {
-            if self.ivars().busy.get() {
-                return;
-            }
-            self.ivars().busy.set(true);
-            let refs: Vec<String> = args;
-            std::thread::spawn(move || {
-                let a: Vec<&str> = refs.iter().map(String::as_str).collect();
-                let (code, _out, err) = crate::app::jira_poll::run("jira_poll.py", &a);
-                let msg = if code == 0 {
-                    String::new()
-                } else {
-                    crate::app::jira_poll::error_line(&err, &format!("exit {code}"))
-                };
-                crate::platform::run_on_main(move || {
-                    if let Some(w) = LIVE.with(|l| l.borrow().clone()) {
-                        w.ivars().busy.set(false);
-                        if !msg.is_empty() {
-                            *w.ivars().load_error.borrow_mut() = format!("✗ {msg}");
-                        }
-                        w.refresh();
-                    }
-                });
-            });
-        }
-
-        /// `refresh()` — `jira_poll.py --describe` off-thread, then render.
-        fn refresh(&self) {
-            if self.ivars().busy.get() {
-                return;
-            }
-            self.ivars().busy.set(true);
-            std::thread::spawn(|| {
-                let res = crate::views::jira::run_jira_poll(&["--describe"], None);
-                crate::platform::run_on_main(move || {
-                    let Some(w) = LIVE.with(|l| l.borrow().clone()) else {
-                        return;
-                    };
-                    w.ivars().busy.set(false);
-                    match res {
-                        Ok(v) => {
-                            *w.ivars().load_error.borrow_mut() = String::new();
-                            *w.ivars().describe.borrow_mut() = Some(Describe::from_value(&v));
-                        }
-                        Err(e) => {
-                            *w.ivars().load_error.borrow_mut() = format!("✗ {e}");
-                        }
-                    }
-                    w.render();
-                });
-            });
         }
 
         // -- rendering -----------------------------------------------------
 
         fn color(&self, tone: &str) -> Rgba {
-            let c = self.ivars().colors;
+            let c = self.ivars().colors.get();
             match tone {
                 "dim" => c.dim,
                 "warn" => c.tone(PopupTone::Warning),
@@ -636,8 +469,27 @@ mod appkit {
             self.ivars().doc.addSubview(v);
         }
 
+        fn label(
+            &self,
+            mtm: MainThreadMarker,
+            text: &str,
+            size: f64,
+            bold: bool,
+            color: Rgba,
+        ) -> Retained<NSTextField> {
+            let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+            let f = if bold {
+                NSFont::boldSystemFontOfSize(size)
+            } else {
+                NSFont::systemFontOfSize(size)
+            };
+            l.setFont(Some(&f));
+            l.setTextColor(Some(&color.to_nscolor()));
+            l
+        }
+
         fn title_at(&self, mtm: MainThreadMarker, text: &str, y: f64, w: f64) -> f64 {
-            let l = label(mtm, &text.to_uppercase(), 10.0, true, self.ivars().colors.dim);
+            let l = self.label(mtm, &text.to_uppercase(), 10.0, true, self.ivars().colors.get().dim);
             l.setFrame(rect(PAD, y, w, LINE_H));
             self.add(&l);
             y + TITLE_H
@@ -647,9 +499,8 @@ mod appkit {
         fn render(&self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
             self.clear();
-            let colors = self.ivars().colors;
-            let s = &self.ivars().settings;
-            let doc_w = (self.ivars().scroll.bounds().size.width).max(s.width - 4.0);
+            let colors = self.ivars().colors.get();
+            let doc_w = (self.ivars().scroll.bounds().size.width).max(320.0);
             let mut y = PAD;
 
             // Status line.
@@ -665,7 +516,7 @@ mod appkit {
                     None => ("Loading…".to_string(), "dim"),
                 }
             };
-            let sl = label(mtm, &status, 13.0, true, self.color(tone));
+            let sl = self.label(mtm, &status, 13.0, true, self.color(tone));
             sl.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
             sl.setFrame(rect(PAD, y, doc_w - PAD * 2.0, LINE_H + 4.0));
             self.add(&sl);
@@ -692,7 +543,7 @@ mod appkit {
             // Controls.
             y = self.render_controls(mtm, y);
 
-            // Poll jobs (§ every poll job, interval + last run).
+            // Poll jobs (every poll job, interval + last run).
             y = self.title_at(mtm, "Poll jobs", y + 6.0, doc_w);
             let rows = describe.as_ref().map(job_rows).unwrap_or_default();
             if rows.is_empty() {
@@ -701,7 +552,7 @@ mod appkit {
                 } else {
                     "No poll jobs configured — open Setup…"
                 };
-                let l = label(mtm, text, 12.0, false, colors.dim);
+                let l = self.label(mtm, text, 12.0, false, colors.dim);
                 l.setFrame(rect(PAD + 4.0, y, doc_w - PAD * 2.0, LINE_H));
                 self.add(&l);
                 y += ROW_H;
@@ -718,10 +569,10 @@ mod appkit {
                             _ => colors.tone(PopupTone::Success),
                         }
                     };
-                    let dot = label(mtm, "●", 9.0, false, dot_color);
+                    let dot = self.label(mtm, "●", 9.0, false, dot_color);
                     dot.setFrame(rect(PAD, y + 3.0, 12.0, LINE_H));
                     self.add(&dot);
-                    let name = label(mtm, &r.name, 12.5, true, colors.text);
+                    let name = self.label(mtm, &r.name, 12.5, true, colors.text);
                     name.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
                     name.setFrame(rect(PAD + 16.0, y, 220.0, LINE_H));
                     self.add(&name);
@@ -733,7 +584,7 @@ mod appkit {
                         r.status,
                         if r.enabled { "" } else { " (off)" },
                     );
-                    let d = label(mtm, &detail, 11.5, false, colors.dim);
+                    let d = self.label(mtm, &detail, 11.5, false, colors.dim);
                     d.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
                     d.setFrame(rect(PAD + 240.0, y + 1.0, (doc_w - PAD * 2.0 - 224.0).max(1.0), LINE_H));
                     self.add(&d);
@@ -745,7 +596,7 @@ mod appkit {
             y = self.title_at(mtm, "Files", y + 10.0, doc_w);
             let paths = describe.as_ref().map(file_paths).unwrap_or_default();
             if paths.is_empty() {
-                let l = label(mtm, "Loading paths…", 11.5, false, colors.dim);
+                let l = self.label(mtm, "Loading paths…", 11.5, false, colors.dim);
                 l.setFrame(rect(PAD + 4.0, y, doc_w - PAD * 2.0, LINE_H));
                 self.add(&l);
                 y += LINE_H + 4.0;
@@ -776,16 +627,16 @@ mod appkit {
                 .map(|d| d.lock_held)
                 .unwrap_or(false);
             let enable = if enabled { &s.disable_label } else { &s.enable_label };
-            let specs: [(&str, objc2::runtime::Sel); 5] = [
-                (enable.as_str(), sel!(enableClicked:)),
-                (s.force_label.as_str(), sel!(forceClicked:)),
-                (s.stop_label.as_str(), sel!(stopClicked:)),
-                (s.setup_label.as_str(), sel!(setupClicked:)),
-                (s.refresh_label.as_str(), sel!(refreshClicked:)),
+            let specs: [(&str, objc2::runtime::Sel, JiraConfigAction); 5] = [
+                (enable.as_str(), sel!(enableClicked:), JiraConfigAction::Enable),
+                (s.force_label.as_str(), sel!(forceClicked:), JiraConfigAction::Force),
+                (s.stop_label.as_str(), sel!(stopClicked:), JiraConfigAction::Stop),
+                (s.setup_label.as_str(), sel!(setupClicked:), JiraConfigAction::Setup),
+                (s.refresh_label.as_str(), sel!(refreshClicked:), JiraConfigAction::Refresh),
             ];
             let target: &AnyObject = as_any(self);
             let mut x = PAD;
-            for (title, action) in specs {
+            for (title, action, kind) in specs {
                 let b = NSButton::new(mtm);
                 b.setTitle(&NSString::from_str(title));
                 b.setBezelStyle(NSBezelStyle::Push);
@@ -793,12 +644,15 @@ mod appkit {
                 b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
                 let w = (title.chars().count() as f64 * 7.2 + 26.0).max(84.0);
                 b.setFrame(rect(x, y, w, 28.0));
-                if action == sel!(stopClicked:) {
-                    b.setToolTip(Some(&NSString::from_str("Stop the running poll (jira_poll.py --cancel)")));
-                    b.setEnabled(lock_held);
-                }
-                if action == sel!(forceClicked:) {
-                    b.setToolTip(Some(&NSString::from_str("Poll every enabled job now (jira_poll.py --force)")));
+                match kind {
+                    JiraConfigAction::Stop => {
+                        b.setToolTip(Some(&NSString::from_str("Stop the running poll (jira_poll.py --cancel)")));
+                        b.setEnabled(lock_held);
+                    }
+                    JiraConfigAction::Force => {
+                        b.setToolTip(Some(&NSString::from_str("Poll every enabled job now (jira_poll.py --force)")));
+                    }
+                    _ => {}
                 }
                 unsafe {
                     b.setTarget(Some(target));
@@ -811,9 +665,9 @@ mod appkit {
         }
     }
 
-    impl std::fmt::Debug for JiraConfig {
+    impl std::fmt::Debug for JiraConfigBodyView {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("JiraConfig").finish()
+            f.debug_struct("JiraConfigBodyView").finish()
         }
     }
 }
@@ -833,17 +687,17 @@ mod tests {
         assert_eq!(JiraConfigSettings::from_section(&HashMap::new()), d);
 
         let mut m = HashMap::new();
-        m.insert("title".to_string(), "Jira Board".to_string());
-        m.insert("dashboard-width".to_string(), "1200".to_string());
+        m.insert("tickets-label".to_string(), "Issues".to_string());
+        m.insert("config-label".to_string(), "Jobs".to_string());
         m.insert("dashboard-refresh".to_string(), "9".to_string());
         m.insert("force-poll-label".to_string(), "Poll Now".to_string());
         let s = JiraConfigSettings::from_section(&m);
-        assert_eq!(s.title, "Jira Board");
-        assert_eq!(s.width, 1200.0);
+        assert_eq!(s.tickets_label, "Issues");
+        assert_eq!(s.config_label, "Jobs");
         assert_eq!(s.refresh, 9.0);
         assert_eq!(s.force_label, "Poll Now");
         // Untouched keys keep their defaults.
-        assert_eq!(s.height, d.height);
+        assert_eq!(s.enable_label, d.enable_label);
         assert_eq!(s.stop_label, d.stop_label);
     }
 
@@ -851,21 +705,21 @@ mod tests {
     fn from_text_reads_only_the_jira_config_section() {
         let text = "\
 [app]
-dashboard-width = 1
+tickets-label = \"Nope\"
 
 [jira-config]
 enabled = true
 in-palette = true
-dashboard-width = 1100
-dashboard-height = 640
+tickets-label = \"Tickets\"
+config-label = \"Config\"
 enable-label = \"Turn On\"
 
 [jira]
 enabled = true
 ";
         let s = JiraConfigSettings::from_text(text);
-        assert_eq!(s.width, 1100.0);
-        assert_eq!(s.height, 640.0);
+        assert_eq!(s.tickets_label, "Tickets");
+        assert_eq!(s.config_label, "Config");
         assert_eq!(s.enable_label, "Turn On");
         assert_eq!(s.disable_label, "Disable Jira");
     }

@@ -3213,7 +3213,7 @@ pub fn register(registry: &mut Registry, enabled: bool) {
     if enabled {
         registry.add_palette(crate::app::registry::PaletteCommand::new(
             "jira-config",
-            "Jira Config Window",
+            "Jira Config",
             "views",
         ));
     }
