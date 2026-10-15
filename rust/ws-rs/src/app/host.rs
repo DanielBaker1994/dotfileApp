@@ -883,11 +883,11 @@ impl SwitcherController {
                 .unwrap_or(true)
         };
         if section_flag(sections, "confluence", false) && listed("confluence") {
-            let title = label_of("confluence", "Confluence Search");
+            let title = label_of("confluence", "Confluence");
             all.push(PaletteCommand::new("confluence", title, "views"));
         }
         if section_flag(sections, "ai", false) && listed("ai") {
-            let title = label_of("ai", "AI View");
+            let title = label_of("ai", "AI");
             all.push(PaletteCommand::new("ai", title, "views"));
         }
         if section_flag(sections, "compare", false) && listed("compare") {
@@ -11146,8 +11146,10 @@ mod daemon_ui {
                 }));
                 e.push(MenuEntry::Separator);
                 e.push(file_action_copy_path(&path));
-            }
-            if let Some(note) = note {
+            } else if let Some(note) = note {
+                // Only when the click is not on an image: otherwise the image's
+                // "Copy Absolute Path" is the row the user wants, and a second
+                // identically-labelled row copying the note would just confuse.
                 e.push(file_action_copy_path(&note));
             }
             let weak = objc2::rc::Weak::from_retained(&self.retain());
@@ -13372,8 +13374,8 @@ enabled = true
             vec![
                 "jira",
                 "screenshot",
-                "Confluence Search",
-                "AI View",
+                "Confluence",
+                "AI",
                 "Compare",
                 "Kitchen Sink",
             ],
