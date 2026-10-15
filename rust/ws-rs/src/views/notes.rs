@@ -2018,6 +2018,9 @@ mod macos {
         /// The rail column: the tree card over the Open sidebar. Re-split on
         /// every resize so the tree stays only as tall as its rows.
         rail: RefCell<Option<(Retained<crate::ui::tree_view::TreeView>, Retained<crate::ui::sidebar::SidebarView>)>>,
+        /// The rail divider, re-placed on every resize so its grab strip spans
+        /// the pane (it is placed once at build otherwise).
+        rail_divider: RefCell<Option<Retained<crate::ui::pane_divider::PaneDividerView>>>,
     }
 
     define_class!(
@@ -2048,6 +2051,11 @@ mod macos {
             *self.ivars().rail.borrow_mut() = Some((tree.clone(), sidebar.clone()));
         }
 
+        /// The rail divider (re-placed with the rail on every resize).
+        fn set_rail_divider(&self, divider: &Retained<crate::ui::pane_divider::PaneDividerView>) {
+            *self.ivars().rail_divider.borrow_mut() = Some(divider.clone());
+        }
+
         /// Stack tree over sidebar inside the current height.
         fn layout_rail(&self) {
             let guard = self.ivars().rail.borrow();
@@ -2058,10 +2066,17 @@ mod macos {
             let (tree_h, open_h) = crate::views::notes_tree::rail_split(h, show, tree.wanted_height());
             tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, tree_h)));
             sidebar.setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(w, open_h)));
+            // Keep the grab strip spanning the pane after a window resize.
+            if let Some(d) = self.ivars().rail_divider.borrow().as_ref() {
+                d.place(NSRect::new(NSPoint::new(w - 4.0, 0.0), NSSize::new(8.0, h)));
+            }
         }
 
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(NotesFlippedIvars { rail: RefCell::new(None) });
+            let this = Self::alloc(mtm).set_ivars(NotesFlippedIvars {
+                rail: RefCell::new(None),
+                rail_divider: RefCell::new(None),
+            });
             unsafe {
                 msg_send![
                     super(this),
@@ -3604,6 +3619,7 @@ mod macos {
         divider.set_width(sidebar_w);
         divider.setHidden(model.sidebar.collapsed);
         root.addSubview(&divider);
+        root.set_rail_divider(&divider);
 
         Some(NotesSurface {
             root: root.into_super(),
