@@ -540,24 +540,28 @@ app-menu Quit is normal macOS), F8 (`Open Config` naming), F21 (deferred), plus 
 (generating the ⌘/ sheet from the key router) and the wider label unification behind F11.
 (Round 3 below fixes F8 and the F11 labels; F10's deeper half and F21 remain open.)
 
-### Round 3 (Oct 14 2026) — `PLAN-menu-cleanup-remaining.md` R1 / R2 / R4
+### Round 3 (Oct 14 2026) — `PLAN-menu-cleanup-remaining.md` R1 / R2 / R4 / R5
 
 | Item | Change | Where | Commit |
 |---|---|---|---|
 | R1 / F8 | header row "Open Config" → "Open commands.toml" (it opens `commands.toml`) | `app/host.rs` `header_icon_menu` | `0419f4b` |
 | R2 / F11 labels | extracted one `label_of` helper; `build_nav` + `build_palette` read the view `[section] label` (falls back per view); `prepare_panel` uses the nav tip, so header tooltip / pane name / palette row share one source. Palette fallbacks aligned to the shipped labels ("Confluence"/"AI") | `app/host.rs` | `80fc3ba`, `5b8d432` |
 | R4 / F11 actions | shared `file_action_open_in_notes` / `_copy_path` / `_copy_file` / `_reveal` helpers; `ai_rule_menu` / `notes_editor_menu` / `terminal_menu` reordered to the canonical open → copy → edit → navigation order; `vim_image_menu` "Copy Image Path" → "Copy Absolute Path" | `app/host.rs`, `views/notes.rs` | `f4911b1`, `5b8d432` |
+| R5 / F13 | one shared, pure definition of the note context-menu rows (`NoteMenuRow` + `NOTE_MENU_ORDER` + `label()` / `process_dependent()`); the prose menu is driven by `prose_menu_rows()`, which provably omits process-dependent rows (the pop-out child has no `UI_WEAK`, so a reveal row is a no-op). Rendered menus unchanged | `views/notes.rs`, `views/notes_prose.rs`, `app/host.rs` (comment) | `d6c1bb1` |
 
-Review-driven rework (`5b8d432`): the palette's no-label fallback still said "Confluence Search" /
-"AI View" while the nav said "Confluence" / "AI" — changed the palette to match. And
+Review-driven rework (`5b8d432`, `d6c1bb1`): the palette's no-label fallback still said "Confluence
+Search" / "AI View" while the nav said "Confluence" / "AI" — changed the palette to match; and
 `notes_editor_menu` showed two identically-labelled "Copy Absolute Path" rows when an image was
-right-clicked (image + note); the note row now appears only when the click is not on an image.
+right-clicked (image + note) — the note row now appears only when the click is not on an image.
 
-**Known gap from R4:** the plan asked for the shared builder to be used by ≥5 surfaces; it is used by
-3 (`ai_rule_menu`, `notes_editor_menu`, `terminal_menu`). `files_row_menu` and `compare_folder_menu`
-are multi-path / disabled-row surfaces that the single-path helpers do not fit;
-`notes_prose.rs show_context_menu` runs in the prose pop-out, where a reveal row is a no-op
-(§0.4a). Left for a future round if the helpers grow multi-path support.
+**R5 chose option (a)** (unify + enforced rule) over option (b) (a socket round-trip so the pop-out
+could reveal), on the least-risk principle.
+
+**Known gaps from R4 / R5:** the R4 shared builder is used by 3 surfaces, not the plan's ≥5
+(`files_row_menu` / `compare_folder_menu` are multi-path/disabled-row surfaces the single-path
+helpers do not fit; the prose pop-out cannot reveal). The R5 shared row table is consumed by the
+prose menu and documented in the editor/vim menus, but those two are still hand-built string
+literals (no drift *test* for them). Left for a future round.
 
 ---
 
