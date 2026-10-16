@@ -613,6 +613,12 @@ pub struct JiraList {
     /// The last sprint-fetch failure, shown in the board summary so the
     /// lanes never lie about what they filtered.
     pub sprint_error: Option<String>,
+    /// Sprint issue keys already fetched this session, per `(board, sprint)`.
+    /// A re-show re-applies these instead of refetching (Mechanism 3 of
+    /// `DEBUG-jira-sprint-switch-revert.md`: the `--board-view` completion
+    /// used to un-filter every row until the next `--board-sprint-keys`
+    /// answer landed). Bounded; a successful fetch replaces its entry.
+    pub sprint_keys_memo: HashMap<(String, String), std::collections::HashSet<String>>,
     /// `backToBoardList`: the open board came from "All boards", so Esc
     /// returns there.
     pub back_to_board_list: bool,
@@ -1077,8 +1083,12 @@ impl JiraList {
         self.pin_board(id);
         let cols = self.default_columns();
         self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &cached, cols);
-        let default_sprint = self.default_sprint(id);
-        let sp = self.board_sprint.entry(id.to_string()).or_insert(default_sprint).clone();
+        // The board's sprint: this session's pick, else the persisted pick
+        // (Mechanism 2: a restart used to snap every board back to
+        // `current`), else the default. Land it in the map so every later
+        // read (`current_view_spec`, `board_bar`) agrees with what opened.
+        let sp = self.sprint_token(id);
+        self.board_sprint.insert(id.to_string(), sp.clone());
         self.board_mode.entry(id.to_string()).or_insert_with(|| "columns".to_string());
         self.compute_board_columns();
         self.request_sprint(id, &sp);
@@ -1101,13 +1111,24 @@ impl JiraList {
                     self.board_error(board, "board not synced yet");
                     return;
                 }
-                if self.shown_path != path {
+                if self.shown_path == path {
+                    self.reload_shown(); // rows written to where the empty view points
+                } else if self.board_path(board).as_deref() == Some(path.as_str()) {
+                    // Mechanism 3: the built rows landed in the board's OWN
+                    // tab file — the file the open view already stands for
+                    // (it was missing when the board opened). Reload in
+                    // place: `show_pin_file` resets `sprint_filter`, which
+                    // used to flash every issue unfiltered until the
+                    // re-issued `--board-sprint-keys` answer arrived.
+                    self.shown_path = path.clone();
+                    self.reload_shown();
+                    let sp = self.sprint_token(board);
+                    self.reapply_sprint(board, &sp);
+                } else {
                     let cols = self.default_columns();
                     self.show_pin_file(&format!("{BOARD_PREFIX}{board}"), &path, cols);
                     let sp = self.sprint_token(board);
-                    self.request_sprint(board, &sp);
-                } else {
-                    self.reload_shown(); // rows written to where the empty view points
+                    self.reapply_sprint(board, &sp);
                 }
                 self.compute_board_columns();
             }
@@ -1129,12 +1150,35 @@ impl JiraList {
         }
     }
 
-    /// The board's remembered sprint pick (or the default).
+    /// The board's sprint token: this session's pick, else the persisted
+    /// pick (`jira.boardSprint.<id>` — Mechanism 2: restarts used to snap
+    /// every board back to the current/latest sprint), else the default.
     fn sprint_token(&self, board: &str) -> String {
-        self.board_sprint
-            .get(board)
-            .cloned()
+        if let Some(sp) = self.board_sprint.get(board) {
+            return sp.clone();
+        }
+        crate::platform::get_string(&format!("jira.boardSprint.{board}"))
+            .filter(|sp| !sp.is_empty() && self.sprint_token_usable(board, sp))
             .unwrap_or_else(|| self.default_sprint(board))
+    }
+
+    /// A persisted sprint id the catalog no longer lists (the board
+    /// re-planned) must not resurrect a dead filter; `all` / `current`
+    /// always qualify, as does anything while the catalog is still empty
+    /// (the board is not synced yet).
+    fn sprint_token_usable(&self, board: &str, sp: &str) -> bool {
+        if sp == "all" || sp == "current" {
+            return true;
+        }
+        let sprints = self.board_sprints(board);
+        sprints.is_empty() || sprints.iter().any(|s| s.id == sp)
+    }
+
+    /// Remember this board's sprint for the session AND across restarts
+    /// (Mechanism 2; mirrors `jira.boardsCollapsed`).
+    fn remember_sprint(&mut self, board: &str, sprint: &str) {
+        self.board_sprint.insert(board.to_string(), sprint.to_string());
+        crate::platform::set_string(&format!("jira.boardSprint.{board}"), sprint);
     }
 
     /// Ask `--board-sprint-keys` for one sprint's issue keys (off-main via
@@ -1157,11 +1201,52 @@ impl JiraList {
             return; // one request per (board, sprint) in flight
         }
         self.sprint_error = None;
+        // Mechanism 3: keys fetched once this session filter the lanes
+        // immediately, so the confirming refetch never shows every issue
+        // in between (the old un-filtered flash).
+        if let Some(keys) = self
+            .sprint_keys_memo
+            .get(&(board.to_string(), sprint.to_string()))
+            .cloned()
+        {
+            self.sprint_filter = Some((board.to_string(), sprint.to_string(), keys));
+            self.refilter();
+            self.compute_board_columns();
+        }
         self.sprint_pending = Some((board.to_string(), sprint.to_string()));
         self.pending_runs.push(PollRun {
             args: vec!["--board-sprint-keys".into(), board.to_string(), sprint.to_string()],
             kind: PollRunKind::SprintKeys(board.to_string(), sprint.to_string()),
         });
+    }
+
+    /// Re-assert the sprint filter after a board re-show: a live filter
+    /// needs nothing, the memo is re-applied synchronously instead of
+    /// refetching (Mechanism 3), and only an unfetched sprint queues
+    /// `--board-sprint-keys`.
+    pub fn reapply_sprint(&mut self, board: &str, sprint: &str) {
+        if sprint == "all" {
+            return; // unfiltered is what `all` means; nothing was cleared
+        }
+        if self
+            .sprint_filter
+            .as_ref()
+            .is_some_and(|(b, s, _)| b == board && s == sprint)
+        {
+            return; // `reload_shown` kept the filter live
+        }
+        if let Some(keys) = self
+            .sprint_keys_memo
+            .get(&(board.to_string(), sprint.to_string()))
+            .cloned()
+        {
+            self.sprint_error = None;
+            self.sprint_filter = Some((board.to_string(), sprint.to_string(), keys));
+            self.refilter();
+            self.compute_board_columns();
+            return;
+        }
+        self.request_sprint(board, sprint);
     }
 
     /// Route a `--board-sprint-keys` answer back to the model.
@@ -1174,6 +1259,17 @@ impl JiraList {
             return; // stale answer (the user re-picked meanwhile)
         }
         self.sprint_pending = None;
+        if let Ok(keys) = &res {
+            // Mechanism 3: remember the set so a re-show re-applies it
+            // instead of refetching. Bounded crudely — a session browses a
+            // handful of boards' sprints; the odd evicted set costs one
+            // refetch, never a wrong answer.
+            if self.sprint_keys_memo.len() >= 128 {
+                self.sprint_keys_memo.clear();
+            }
+            self.sprint_keys_memo
+                .insert((board.to_string(), sprint.to_string()), keys.iter().cloned().collect());
+        }
         let on_this = self.on_board().as_deref() == Some(board)
             && self.board_sprint.get(board).map(String::as_str) == Some(sprint);
         match res {
@@ -1418,7 +1514,7 @@ impl JiraList {
             return false;
         }
         let (board, sprint, mode) = (parts[0], parts[1], parts[2]);
-        self.board_sprint.insert(board.to_string(), sprint.to_string());
+        self.remember_sprint(board, sprint);
         self.board_mode.insert(board.to_string(), mode.to_string());
         self.open_board(board)
     }
@@ -1430,7 +1526,19 @@ impl JiraList {
     /// cosmetic and the view *said* it was the sprint.
     pub fn pick_sprint(&mut self, sprint: &str) -> bool {
         let Some(id) = self.on_board() else { return false };
-        self.board_sprint.insert(id.clone(), sprint.to_string());
+        let old_spec = self.current_view_spec();
+        // Mechanism 2: the pick must outlive restarts / window rebuilds —
+        // it used to be memory-only, so every board snapped back to
+        // `current` (the latest sprint), reading as "it only shows the
+        // latest".
+        self.remember_sprint(&id, sprint);
+        // Mechanism 1: a "Starred" sidebar row opens the sprint FROZEN in
+        // its `board|sprint|mode` spec, so clicking that row back used to
+        // overwrite this pick with the pin's sprint. Re-point the row
+        // instead — it now follows the pick.
+        if let (Some(old), Some(new)) = (old_spec, self.current_view_spec()) {
+            self.repoint_pinned_view(&old, &new);
+        }
         self.sprint_filter = None;
         self.sprint_error = None;
         self.refilter();
@@ -1442,7 +1550,13 @@ impl JiraList {
     /// `boardBar.onMode` — `columns` | `table` for the open board.
     pub fn set_mode(&mut self, mode: &str) -> bool {
         let Some(id) = self.on_board() else { return false };
+        let old_spec = self.current_view_spec();
         self.board_mode.insert(id, mode.to_string());
+        // The spec carries the mode too — a pinned row follows the switch
+        // (Mechanism 1, same frozen-spec overwrite as the sprint).
+        if let (Some(old), Some(new)) = (old_spec, self.current_view_spec()) {
+            self.repoint_pinned_view(&old, &new);
+        }
         true
     }
 
@@ -1491,6 +1605,28 @@ impl JiraList {
         self.queue_write(&["--pin-view", if on { "add" } else { "remove" }, spec], None, "Stars not saved");
         self.pins_dirty = true;
         true
+    }
+
+    /// Mechanism 1 (`DEBUG-jira-sprint-switch-revert.md`): a "Starred" row
+    /// used to open the sprint/mode FROZEN in its spec, so a fresh pick was
+    /// overwritten the moment the user clicked the row. When a pick changes
+    /// the open board's spec, re-point the pinned row to it (keeping its
+    /// slot); if the new spec is already pinned, the row folds into it.
+    fn repoint_pinned_view(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        let Some(i) = self.pinned_views.iter().position(|v| v == old) else {
+            return; // the current view is not a pinned row — nothing reverts
+        };
+        if self.pinned_views.iter().any(|v| v == new) {
+            self.pinned_views.remove(i);
+        } else {
+            self.pinned_views[i] = new.to_string();
+            self.queue_write(&["--pin-view", "add", new], None, "Stars not saved");
+        }
+        self.queue_write(&["--pin-view", "remove", old], None, "Stars not saved");
+        self.pins_dirty = true;
     }
 
     fn queue_write(&mut self, args: &[&str], stdin: Option<String>, err_prefix: &str) {
@@ -1633,11 +1769,7 @@ impl JiraList {
     /// `currentViewSpec` — `board|sprint|mode` for the open board.
     pub fn current_view_spec(&self) -> Option<String> {
         let id = self.on_board()?;
-        let sprint = self
-            .board_sprint
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| self.default_sprint(&id));
+        let sprint = self.sprint_token(&id);
         let mode = self
             .board_mode
             .get(&id)
@@ -1726,9 +1858,15 @@ impl JiraList {
             }
         }
         // The sprint filter's live state — the bar never says "Current
-        // sprint" over unfiltered rows without saying so.
+        // sprint" over unfiltered rows without saying so. A confirming
+        // refetch in flight while the memo already filters says nothing:
+        // the rows shown ARE the sprint's (as last fetched).
         if sp != "all" {
-            if self.sprint_pending.as_ref().is_some_and(|(b, _)| b == board) {
+            let filtered = self
+                .sprint_filter
+                .as_ref()
+                .is_some_and(|(b, s, _)| b == board && s == sp);
+            if self.sprint_pending.as_ref().is_some_and(|(b, _)| b == board) && !filtered {
                 parts.push("sprint rows loading…".into());
             } else if let Some(e) = &self.sprint_error {
                 parts.push(format!("sprint filter failed — showing all: {e}"));
@@ -1741,11 +1879,7 @@ impl JiraList {
     /// `None` (the "All boards" list has no bar).
     pub fn board_bar(&self) -> Option<JiraBoardBarModel> {
         let id = self.on_board()?;
-        let sp = self
-            .board_sprint
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| self.default_sprint(&id));
+        let sp = self.sprint_token(&id);
         let mode = self
             .board_mode
             .get(&id)
@@ -1802,7 +1936,7 @@ impl JiraList {
                 };
                 serde_json::json!({
                     "id": id,
-                    "sprint": self.board_sprint.get(&id).cloned().unwrap_or_else(|| self.default_sprint(&id)),
+                    "sprint": self.sprint_token(&id),
                     "mode": self.board_mode.get(&id).cloned().unwrap_or_else(|| "columns".to_string()),
                     "columns": self.board_mode.get(&id).map(|m| m == "columns").unwrap_or(true),
                     "bar": true,
@@ -2637,9 +2771,19 @@ impl JiraList {
             }
         }
         for v in &self.pinned_views {
-            let board = v.split('|').next().unwrap_or("").to_string();
+            let mut parts = v.split('|');
+            let board = parts.next().unwrap_or("").to_string();
             let name = self.catalog.iter().find(|c| c.0 == board).map(|c| c.1.clone()).unwrap_or(format!("Board {board}"));
-            let sprint = self.sprint_name(&board);
+            // The ROW's own spec decides the sprint in the title — naming
+            // the active sprint for every row made all pins look like
+            // "current" and hid which sprint a click re-applies
+            // (Mechanism 1 of `DEBUG-jira-sprint-switch-revert.md`).
+            let sp = parts.next().unwrap_or("current");
+            let sprint = match sp {
+                "all" => "All issues".to_string(),
+                "current" => self.sprint_name(&board),
+                _ => self.sprint_title(&board, sp),
+            };
             let label = if sprint.is_empty() { name } else { format!("{name} · {sprint}") };
             pinned.push(SidebarPin {
                 key: format!("{VIEW_PREFIX}{v}"),
@@ -2745,21 +2889,11 @@ impl JiraList {
     }
 
     fn sprint_name(&self, board: &str) -> String {
-        let Some(p) = &self.paths else { return String::new() };
-        let cat = read_json(&p.cache_file("boardCatalog"));
-        for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
-            for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
-                if b.get("id").and_then(Value::as_str) != Some(board) {
-                    continue;
-                }
-                for s in b.get("sprints").and_then(Value::as_array).cloned().unwrap_or_default() {
-                    if s.get("state").and_then(Value::as_str) == Some("active") {
-                        return s.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    }
-                }
-            }
-        }
-        String::new()
+        self.board_sprints(board)
+            .into_iter()
+            .find(|s| s.state == "active")
+            .map(|s| s.name)
+            .unwrap_or_default()
     }
 
     /// The inspector content (`inspectorContent`): key, title, chips from
@@ -5403,6 +5537,9 @@ mod tests {
     fn board_list_open_columns_and_pins_from_fixtures() {
         let base = std::env::temp_dir().join(format!("ws-jira-board-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
+        // Sprint picks persist across runs (Mechanism 2); start from a clean
+        // slate so the "default = current" assertions below hold.
+        crate::platform::set_string("jira.boardSprint.42", "");
         let cache = base.join("cache");
         let boards_dir = base.join("jira_boards");
         std::fs::create_dir_all(&cache).unwrap();
@@ -5468,7 +5605,7 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let mut l = JiraList::new(section, Some(paths));
+        let mut l = JiraList::new(section.clone(), Some(paths.clone()));
 
         // The catalog populated from board_catalog.json.
         assert_eq!(l.catalog.len(), 1);
@@ -5582,6 +5719,57 @@ mod tests {
         assert!(l.pinned_views.contains(&"42|7|table".to_string()));
         l.refresh();
         assert!(l.pinned_views.contains(&"42|7|table".to_string()));
+
+        // Mechanism 1: a pick on a pinned board RE-POINTS the "Starred"
+        // row instead of leaving the old spec to overwrite the pick the
+        // next time the row is clicked (`DEBUG-jira-sprint-switch-revert.md`).
+        assert!(l.pick_sprint("current"));
+        assert!(l.pinned_views.contains(&"42|current|table".to_string()));
+        assert!(!l.pinned_views.iter().any(|v| v.starts_with("42|7|")));
+        let w = |a: [&str; 3]| l.pending_writes.iter().any(|x| x.args == a);
+        assert!(w(["--pin-view", "add", "42|current|table"]), "re-point writes the new spec");
+        assert!(w(["--pin-view", "remove", "42|7|table"]), "…and removes the old one");
+        // Clicking the row back lands on the pick — no revert to `current`.
+        assert!(l.open_view("42|current|table"));
+        assert_eq!(l.board_state()["sprint"], json!("current"));
+
+        // Mechanism 2: the pick persists — a rebuilt list (daemon restart /
+        // window re-open) opens on the picked sprint, not back on the
+        // latest, and a persisted id the catalog no longer lists is dropped.
+        assert!(l.pick_sprint("7"));
+        assert_eq!(crate::platform::get_string("jira.boardSprint.42").as_deref(), Some("7"));
+        let mut l2 = JiraList::new(section.clone(), Some(paths.clone()));
+        assert!(l2.open_board("42"));
+        assert_eq!(l2.board_state()["sprint"], json!("7"));
+        crate::platform::set_string("jira.boardSprint.42", "999");
+        let mut l3 = JiraList::new(section, Some(paths));
+        assert!(l3.open_board("42"));
+        assert_eq!(l3.board_state()["sprint"], json!("current"));
+        crate::platform::set_string("jira.boardSprint.42", "");
+
+        // Mechanism 3: fetched keys are memoized — a re-show re-applies the
+        // filter synchronously instead of refetching (no unfiltered flash,
+        // no round trip after every re-show).
+        l.apply_sprint_keys("42", "7", Ok(vec!["DEMO-1".into()]));
+        assert!(l.sprint_keys_memo.contains_key(&("42".to_string(), "7".to_string())));
+        let runs_before = l.pending_runs.len();
+        l.sprint_filter = None; // what a `show_pin_file` re-show leaves behind
+        l.reapply_sprint("42", "7");
+        assert!(l.sprint_filter.is_some(), "re-show re-applies the memoized keys");
+        assert_eq!(l.pending_runs.len(), runs_before, "a memo hit must not refetch");
+        // …and the memo lands SYNCHRONOUSLY through the plain request path
+        // too (the live probe caught rows reloading unfiltered because the
+        // filter was set without a re-refilter — the flash we are fixing).
+        let board_file = boards_dir.join("board-42.json");
+        l.show_pin_file(
+            &format!("{BOARD_PREFIX}42"),
+            &board_file.to_string_lossy(),
+            l.default_columns(),
+        );
+        assert!(l.sprint_filter.is_none(), "show_pin_file resets the filter");
+        l.request_sprint("42", "7");
+        assert!(l.sprint_filter.is_some(), "the memo filters immediately — no unfiltered window");
+        assert_eq!(l.rows.len(), 1, "rows narrow without waiting for the answer");
 
         // list-star unpins the board; pin re-adds it.
         assert!(l.toggle_pin_board("42"));
