@@ -117,12 +117,18 @@ def _parse(path: str) -> dict:
     categories = {k: v for k, v in (o.get("statusCategories") or {}).items()
                   if _is_str(k) and _is_str(v)} if isinstance(o.get("statusCategories"), dict) else {}
 
-    return {"fetchedAt": o.get("fetchedAt") if _is_str(o.get("fetchedAt")) else "",
-            "projects": projects, "users": users, "statuses": statuses,
-            "statusCategories": categories,
-            "issueTypes": _string_list(o.get("issueTypes")),
-            "priorities": _string_list(o.get("priorities")),
-            "fields": fields, "versions": versions, "boards": boards, "labels": labels}
+    out = {"fetchedAt": o.get("fetchedAt") if _is_str(o.get("fetchedAt")) else "",
+           "projects": projects, "users": users, "statuses": statuses,
+           "statusCategories": categories,
+           "issueTypes": _string_list(o.get("issueTypes")),
+           "priorities": _string_list(o.get("priorities")),
+           "fields": fields, "versions": versions, "boards": boards, "labels": labels}
+    # unknown keys pass through untouched (documented above): statusIds,
+    # warnings, forProjects ... whatever the poller adds later survives
+    for k, v in o.items():
+        if k not in out:
+            out[k] = v
+    return out
 
 
 def empty() -> dict:
@@ -176,9 +182,11 @@ def value_options(values) -> list:
 
 
 def status_options(d: dict, words: dict, category_names=None) -> list:
-    category_names = category_names or list(jira_pages.CATEGORY_NAMES)
+    names = list(category_names or jira_pages.CATEGORY_NAMES)
+    if len(names) < 3:   # category() always answers 0..2
+        names += list(jira_pages.CATEGORY_NAMES)[len(names):3]
     cats = d.get("statusCategories") or {}
-    return [_option(s, s, "", category_names[jira_data.category(s, cats, words)])
+    return [_option(s, s, "", names[jira_data.category(s, cats, words)])
             for s in d.get("statuses") or []]
 
 

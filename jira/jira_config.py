@@ -58,6 +58,7 @@ Stdlib only (python 3.9+: launchd may run the CLT /usr/bin/python3).
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -223,7 +224,7 @@ def field_label(team: dict, field: str, aliases: dict | None = None) -> str:
     aliases = custom_field_aliases(team or {}) if aliases is None else aliases
     if field in aliases and aliases[field].get("label"):
         return aliases[field]["label"]
-    return BASE_FIELD_LABELS.get(field, field)
+    return _jfields.BASE_FIELD_LABELS.get(field, field)
 
 
 def strip_titles(spec) -> list:
@@ -350,7 +351,17 @@ def resolve_path(team: dict, name: str, site: str = "", **params) -> str:
 # settings_hub); re-exported here for older callers
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 from config_text import config_entry, config_line  # noqa: E402,F401
-from jira_fields import BASE_FIELD_LABELS, columns_json, parse_columns, serialize_columns  # noqa: E402,F401
+from jira_fields import columns_json, parse_columns, serialize_columns  # noqa: E402,F401
+import jira_fields as _jfields
+
+
+def __getattr__(name: str):
+    """jira_config.BASE_FIELD_LABELS stays lazy (PEP 562): jira_fields
+    resolves jira/defaults.json on first TOUCH, so one transient bad file no
+    longer kills every jira.* worker method at import time."""
+    if name == "BASE_FIELD_LABELS":
+        return _jfields.BASE_FIELD_LABELS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def read_section(name: str, path: str | None = None) -> dict:
@@ -1135,29 +1146,48 @@ def migrate_v3(data: dict, notes: list) -> None:
 
 
 def save(updates: dict) -> str:
-    """Merge `updates` into config.json (creating it, keeping endpoints)."""
-    base = dict(DEFAULTS)
-    if os.path.exists(CONFIG_JSON):
-        with open(CONFIG_JSON, encoding="utf-8") as fh:
-            base.update(json.load(fh))
-    elif os.path.exists(LEGACY_CONFIG):
-        base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
-    allowed = set(DEFAULTS) | {"endpoints", "teamConfig", "directoryJob", "favoritesJob"}
-    for k, v in updates.items():
-        if k in allowed and v is not None:
-            base[k] = v
-    # a credential that only exists in the environment is persisted (the
-    # setup sheet tells the user "save will persist it into config.json")
-    for k in ("site", "email", "token"):
-        env = os.environ.get("JIRA_" + k.upper(), "")
-        if env and not base.get(k):
-            base[k] = env
-    if isinstance(base.get("site"), str):
-        base["site"] = base["site"].strip().rstrip("/")
-    if not base.get("endpoints"):
-        base["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
-    write_json_600(CONFIG_JSON, base)
-    return CONFIG_JSON
+    """Merge `updates` into config.json (creating it, keeping endpoints).
+
+    Serialized under an flock: the poll tick writes flags (rebuildOnNextPoll,
+    setup steps) while the app writes pins/stars - both are read-merge-write
+    of the WHOLE file, and without a lock the last writer silently dropped
+    the other's edit."""
+    lock_dir = os.path.dirname(CONFIG_JSON)
+    os.makedirs(lock_dir, exist_ok=True)
+    with open(CONFIG_JSON + ".lock", "w") as gate:
+        os.chmod(CONFIG_JSON + ".lock", 0o600)
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        try:
+            base = dict(DEFAULTS)
+            if os.path.exists(CONFIG_JSON):
+                try:
+                    with open(CONFIG_JSON, encoding="utf-8") as fh:
+                        disk = json.load(fh)
+                except ValueError as err:
+                    raise ConfigError(
+                        f"config.json is corrupt ({err}) - fix or remove it") from err
+                if isinstance(disk, dict):
+                    base.update(disk)
+            elif os.path.exists(LEGACY_CONFIG):
+                base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
+            allowed = set(DEFAULTS) | {"endpoints", "teamConfig", "directoryJob", "favoritesJob"}
+            for k, v in updates.items():
+                if k in allowed and v is not None:
+                    base[k] = v
+            # a credential that only exists in the environment is persisted (the
+            # setup sheet tells the user "save will persist it into config.json")
+            for k in ("site", "email", "token"):
+                env = os.environ.get("JIRA_" + k.upper(), "")
+                if env and not base.get(k):
+                    base[k] = env
+            if isinstance(base.get("site"), str):
+                base["site"] = base["site"].strip().rstrip("/")
+            if not base.get("endpoints"):
+                base["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
+            write_json_600(CONFIG_JSON, base)
+            return CONFIG_JSON
+        finally:
+            fcntl.flock(gate, fcntl.LOCK_UN)
 
 
 def edit_jobs(cmd: str, args: list) -> int:
@@ -1424,13 +1454,20 @@ def main(argv: list) -> int:
         if not hit:
             print(f"jira-config: unknown endpoint '{name}'", file=sys.stderr)
             return 2
+        skipped = []
         for e in hit:
+            if cmd == "--set-window" and name == "all" and e.get("type") == "directory":
+                # the directory IS a weekly schedule (a re-fetch every 10m
+                # would hammer the site); "all" means the issue jobs
+                skipped.append(e.get("name", "?"))
+                continue
             if cmd == "--set-window":
                 e["window"] = value
             else:
                 e["enabled"] = truthy(value)
         save({"endpoints": eps})
-        print(f"{name}: {'window' if cmd == '--set-window' else 'enabled'} = {value}")
+        note = f" (directory job(s) kept their own schedule: {', '.join(skipped)})" if skipped else ""
+        print(f"{name}: {'window' if cmd == '--set-window' else 'enabled'} = {value}{note}")
         return 0
     try:
         cfg = load()

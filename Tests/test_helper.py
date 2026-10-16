@@ -237,17 +237,20 @@ class ScriptBridge(unittest.TestCase):
         self.assertEqual(reply["result"]["line"], "○ Polling off")
 
     def test_jira_columns_methods(self):
+        # Pinned to the CURRENT jira_fields contract: parse keeps width_px
+        # (None = auto, fixed pixels when set — the round trip the Rust seam
+        # used to drop), serialize emits the JSON columns form.
         reply = dispatch({"id": 1, "method": "jira.columns_parse",
                           "params": {"spec": "key:Key:80:left:filter+sort"}})
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"]["columns"][0],
-                         {"field": "key", "title": "Key", "width": 80.0, "align": "left",
-                          "sortable": True, "filterable": True})
+                         {"field": "key", "title": "Key", "width": 80.0, "width_px": None,
+                          "align": "left", "sortable": True, "filterable": True})
         reply = dispatch({"id": 2, "method": "jira.columns_serialize", "params": {
             "columns": [{"field": "a", "title": "T", "width": 120.0, "align": "left",
                          "sortable": True, "filterable": True}], "titles": False}})
         self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["spec"], "a::120:left:filter+sort")
+        self.assertEqual(reply["result"]["spec"], '[{"field":"a","width":120,"filter":true,"sort":true}]')
 
     def test_jira_project_keys_method(self):
         reply = dispatch({"id": 1, "method": "jira.project_keys", "params": {"raw": "sam1, 1x"}})

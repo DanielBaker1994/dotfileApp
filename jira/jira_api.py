@@ -77,6 +77,7 @@ The API fields= list comes from commands.toml [jira] (columns + field keys).
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import random
@@ -488,7 +489,7 @@ class Client:
             return None
         try:
             body = self.get(path[:-len("jql")] + "approximate-count", method="POST",
-                            body=json.dumps({"jql": jql.split(" ORDER BY ")[0]})) or {}
+                            body=json.dumps({"jql": re.split(r"\s+ORDER\s+BY\s+", jql, flags=re.I)[0].strip()})) or {}
             return int(body.get("count")) if body.get("count") is not None else None
         except (ApiError, ValueError, TypeError):
             return None
@@ -803,13 +804,15 @@ def build_jql(f: Filters) -> str:
         if f.assignee.endswith("~"):
             parts.append(f'assignee ~ "{f.assignee[:-1]}"')
         else:
-            parts.append(f'assignee = "{f.assignee}"')
+            # _jql_value keeps JQL functions (currentUser()) and EMPTY/NULL
+            # unquoted and escapes anything that needs quoting
+            parts.append(f"assignee = {jira_config._jql_value(f.assignee)}")
     if f.release:
         parts.append(f'fixVersion = "{f.release}"')
     if f.status:
         parts.append(f'status = "{f.status}"')
     if f.reporter:
-        parts.append(f'reporter = "{f.reporter}"')
+        parts.append(f"reporter = {jira_config._jql_value(f.reporter)}")
     if f.text:
         parts.append(f'text ~ "{f.text}"')
     if f.date:
@@ -1247,12 +1250,17 @@ def clear_checkpoints(name: str = "") -> None:
 
 def jira_tz(c: Client) -> str:
     """The Jira user's time zone (JQL dates are read in it): cached from
-    /myself.timeZone; '' = unknown (the machine's zone is used)."""
+    /myself.timeZone keyed by SITE in TZ_FILE ("<site>\\t<zone>"); '' =
+    unknown (the machine's zone is used). Site-keyed so switching sites
+    never keeps the old site's zone."""
+    site = (c.site or "").rstrip("/")
     try:
         with open(TZ_FILE, encoding="utf-8") as fh:
-            tz = fh.read().strip()
-        if tz:
-            return tz
+            raw = fh.read().strip()
+        if raw:
+            got_site, tab, tz = raw.partition("\t")
+            if tab and got_site == site:
+                return tz
     except OSError:
         pass
     if c.dry:
@@ -1265,10 +1273,58 @@ def jira_tz(c: Client) -> str:
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             with open(TZ_FILE, "w", encoding="utf-8") as fh:
-                fh.write(tz + "\n")
+                fh.write(f"{site}\t{tz}\n")
         except OSError:
             pass
     return tz
+
+
+def cached_tz() -> str:
+    """TZ_FILE only, no network and no site match possible: what jira_tz()
+    answers for a dry client / before the zone was ever fetched ('' = use
+    the machine's zone). A site-less legacy file is kept readable."""
+    try:
+        with open(TZ_FILE, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return ""
+    _, tab, tz = raw.partition("\t")
+    return tz if tab else raw
+
+
+CACHE_LOCK = os.path.join(CACHE_DIR, "cache.lock")
+
+
+def acquire_cache_lock(timeout: float = 600.0):
+    """flock around the issue cache's read-merge-write. Without it an
+    interactive `--sync` and the launchd tick each merge from their own stale
+    snapshot and the last flush wins - issues silently vanish until the next
+    full sync. Returns the open fh; release_cache_lock it."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    fh = open(CACHE_LOCK, "a+")
+    t0 = time.time()
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.time() - t0 > timeout:
+                fh.close()
+                raise jira_config.ConfigError(
+                    f"issue cache held by another sync (waited {int(timeout)}s) "
+                    "- retry when it finishes")
+            time.sleep(0.5)
+
+
+def release_cache_lock(fh) -> None:
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        fh.close()
+    except OSError:
+        pass
 
 
 def parse_jira_time(v: str):
@@ -1367,96 +1423,114 @@ def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
         next(c.search_pages(q, ",".join(fields), max_total=max_total, page_size=page_size), None)
         return {"fetched": 0, "changed": 0, "total": 0, "keys": [], "snapshot": "", "jql": q,
                 "resumed": bool(resume)}
-    # version name -> {released, date} per project: the release date + flag
-    # live on the VERSION object, not the issue's fixVersions (once per
-    # project per run, as projects show up in the pages)
-    vers_map = read_json(VERSIONS_FILE, {})
-    if not isinstance(vers_map, dict):
-        vers_map = {}
-    ttl = c.sd("cache_timeout_seconds")
-    vers_fresh = ttl > 0 and os.path.exists(VERSIONS_FILE) and \
-        time.time() - os.path.getmtime(VERSIONS_FILE) < ttl
-    vers_done: set = set()
-    cache = read_json(CACHE_FILE, {})
-    if not isinstance(cache, dict):
-        cache = {}
-    started = ck.get("startedAt") if resume else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    done = int(ck.get("fetched") or 0) if resume else 0
-    hwm = float(ck["hwm"]) if resume else 0.0
-    total = c.count(q)
-    if total is not None and resume:
-        total += done
-    keys: list = []
-    state = {"pending": 0, "complete": False}
-
-    def flush():
-        write_json(CACHE_FILE, cache, mode=0o600)
-        if "fixVersions" in fields and vers_done:
-            write_json(VERSIONS_FILE, vers_map)
-        if not state["complete"] and name and hwm:
-            write_json(checkpoint_path(name), {
-                "name": name, "scope": scope, "mode": mode, "window": window, "hwm": hwm,
-                "hwmText": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(hwm)),
-                "fetched": done, "total": total, "startedAt": started, "jql": q,
-                "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, mode=0o600)
-        state["pending"] = 0
-        if flushed:
-            flushed(keys)
-
+    # The whole read-merge-write runs under the cache lock: an interactive
+    # --sync and the launchd tick must not merge from independent stale copies
+    # of the cache (last flush wins - issues silently vanish until a re-sync).
+    lock_fh = acquire_cache_lock()
     try:
-        for got, page_total, _ in c.search_pages(q, ",".join(fields), max_total=max_total,
-                                                 page_size=page_size):
-            if total is None and page_total is not None:
-                total = page_total + (done if resume else 0)
-            if "fixVersions" in fields:
-                for proj in sorted({((i.get("fields") or {}).get("project") or {}).get("key", "")
-                                    for i in got} - {""} - vers_done):
-                    vers_done.add(proj)
-                    if vers_fresh and proj in vers_map:
-                        continue
-                    try:
-                        vers_map[proj] = {v.get("name"): {"released": alt(v.get("released"), False),
-                                                          "date": alt(v.get("releaseDate"), "")}
-                                          for v in project_versions(c, proj)}
-                    except ApiError as err:
-                        if err.code == 401:
-                            raise
-            for i in got:
-                comments = issue_comments(c, i) if fetch_comments else None
-                e = cache_entry(i, vers_map, comments, fields, aliases)
-                merged = dict(cache.get(i.get("key")) or {})
-                merged.update(e)
-                cache[i.get("key")] = merged
-                keys.append(i.get("key"))
-                t = parse_jira_time((i.get("fields") or {}).get(order))
-                if t and t > hwm:
-                    hwm = t
-            done += len(got)
-            state["pending"] += len(got)
-            if progress:
-                progress(done, total, hwm, len(keys))
-            if state["pending"] >= max(1, checkpoint_every):
-                flush()
-        state["complete"] = True
-    finally:
-        if state["pending"] or state["complete"]:
-            flush()       # partial progress is kept even when a page failed
-    if name:
-        clear_checkpoints(name)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as fh:
-        fh.write(f"LAST_SYNC={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                 f"WINDOW={window}\nUPDATED={len(keys)}\nTOTAL={len(cache)}\n")
-    if not quiet:
-        print(f"jira-api: sync {window}: fetched {len(keys)}, cache now {len(cache)}"
-              + (" (resumed)" if resume else ""), file=sys.stderr)
-    snap = ""
-    if keys and cache:
-        snap = snapshot(cache, snapshot_keep)
+        # version name -> {released, date} per project: the release date + flag
+        # live on the VERSION object, not the issue's fixVersions (once per
+        # project per run, as projects show up in the pages)
+        vers_map = read_json(VERSIONS_FILE, {})
+        if not isinstance(vers_map, dict):
+            vers_map = {}
+        ttl = c.sd("cache_timeout_seconds")
+        vers_fresh = ttl > 0 and os.path.exists(VERSIONS_FILE) and \
+            time.time() - os.path.getmtime(VERSIONS_FILE) < ttl
+        vers_done: set = set()
+        if os.path.exists(CACHE_FILE) and os.path.getsize(CACHE_FILE) > 2:
+            # a corrupt cache must never merge into empty: fail loudly so the
+            # user runs --rebuild, instead of publishing blank tabs "ok"
+            try:
+                with open(CACHE_FILE, encoding="utf-8") as fh:
+                    cache = json.load(fh)
+            except ValueError as err:
+                raise jira_config.ConfigError(
+                    f"issue cache is corrupt ({err}) - run jira_poll.py --rebuild") from err
+            if not isinstance(cache, dict):
+                raise jira_config.ConfigError(
+                    "issue cache is not a JSON object - run jira_poll.py --rebuild")
+        else:
+            cache = {}
+        started = ck.get("startedAt") if resume else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        done = int(ck.get("fetched") or 0) if resume else 0
+        hwm = float(ck["hwm"]) if resume else 0.0
+        total = c.count(q)
+        if total is not None and resume:
+            total += done
+        keys: list = []
+        state = {"pending": 0, "complete": False}
+
+        def flush():
+            write_json(CACHE_FILE, cache, mode=0o600)
+            if "fixVersions" in fields and vers_done:
+                write_json(VERSIONS_FILE, vers_map)
+            if not state["complete"] and name and hwm:
+                write_json(checkpoint_path(name), {
+                    "name": name, "scope": scope, "mode": mode, "window": window, "hwm": hwm,
+                    "hwmText": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(hwm)),
+                    "fetched": done, "total": total, "startedAt": started, "jql": q,
+                    "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, mode=0o600)
+            state["pending"] = 0
+            if flushed:
+                flushed(keys)
+
+        try:
+            for got, page_total, _ in c.search_pages(q, ",".join(fields), max_total=max_total,
+                                                     page_size=page_size):
+                if total is None and page_total is not None:
+                    total = page_total + (done if resume else 0)
+                if "fixVersions" in fields:
+                    for proj in sorted({((i.get("fields") or {}).get("project") or {}).get("key", "")
+                                        for i in got} - {""} - vers_done):
+                        vers_done.add(proj)
+                        if vers_fresh and proj in vers_map:
+                            continue
+                        try:
+                            vers_map[proj] = {v.get("name"): {"released": alt(v.get("released"), False),
+                                                              "date": alt(v.get("releaseDate"), "")}
+                                              for v in project_versions(c, proj)}
+                        except ApiError as err:
+                            if err.code == 401:
+                                raise
+                for i in got:
+                    comments = issue_comments(c, i) if fetch_comments else None
+                    e = cache_entry(i, vers_map, comments, fields, aliases)
+                    merged = dict(cache.get(i.get("key")) or {})
+                    merged.update(e)
+                    cache[i.get("key")] = merged
+                    keys.append(i.get("key"))
+                    t = parse_jira_time((i.get("fields") or {}).get(order))
+                    if t and t > hwm:
+                        hwm = t
+                done += len(got)
+                state["pending"] += len(got)
+                if progress:
+                    progress(done, total, hwm, len(keys))
+                if state["pending"] >= max(1, checkpoint_every):
+                    flush()
+            state["complete"] = True
+        finally:
+            if state["pending"] or state["complete"]:
+                flush()       # partial progress is kept even when a page failed
+        if name:
+            clear_checkpoints(name)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+            fh.write(f"LAST_SYNC={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                     f"WINDOW={window}\nUPDATED={len(keys)}\nTOTAL={len(cache)}\n")
         if not quiet:
-            print(f"jira-api: snapshot: {snap}", file=sys.stderr)
-    return {"fetched": len(keys), "changed": len(keys), "total": len(cache),
-            "keys": keys, "snapshot": snap, "jql": q, "resumed": bool(resume), "startedAt": started}
+            print(f"jira-api: sync {window}: fetched {len(keys)}, cache now {len(cache)}"
+                  + (" (resumed)" if resume else ""), file=sys.stderr)
+        snap = ""
+        if keys and cache:
+            snap = snapshot(cache, snapshot_keep)
+            if not quiet:
+                print(f"jira-api: snapshot: {snap}", file=sys.stderr)
+        return {"fetched": len(keys), "changed": len(keys), "total": len(cache),
+                "keys": keys, "snapshot": snap, "jql": q, "resumed": bool(resume), "startedAt": started}
+    finally:
+        release_cache_lock(lock_fh)
 
 
 # ------------------------------------------------------------ interactive
@@ -1585,8 +1659,7 @@ def parse_args(argv: list):
               "-S": "sort", "--sort": "sort"}
     opt_valued = {"--site": "site", "--email": "email", "--token": "token", "--auth": "auth",
                   "--job": "job", "--template": "job", "--board": "board", "-n": "max",
-                  "--max": "max", "-o": "output", "--output": "output", "--sync": "sync",
-                  "--config": None}
+                  "--max": "max", "-o": "output", "--output": "output", "--sync": "sync"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -1616,6 +1689,12 @@ def parse_args(argv: list):
             o["curl"] = True
         elif name == "--mask":
             o["mask"] = True
+        elif name == "--config":
+            val()   # consume the value before answering
+            die("--config is not a jira_api.py option: the config is always "
+                "~/.config/jira/config.json (edit it with jira_config.py or "
+                "the setup sheet); use --site / --email / --token to override "
+                "single values")
         elif name == "--jobs":
             o["jobs"] = True
         elif name == "--list-fields":
@@ -1670,7 +1749,7 @@ def list_jobs(team: dict) -> None:
     for k, t in (team.get("jql_templates") or {}).items():
         need = sorted(set(jira_config.PLACEHOLDER_RE.findall(t)) - {"projects"})
         print(f"jql  {k}: {t}" + (f"  args: {', '.join(need)}" if need else ""))
-    print(f"project_keys: {', '.join(team.get('project_keys') or []) or '(none - all projects)'}")
+    print(f"project_keys: {', '.join(team.get('project_keys') or []) or '(none - nothing is in scope; polling runs no jobs until team.json names projects)'}")
     print(f"team config: {team.get('path')}")
 
 

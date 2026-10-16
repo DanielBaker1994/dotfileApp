@@ -24,7 +24,14 @@ import re
 # a field's display name (column header, search filter title) unless team.json
 # field_labels renames it - ONE label per field
 # the built-in table lives in jira/defaults.json (data, not code)
-BASE_FIELD_LABELS = jsonmgr.load("jira/defaults")["base_field_labels"]
+# lazy (worker surface, like jira_data): a broken jira/defaults.json fails at
+# the first touch and is retried on the next one - the old eager load turned
+# one transient bad file into permanently dead jira.columns_* methods for the
+# life of the worker. Internal uses go through jsonmgr.field (a bare module
+# name does not pass through __getattr__).
+jsonmgr.lazy_module(__name__, globals(), {
+    "BASE_FIELD_LABELS": ("jira/defaults", ("base_field_labels",), dict),
+})
 
 _ALIGNS = ("left", "right", "center")
 
@@ -144,7 +151,7 @@ def merged_labels(team) -> dict:
     """The base labels + team.json custom_fields aliases + field_labels
     renames (field_labels wins; section keys are matched loosely:
     `custom-fields`, `Custom Fields`, ...)."""
-    out = dict(BASE_FIELD_LABELS)
+    out = dict(jsonmgr.field("jira/defaults", "base_field_labels"))
     if not isinstance(team, dict):
         return out
     for k, v in team.items():

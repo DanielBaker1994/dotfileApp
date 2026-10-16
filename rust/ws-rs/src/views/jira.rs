@@ -94,6 +94,12 @@ fn scalar_str(v: &Value) -> String {
 /// table is hand-mirrored in Rust. `asset_dir` carries `jira/` in both the
 /// repo build and the dist bundle (install.conf RESOURCE_LINK_DIRS); the
 /// manifest dir covers `cargo test`.
+///
+/// FRESHNESS REGIME: the Python side (jsonmgr) re-reads on mtime change;
+/// this OnceLock freezes the values at first use until the daemon restarts
+/// (`./ws build` or `jira-poll restart`). Editing defaults.json and
+/// expecting the running app to follow is NOT supported — restart. A
+/// mid-session reload would change board lanes / counts under the user.
 fn jira_defaults() -> &'static Value {
     static DEFAULTS: OnceLock<Value> = OnceLock::new();
     DEFAULTS.get_or_init(|| {
@@ -1529,12 +1535,24 @@ pub fn board_columns(params: &Value) -> Vec<BoardColumn> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let names: Vec<String> = params
-        .get("categoryNames")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| category_names().iter().map(|s| s.to_string()).collect());
+    let names: Vec<String> = {
+        let mut names: Vec<String> = params
+            .get("categoryNames")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| category_names().iter().map(|s| s.to_string()).collect());
+        if names.len() < 3 {
+            // `category` answers 0..2: a short name list would panic below
+            // (parity with pylib/jira_boards.py, which pads the same way).
+            names.extend(
+                category_names()[names.len()..3]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
+        names
+    };
 
     struct Col {
         name: String,
@@ -2570,6 +2588,11 @@ fn list_column_json(c: &ListColumn) -> Value {
         "field": c.field,
         "title": c.title,
         "width": c.width,
+        // pylib/jira_fields.py honors width_px (fixed-pixel columns); the
+        // native serializer emits it (jira.rs inserts `width_px`) — the IPC
+        // seam used to drop it, so any column routed through the helper
+        // silently lost its pixel width on a Python round trip.
+        "width_px": c.width_px,
         "align": c.align,
         "sortable": c.sortable,
         "filterable": c.filterable,
@@ -2605,24 +2628,32 @@ fn python3_candidates() -> Vec<String> {
 }
 
 pub fn find_python3() -> Option<String> {
-    for cand in python3_candidates() {
-        let ok = crate::app::process_run::run_process(
-            &cand,
-            &[
-                "-c".to_string(),
-                "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)".to_string(),
-            ],
-            None,
-            None,
-            false,
-        )
-        .map(|o| o.code == 0)
-        .unwrap_or(false);
-        if ok {
-            return Some(cand);
-        }
+    // Cache the winner: probe-spawning (up to 4 version checks) on every
+    // jira_poll.py call - and every 2.5 s of the force ticker - is pure waste.
+    // Only a SUCCESS is stored (get_or_try_init is unstable), so a python
+    // installed mid-session is picked up on the next call.
+    static FOUND: OnceLock<String> = OnceLock::new();
+    if let Some(p) = FOUND.get() {
+        return Some(p.clone());
     }
-    None
+    let found = python3_candidates()
+        .into_iter()
+        .find(|cand| {
+            crate::app::process_run::run_process(
+                cand,
+                &[
+                    "-c".to_string(),
+                    "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)".to_string(),
+                ],
+                None,
+                None,
+                false,
+            )
+            .map(|o| o.code == 0)
+            .unwrap_or(false)
+        })?;
+    let _ = FOUND.set(found.clone());
+    Some(found)
 }
 
 /// The readable reason for a non-zero `jira_poll.py` exit: the
@@ -2640,20 +2671,27 @@ fn poll_failure(code: i32, out: &str, err: &str) -> String {
             .map(str::to_string)
     });
     let last = err.lines().rev().map(str::trim).find(|l| !l.is_empty());
-    // The poller speaks "pinned" (`pinnedBoards`); the user only ever sees
-    // ☆ = star, so translate the one board phrase that reaches a toast.
     json.or_else(|| last.map(str::to_string))
-        .map(|r| r.replace("is not pinned", "is not starred"))
         .unwrap_or_else(|| format!("jira_poll.py exited {code}"))
 }
 
-/// Run `jira_poll.py ARGS…` and parse one JSON object off stdout.
+/// Run `jira_poll.py ARGS…` and parse one JSON object off stdout. Blocking —
+/// call off the main thread. `--board-view` reads the whole issue cache and
+/// network verbs wait out rate limits, so the deadline is generous; it
+/// exists so a wedged child cannot hold a UI slot forever.
 pub fn run_jira_poll(args: &[&str], stdin: Option<&[u8]>) -> Result<Value, String> {
     let python = find_python3().ok_or("jira: python 3.11+ not found")?;
     let mut argv = vec![jira_script()];
     argv.extend(args.iter().map(|s| s.to_string()));
-    let out = crate::app::process_run::run_process(&python, &argv, stdin, None, false)
-        .map_err(|e| format!("could not run python: {e}"))?;
+    let out = crate::app::process_run::run_process_deadline(
+        &python,
+        &argv,
+        stdin,
+        None,
+        false,
+        Some(std::time::Duration::from_secs(600)),
+    )
+    .map_err(|e| format!("could not run python: {e}"))?;
     if out.code != 0 {
         return Err(poll_failure(out.code, &out.out, &out.err));
     }
@@ -4726,9 +4764,11 @@ mod tests {
     fn poll_failure_prefers_problems_then_stderr() {
         // The `{ok:false, problems:[…]}` stdout the edit commands print is
         // the reason; no argv dumps, no tracebacks in the user-facing string.
+        // The poller speaks "starred" directly (one vocabulary end-to-end —
+        // Rust used to rewrite the phrase here and string-match it twice).
         let e = poll_failure(
             1,
-            r#"{"ok": false, "problems": ["board 42 is not pinned"]}"#,
+            r#"{"ok": false, "problems": ["board 42 is not starred"]}"#,
             "",
         );
         assert_eq!(e, "board 42 is not starred");

@@ -150,19 +150,7 @@ impl DaemonUi {
                 let t: Vec<String> = b.visible_rows().iter().map(|e| e.name.clone()).collect();
                 (t, b.selection(), 20)
             })?,
-            RowsSource::Jira => self.jira_surface(|l| {
-                let t: Vec<String> = l
-                    .rows
-                    .iter()
-                    .map(|&i| {
-                        let r = &l.all[i];
-                        let key = r.get("key").cloned().unwrap_or_default();
-                        let sum = r.get("summary").cloned().unwrap_or_default();
-                        format!("{key} {sum}")
-                    })
-                    .collect();
-                (t, l.selection, 20)
-            })?,
+            RowsSource::Jira => self.jira_surface(|l| (l.vim_row_texts(), l.selection, 20))?,
             RowsSource::Confluence => self.conf_surface(|cs| {
                 let t: Vec<String> = cs.model.rows.iter().map(|r| r.title.clone()).collect();
                 (t, cs.model.selection, 12)

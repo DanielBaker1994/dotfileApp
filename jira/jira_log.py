@@ -277,6 +277,10 @@ class RawStore:
             return
         runs = [r for r in runs if r != self.dir]
         cutoff = time.time() - keep_days * 86400
+        # A CONCURRENT run (another poll tick / live search) keeps touching
+        # its own folder per captured response: folders newer than 6 h are
+        # possibly live and must never be rmtree'd mid-write.
+        fresh = time.time() - 6 * 3600
 
         def size(d):
             return sum(os.path.getsize(os.path.join(root, f)) for root, _, fs in os.walk(d) for f in fs)
@@ -284,7 +288,13 @@ class RawStore:
         sizes = {r: size(r) for r in runs}
         total = sum(sizes.values())
         for r in runs:
-            if os.path.getmtime(r) >= cutoff and total <= max_mb * 1024 * 1024:
+            try:
+                mt = os.path.getmtime(r)
+            except OSError:
+                continue
+            if mt >= fresh:
+                continue
+            if mt >= cutoff and total <= max_mb * 1024 * 1024:
                 continue
             shutil.rmtree(r, ignore_errors=True)
             total -= sizes[r]

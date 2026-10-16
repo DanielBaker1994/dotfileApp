@@ -4,6 +4,7 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Instant;
 
 pub struct ProcessOutput {
     pub code: i32,
@@ -19,6 +20,21 @@ pub fn run_process(
     stdin: Option<&[u8]>,
     env: Option<&[(String, String)]>,
     merge_stderr: bool,
+) -> std::io::Result<ProcessOutput> {
+    run_process_deadline(exe, args, stdin, env, merge_stderr, None)
+}
+
+/// `run_process` with a hard deadline. On timeout the child is killed and a
+/// note is appended to `err` with code `-1`: a wedged `jira_poll.py` (or any
+/// helper child) must never hold a UI "busy" slot forever — that state used
+/// to survive daemon tasks one by one until a restart.
+pub fn run_process_deadline(
+    exe: &str,
+    args: &[String],
+    stdin: Option<&[u8]>,
+    env: Option<&[(String, String)]>,
+    merge_stderr: bool,
+    timeout: Option<std::time::Duration>,
 ) -> std::io::Result<ProcessOutput> {
     let mut cmd = Command::new(exe);
     cmd.args(args)
@@ -58,15 +74,37 @@ pub fn run_process(
         b
     });
 
-    let status = child.wait()?;
+    let start = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break st,
+            None => {
+                if let Some(d) = timeout {
+                    if start.elapsed() >= d {
+                        let _ = child.kill();
+                        timed_out = true;
+                        break child.wait().unwrap_or_else(|_| {
+                            std::process::ExitStatus::default()
+                        });
+                    }
+                }
+                thread::sleep(std::time::Duration::from_millis(60));
+            }
+        }
+    };
     let mut out = out_h.join().unwrap_or_default();
     let err = err_h.join().unwrap_or_default();
-    let err_str = String::from_utf8_lossy(&err).into_owned();
+    let mut err_str = String::from_utf8_lossy(&err).into_owned();
+    if timed_out {
+        let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
+        err_str.push_str(&format!("\n{exe} timed out after {secs}s and was killed"));
+    }
     if merge_stderr {
         out.extend_from_slice(&err);
     }
     Ok(ProcessOutput {
-        code: status.code().unwrap_or(-1),
+        code: if timed_out { -1 } else { status.code().unwrap_or(-1) },
         out: String::from_utf8_lossy(&out).into_owned(),
         err: if merge_stderr { String::new() } else { err_str },
     })

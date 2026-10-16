@@ -178,7 +178,13 @@ def main(argv: list) -> int:
     d = read()
     if argv and argv[0] == "--json":
         print(json.dumps(d, indent=2))
-        return 0 if d else 1
+        # A missing status.json is a FRESH INSTALL, not a failure: exit 0
+        # (the human summary has always exited 0 here; scripts keying on the
+        # code misreported the clean empty state as "status broken"). 1 only
+        # when the file exists but is unreadable.
+        if d or not os.path.exists(STATUS_FILE):
+            return 0
+        return 1
     print(summary(d))
     return 0
 

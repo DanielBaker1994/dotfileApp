@@ -113,9 +113,9 @@ Usage:
                                   (both: config.json + the tabs rewritten
                                   from local data at once; no request, no lock)
   jira_poll.py --board-view ID    the board's issues (from the cache, via its
-                                  pinned board-ID job) as its tab file
+                                  starred board-ID job) as its tab file
                                   (jira_boards/board-ID.json); local, no
-                                  request, no lock (the board must be pinned)
+                                  request, no lock (the board must be starred)
   jira_poll.py --window 2h        explicit window override (implies now)
   jira_poll.py --dry-run          print the plan (due, windows, JQL fields);
                                   no network, no writes
@@ -184,11 +184,15 @@ def log(line: str) -> None:
         pass
 
 
-def say(msg: str, tag: str = "") -> None:
+def say(msg: str, tag: str = "", always: bool = False) -> None:
+    """Log + (unless --quiet) echo to stderr. `always=True` also prints under
+    --quiet: the interactive caller (the app's Poll Now / Force) passes
+    --quiet and has ONLY stderr's last line for its toast - silencing the
+    failure reason there shows a bare "exit 1/2/3"."""
     line = f"[{tag}] {msg}" if tag else msg
     log(line)
     jira_log.LOG.info("%s", line, stacklevel=2)
-    if not QUIET:
+    if not QUIET or always:
         print(f"jira-poll: {line}", file=sys.stderr)
 
 
@@ -457,7 +461,7 @@ def next_run(entry: dict, window_s: int) -> float | None:
 
 
 def choose_window(name: str, entry: dict, o: dict, margin: int, needs_full: bool = False,
-                  fallback: str = "") -> str:
+                  fallback: str = "", client=None) -> str:
     if o["init"]:
         return "full"
     if o["window"]:
@@ -474,7 +478,10 @@ def choose_window(name: str, entry: dict, o: dict, margin: int, needs_full: bool
     t = jira_status.parse_time(base)
     if t is None:
         return _POLL_DEFAULTS["window"]
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(t - margin * 60))
+    # JQL reads datetime bounds in the SITE's zone: format the window in it
+    # (machine-local here silently skips updates when the two zones differ)
+    tz = jira_api.jira_tz(client) if client is not None else jira_api.cached_tz()
+    return jira_api.jql_time(t - margin * 60, tz)
 
 
 # ------------------------------------------------------------ publishing
@@ -606,18 +613,48 @@ def favorite_rows(cfg, team: dict, out_dir: str, extra: list | None = None) -> l
     return rows
 
 
+def _rejected_keys(ask: list, msg: str) -> list:
+    """Keys a 400 body names ("could not be found: A-1, A-2" / "key 'A-1'
+    does not exist"). Word-boundary match: a plain `in` test would reject
+    A-1 alongside A-10 and silently drop the wrong pin."""
+    return [k for k in ask
+            if re.search(r"(?<![\w.-])" + re.escape(k) + r"(?![\w-])", msg)]
+
+
+def _probe_rejected(c, ask: list, rep) -> list:
+    """A 400 that names no key: find the offenders with one cheap single-key
+    search each (favorites lists are small; capped). A non-400 probe failure
+    is a real error and propagates."""
+    bad = []
+    if len(ask) > 100:
+        return bad
+    for k in ask:
+        try:
+            c.search(f'key in ("{jira_config.jql_quote(k)}")', "key", max_total=1)
+        except jira_api.ApiError as err:
+            if err.code != 400:
+                raise
+            bad.append(k)
+            rep.note(f"probe: Jira rejects {k}")
+    return bad
+
+
 def run_favorites(ctx: "Ctx", ep: dict, rep) -> int:
     """Re-query the pinned issues (key in (...), clamped to the scope) into
     the cache, then publish favorites.json. A key Jira rejects (deleted /
-    moved issue) is left out of the query and the search retried once."""
+    moved issue) is left out of the query and the search retried - and if
+    EVERY pin is rejected the tab still publishes from the cache: a stale
+    pin must never wedge the job into failing every tick forever."""
     c, cfg, team = ctx.c, ctx.cfg, ctx.team
     keys = config_list(cfg, "favorites")
-    path = os.path.join(ctx.out_dir, ep["file"])
+    path = os.path.join(ctx.out_dir, ep.get("file") or jira_config.FAVORITES_FILE)
     if keys:
         f_ep, _ = job_fields(ep, team)
         plist = jira_config.job_projects(ep, team)
         ask = list(keys)
-        for tries in (1, 2):
+        for tries in (1, 2, 3):
+            if not ask:
+                break      # every remaining pin rejected: publish from cache
             rep.start(f"re-query {len(ask)} pinned issue(s)")
             try:
                 jira_api.sync(c, "full", projects=plist, jql="key in (" + ", ".join(ask) + ")",
@@ -626,11 +663,16 @@ def run_favorites(ctx: "Ctx", ep: dict, rep) -> int:
                               checkpoint_every=int(cfg["checkpointEvery"] or 500), progress=rep.page)
                 break
             except jira_api.ApiError as err:
-                bad = [k for k in ask if k in str(err)]
-                if err.code != 400 or not bad or tries == 2 or len(bad) == len(ask):
+                if err.code != 400 or tries == 3:
                     raise
+                bad = _rejected_keys(ask, str(err)) or _probe_rejected(c, ask, rep)
+                if not bad:
+                    raise    # 400 that names nothing and probes clean: real error
                 say(f"skipping pinned key(s) Jira rejects: {', '.join(bad)}", ep["name"])
                 ask = [k for k in ask if k not in bad]
+        if keys and not ask:
+            say("every pinned key was rejected by Jira - favorites published "
+                "from the cache only", ep["name"])
     rows = favorite_rows(cfg, team, ctx.out_dir)
     publish(path, rows, False)
     return len(rows)
@@ -711,7 +753,8 @@ class Ctx:
         # the oldest of their last successes is where it continues
         olds = sorted(x for x in (jira_status.endpoint_entry(status, e["name"]).get("lastSuccess")
                                   for e in self.plain) if x)
-        return choose_window(SYNC, entry, self.o, self.margin, fallback=olds[0] if olds else "")
+        return choose_window(SYNC, entry, self.o, self.margin, fallback=olds[0] if olds else "",
+                             client=self.c)
 
 
 def synced_projects() -> list | None:
@@ -747,20 +790,24 @@ def backfill_fields(ctx: "Ctx", projects: list) -> list:
     c.on_note = rep.note
     rep.start(f"filling {', '.join(missing)} for the cached issues of {', '.join(projects)}")
     jql = "project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in projects) + ") ORDER BY key ASC"
-    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
-    cache = cache if isinstance(cache, dict) else {}
-    vers = jira_api.read_json(jira_api.VERSIONS_FILE, {})
-    n = 0
-    for got, total, _ in c.search_pages(jql, ",".join(missing)):
-        for i in got:
-            k = i.get("key")
-            if k in cache:
-                e = jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, missing)
-                e.pop("key", None)
-                cache[k].update(e)
-        n += len(got)
-        rep.page(n, total, time.time(), len(got))
-    jira_api.write_json(jira_api.CACHE_FILE, cache, mode=0o600)
+    lock_fh = jira_api.acquire_cache_lock()
+    try:
+        cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+        cache = cache if isinstance(cache, dict) else {}
+        vers = jira_api.read_json(jira_api.VERSIONS_FILE, {})
+        n = 0
+        for got, total, _ in c.search_pages(jql, ",".join(missing)):
+            for i in got:
+                k = i.get("key")
+                if k in cache:
+                    e = jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, missing)
+                    e.pop("key", None)
+                    cache[k].update(e)
+            n += len(got)
+            rep.page(n, total, time.time(), len(got))
+        jira_api.write_json(jira_api.CACHE_FILE, cache, mode=0o600)
+    finally:
+        jira_api.release_cache_lock(lock_fh)
     say(f"filled {', '.join(missing)} on {n:,} issue(s)", SYNC)
     return want
 
@@ -935,14 +982,21 @@ def logged(name: str, c, fn):
 
 def attempt(fn) -> tuple:
     """Run fn() -> (result, err, curl); a failed job keeps its partial
-    progress (checkpoint) and is resumed by the next run."""
+    progress (checkpoint) and is resumed by the next run. Any error EXCEPT a
+    cancel fails just this job: a KeyError/TypeError in our own code must not
+    escape, print a traceback and strand the whole tick's status."""
     try:
         return fn(), "", ""
+    except Cancelled:
+        raise
     except jira_api.ApiError as e:
         return None, str(e), e.curl
     except jira_config.ConfigError as e:
         return None, str(e), ""
     except (OSError, ValueError) as e:
+        return None, f"{type(e).__name__}: {e}", ""
+    except Exception as e:
+        LOG.exception("unhandled error in a job")
         return None, f"{type(e).__name__}: {e}", ""
 
 
@@ -1062,7 +1116,7 @@ def describe(cfg, team: dict) -> dict:
                              + " - this tab is published from the cache (no queries of its own)")
             else:
                 window = choose_window(ep["name"], entry, {"init": False, "window": ""}, margin,
-                                       needs_full=True)
+                                       needs_full=True, client=c)
                 jql, r = issue_requests(ep["name"], plist, ep["jql"], window, fields,
                                         ep.get("maxResults"), ep.get("maxTotal"))
                 reqs += r
@@ -1132,10 +1186,20 @@ def describe(cfg, team: dict) -> dict:
     ck = jira_api.load_checkpoint(SYNC)
     setup = jira_config.setup_state(cfg.data)
     done_steps = setup.get("steps") or {}
-    lock = Lock(jira_status.POLL_LOCK, 10)
-    held = not lock._try()
-    if not held:
-        lock.release()
+    # is a poll running? A SHARED non-blocking probe: the old `not _try()`
+    # EX-acquired the lock whenever it was free, truncating/rewriting the
+    # holder file with the DESCRIBE pid - a launchd tick arriving in that
+    # window skipped against a non-poller holder.
+    held = False
+    try:
+        with open(jira_status.POLL_LOCK, "a+") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_UN)
+            except OSError:
+                held = True    # an EX holder blocks the shared probe
+    except OSError:
+        pass    # no lock file yet = nothing running
     c.captured = []
     c.get(c.path("myself"))
     return {
@@ -1150,7 +1214,7 @@ def describe(cfg, team: dict) -> dict:
         "fetchComments": bool(cfg["fetchComments"]),
         "status": status.get("status", ""), "lastRun": status.get("lastRun", ""),
         "lastError": status.get("lastError", ""),
-        "lock": {"held": held, **(lock.holder() if held else {})},
+        "lock": {"held": held, **(Lock(jira_status.POLL_LOCK, 10).holder() if held else {})},
         "progress": status.get("progress") if held else None,
         "pollLog": POLL_LOG,
         "debugLog": jira_log.DEBUG_LOG,
@@ -1222,28 +1286,39 @@ def live_search(dry: bool) -> int:
         return result(2, error=str(err))
     ls = cfg.live_search
     spec = jira_config.live_search_columns(cfg)
-    fields = jira_config.api_fields(team=team, columns=spec)
+    pfields = jira_config.api_fields(team=team, columns=spec)
     pkeys = jira_config.publish_keys(columns=spec)
-    cap = int((crit.get("maxResults") if isinstance(crit, dict) else 0) or ls.get("maxResults")
-              or jira_config.LIVE_SEARCH_MAX)
-    c = jira_api.Client.from_config(cfg, dry=True)
+    try:
+        cap = int((crit.get("maxResults") if isinstance(crit, dict) else 0) or ls.get("maxResults")
+                  or jira_config.LIVE_SEARCH_MAX)
+    except (TypeError, ValueError):
+        return result(2, error=f"bad maxResults: {crit.get('maxResults')!r}")
+    try:
+        c = jira_api.Client.from_config(cfg, dry=True)
+    except (jira_config.ConfigError, TypeError, ValueError) as err:
+        return result(2, error=str(err))
     c.captured = []
-    c.search(jql, ",".join(fields), max_total=cap)
+    c.search(jql, ",".join(pfields), max_total=cap)
     curl = c.captured[0] if c.captured else ""
     if dry:
-        return result(0, jql=jql, curl=curl, maxResults=cap, fields=fields)
-    c = jira_api.Client.from_config(cfg)
+        return result(0, jql=jql, curl=curl, maxResults=cap, fields=pfields)
     try:
-        res = c.search(jql, ",".join(fields), max_total=cap)
+        c = jira_api.Client.from_config(cfg)
+        res = c.search(jql, ",".join(pfields), max_total=cap)
     except jira_api.ApiError as err:
         return result(1, error=str(err), jql=jql, curl=err.curl or curl)
+    except (jira_config.ConfigError, TypeError, ValueError) as err:
+        return result(1, error=str(err), jql=jql, curl=curl)
     vers = jira_api.read_json(jira_api.VERSIONS_FILE, {})
     aliases = jira_config.custom_field_aliases(team)
-    rows = [jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, fields, aliases)
+    rows = [jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, pfields, aliases)
             for i in res["issues"]]
     out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
     path = os.path.join(out_dir, jira_config.LIVE_SEARCH_FILE)
-    jira_api.write_json(path, shape(rows, pkeys), mode=0o644)
+    try:
+        jira_api.write_json(path, shape(rows, pkeys), mode=0o644)
+    except OSError as err:
+        return result(1, error=f"search ran but cannot publish {path}: {err}", jql=jql, curl=curl)
     note_fields_seen(jira_config.LIVE_SEARCH_FILE, rows)
     return result(0, count=len(rows), total=res.get("total"), more=not res["isLast"],
                   jql=jql, curl=curl, file=path, maxResults=cap)
@@ -1421,8 +1496,10 @@ def edit_pins(kind: str, op: str, keys: list) -> int:
     if kind == "favorites":
         extra = []
         # the app pipes the rows it shows (then EOF); an inherited open
-        # stdin with nothing coming must not block
-        if op == "add" and not sys.stdin.isatty() and select.select([sys.stdin], [], [], 1)[0]:
+        # stdin with nothing coming must not block. 3 s: a busy parent can
+        # take longer than a second to reach its write, and skipping the
+        # rows would publish a stale copy with no trace of why.
+        if op == "add" and not sys.stdin.isatty() and select.select([sys.stdin], [], [], 3)[0]:
             try:
                 got = json.loads(sys.stdin.read() or "[]")
                 extra = got if isinstance(got, list) else []
@@ -1538,7 +1615,7 @@ def board_view(bid: str) -> int:
     """--board-view ID: a board's tab file, shaped from the issue cache with
     its own pinned `board-<ID>` job (its key set + columns) ->
     BOARD_DIR/board-<ID>.json. Local only (no request, no lock), like
-    --release-view / --label-view. A board that is not pinned has no job to
+    --release-view / --label-view. A board that is not starred has no job to
     shape from -> {ok:false, problems}. Prints {ok, dir, file, count}."""
     try:
         cfg = jira_config.load()
@@ -1548,7 +1625,7 @@ def board_view(bid: str) -> int:
         return 1
     ep = next((e for e in cfg.endpoints if e.get("name") == f"board-{bid}"), None)
     if not ep or not ep.get("boardJql"):
-        msg = f"board {bid} is not pinned"
+        msg = f"board {bid} is not starred"
         print(json.dumps({"ok": False, "problems": [msg]}))
         print(f"jira-poll: {msg}", file=sys.stderr)
         return 1
@@ -1934,11 +2011,15 @@ def board_sprint(args: list) -> int:
     if len(args) != 2 or args[1] not in ("on", "off"):
         print(json.dumps({"ok": False, "problems": ["--board-sprint ID on|off"]}))
         return 1
-    cfg = jira_config.load()
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
     eps = [dict(e) for e in cfg.endpoints]
     ep = next((e for e in eps if e.get("name") == f"board-{args[0]}"), None)
     if not ep or not ep.get("boardJql"):
-        print(json.dumps({"ok": False, "problems": [f"board {args[0]} is not pinned"]}))
+        print(json.dumps({"ok": False, "problems": [f"board {args[0]} is not starred"]}))
         return 1
     on = args[1] == "on"
     ep.update(jql=board_job(args[0], ep["boardJql"], on, "")["jql"], sprintOnly=on)
@@ -1967,18 +2048,25 @@ def board_quickfilter(args: list) -> int:
     info = (jira_api.read_json(boards_cache_path(), {}) or {}).get(bid) or {}
     qfs = {q.get("id"): q for q in info.get("quickFilters") or []}
     scope = jira_config.scope_projects(team)
-    if not ep or not scope:
-        print(json.dumps({"ok": False, "problems": [f"board {bid} is not pinned" if not ep else jira_config.NO_SCOPE]}))
+    if not ep:
+        print(json.dumps({"ok": False, "problems": [f"board {bid} is not starred"]}))
         return 1
-    clauses = [f"({ep['jql']})"] + [f"({strip_order(qfs[q]['jql'])})" for q in qids if q in qfs and qfs[q].get("jql")]
+    if not scope:
+        print(json.dumps({"ok": False, "problems": [jira_config.NO_SCOPE]}))
+        return 1
+    clauses = [f"({ep.get('jql') or ep.get('boardJql')})"] + [f"({strip_order(qfs[q]['jql'])})" for q in qids if q in qfs and qfs[q].get("jql")]
     clauses.append("project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in scope) + ")")
     jql = " AND ".join(clauses)
-    c = jira_api.Client.from_config(cfg)
-    keys = []
     try:
-        for got, _, _ in c.search_pages(jql, "key", max_total=int(ep.get("maxTotal") or 10000)):
+        cap = int(ep.get("maxTotal") or 10000)
+    except (TypeError, ValueError):
+        cap = 10000
+    try:
+        c = jira_api.Client.from_config(cfg)
+        keys = []
+        for got, _, _ in c.search_pages(jql, "key", max_total=cap):
             keys += [i.get("key") for i in got if i.get("key")]
-    except jira_api.ApiError as err:
+    except (jira_api.ApiError, jira_config.ConfigError, ValueError, TypeError) as err:
         print(json.dumps({"ok": False, "problems": [str(err)], "jql": jql}))
         return 1
     print(json.dumps({"ok": True, "keys": keys, "jql": jql}))
@@ -2015,12 +2103,12 @@ def board_sprint_keys(args: list) -> int:
     clauses = ([f"({info['jql']})"] if info.get("jql") else []) + [which]
     clauses.append("project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in scope) + ")")
     jql = " AND ".join(clauses)
-    c = jira_api.Client.from_config(cfg)
-    keys = []
     try:
+        c = jira_api.Client.from_config(cfg)
+        keys = []
         for got, _, _ in c.search_pages(jql, "key", max_total=5000):
             keys += [i.get("key") for i in got if i.get("key")]
-    except jira_api.ApiError as err:
+    except (jira_api.ApiError, jira_config.ConfigError, ValueError, TypeError) as err:
         print(json.dumps({"ok": False, "problems": [str(err)], "jql": jql}))
         return 1
     print(json.dumps({"ok": True, "keys": keys, "jql": jql}))
@@ -2156,9 +2244,12 @@ def me(cfg) -> set:
     path = ME_FILE
     got = jira_api.read_json(path, {})
     if not got:
-        got = jira_api.Client.from_config(cfg).get("/rest/api/2/myself") or {}
+        c = jira_api.Client.from_config(cfg)
+        # through resolve_path: a proxied / custom api_endpoints site is not
+        # at /rest/api/2/myself
+        got = c.get(c.path("myself")) or {}
         got = {k: got.get(k) for k in ("name", "displayName", "accountId", "emailAddress")}
-        jira_api.write_json(path, got, mode=0o644)
+        jira_api.write_json(path, got, mode=0o600)   # identity data: not world-readable
     return {v for v in (got.get("name"), got.get("displayName")) if v}
 
 
@@ -2342,6 +2433,14 @@ def main(argv: list) -> int:
         o["force"] = True
     if o["setup"]:
         o["force"] = True
+    if o["window"]:
+        # validate BEFORE any work: window_since dies mid-sync otherwise, and
+        # a SystemExit escapes attempt()/the running marks (traceback +
+        # phantom "running" rows). die() already printed the reason.
+        try:
+            jira_api.window_since(o["window"])
+        except SystemExit as e:
+            return int(e.code or 2)
     if o["describe"]:
         try:
             cfg = jira_config.load()
@@ -2381,7 +2480,7 @@ def main(argv: list) -> int:
     except jira_config.ConfigError as err:
         jira_status.update(lambda d: set_base(d, status="error", lastError=str(err),
                                               lastCheck=jira_status.now_str()))
-        say(str(err))
+        say(str(err), always=True)
         return 2
     base["configNotes"] = cfg.notes
     if not o["dry"]:
@@ -2404,7 +2503,7 @@ def main(argv: list) -> int:
         msg = "config: " + "; ".join(probs)
         jira_status.update(lambda d: set_base(d, status="error", lastError=msg,
                                               lastCheck=jira_status.now_str()))
-        say(msg)
+        say(msg, always=True)
         return 2
     setup = jira_config.setup_state(cfg.data)
     scheduled = not (o["force"] or o["projects"] or o["init"] or o["window"])
@@ -2416,13 +2515,14 @@ def main(argv: list) -> int:
         msg = jira_config.NO_SCOPE
         jira_status.update(lambda d: set_base(d, status="error", lastError=msg,
                                               lastCheck=jira_status.now_str()))
-        say(msg)
+        say(msg, always=True)
         return 2
 
     lock = Lock(jira_status.POLL_LOCK, int(cfg["lockStaleMinutes"] or 10))
     if not o["dry"] and not lock.acquire():
         h = lock.holder()
-        say(f"another poll is running (pid {h.get('pid')} since {h.get('since')}) - skipping")
+        say(f"another poll is running (pid {h.get('pid')} since {h.get('since')}) - skipping",
+            always=True)
         jira_status.update(lambda d: set_base(d, lastSkipped={
             "at": jira_status.now_str(), "reason": "skipped-locked",
             "pid": os.getpid(), "holder": h.get("pid")},
@@ -2449,13 +2549,20 @@ def main(argv: list) -> int:
             steps = {k: (dict(v, state="cancelled") if (v or {}).get("state") == "running" else v)
                      for k, v in (st.get("steps") or {}).items()}
             save_setup({**st, "steps": steps})
-        say("cancelled (progress kept - the next run resumes)")
+        say("cancelled (progress kept - the next run resumes)", always=True)
         return 130
     finally:
         lock.release()
         if not o["dry"]:
-            jira_status.update(lambda d: d.update(lock={"held": False, "pid": None, "since": None},
-                                                  progress=None))
+            def heal(d):
+                d.update(lock={"held": False, "pid": None, "since": None}, progress=None)
+                # a run that died before recording (traceback escaped, kill)
+                # must not leave phantom "running" rows in the dashboard
+                for e in d.get("endpoints") or []:
+                    if e.get("status") == "running":
+                        e["status"] = "error"
+                        e["lastError"] = "poll ended before this job recorded a result"
+            jira_status.update(heal)
 
 
 def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
@@ -2559,7 +2666,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         started = jira_status.now_str()
         res, err, curl = attempt(lambda: logged(SYNC, c, lambda: run_shared_sync(ctx, window)))
         if err:
-            say(f"failed: {err} - progress kept; the next run resumes", SYNC)
+            say(f"failed: {err} - progress kept; the next run resumes", SYNC, always=True)
         counts = publish_plain(ctx)     # partial data is still better than none
         record(SYNC, started, window, err, curl, (res or {}).get("total"), ctx.sync_wsec(),
                extra=None if err else {"syncedProjects": ctx.sync_projects(),
@@ -2570,13 +2677,13 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         if err:
             failures.append(f"issue cache: {err}")
     for ep, entry, wsec in others:
-        window = choose_window(ep["name"], entry, o, ctx.margin, needs_full=True) \
+        window = choose_window(ep["name"], entry, o, ctx.margin, needs_full=True, client=c) \
             if ep.get("type", "issues") == "issues" else "-"
         started = jira_status.now_str()
         say(f"window={window}", ep["name"])
         items, err, curl = attempt(lambda: logged(ep["name"], c, lambda: run_job(ctx, ep, window)))
         if err:
-            say(f"failed: {err}", ep["name"])
+            say(f"failed: {err}", ep["name"], always=True)
             failures.append(f"{ep['name']}: {err}")
         record(ep["name"], started, window, err, curl, items, wsec)
     final = "error" if failures else "ok"

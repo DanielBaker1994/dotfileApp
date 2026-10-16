@@ -1322,7 +1322,14 @@ impl SwitcherController {
             return;
         }
         if !want_on {
-            jp::set_enabled(false, false);
+            if let Err(e) = jp::set_enabled(false, false) {
+                self.log(&format!("jira: {name} FAILED: {e}"));
+                self.inner.lock().unwrap().ui_push(UiCommand::Toast(
+                    format!("Jira poll off failed: {e}"),
+                    "exclamationmark.triangle.fill",
+                ));
+                return;
+            }
             let _ = self.reload_config();
             self.log("jira: [jira] enabled = false (jira-poll off)");
             if self.current() == Some(SlotView::Jira) {
@@ -1334,7 +1341,10 @@ impl SwitcherController {
         // push need the daemon UI; a headless daemon re-enables directly (and
         // updates state) so `jira-poll-off` can be undone without a window.
         let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else {
-            jp::set_enabled(true, false);
+            if let Err(e) = jp::set_enabled(true, false) {
+                self.log(&format!("jira: {name} FAILED: {e}"));
+                return;
+            }
             let _ = self.reload_config();
             self.log("jira: [jira] enabled = true (jira-poll on)");
             self.open(SlotView::Jira);
@@ -1362,7 +1372,14 @@ impl SwitcherController {
             ));
             return;
         }
-        crate::app::jira_poll::set_enabled(true, false);
+        if let Err(e) = crate::app::jira_poll::set_enabled(true, false) {
+            self.log(&format!("jira: enable FAILED: {e}"));
+            self.inner.lock().unwrap().ui_push(UiCommand::Toast(
+                format!("Jira polling NOT on: {e}"),
+                "exclamationmark.triangle.fill",
+            ));
+            return;
+        }
         let _ = self.reload_config();
         self.log("jira: [jira] enabled = true (jira-poll on)");
         self.inner.lock().unwrap().ui_push(UiCommand::Toast("Jira polling on".into(), "checkmark.circle.fill"));
@@ -3495,50 +3512,125 @@ mod daemon_ui {
         });
     }
 
-    /// Run one queued `jira_poll.py` config write off the main thread. A
-    /// failure re-reads config.json (undoing the optimistic edit) and toasts
-    /// the reason; success re-reads it too, so republished tabs show up.
+    /// One Jira config write on the serialized queue (see
+    /// `jira_poll_write_enqueued`).
     fn jira_poll_write(w: crate::views::jira_view::PollWrite) {
-        std::thread::spawn(move || {
-            let res = (|| -> Result<(), String> {
-                let python = crate::views::jira::find_python3().ok_or("python 3.11+ not found")?;
-                let script = crate::views::jira::jira_script();
-                let script = if w.script == "jira_poll.py" {
-                    script
-                } else {
-                    std::path::Path::new(&script).with_file_name(&w.script).to_string_lossy().into_owned()
-                };
-                let mut argv = vec![script];
-                argv.extend(w.args.iter().cloned());
-                let out = crate::app::process_run::run_process(&python, &argv, w.stdin.as_deref().map(str::as_bytes), None, false)
-                    .map_err(|e| e.to_string())?;
-                if out.code == 0 {
-                    return Ok(());
-                }
-                // The edit commands print {ok:false, problems:[…]} on stdout.
-                let j: serde_json::Value = serde_json::from_str(out.out.trim()).unwrap_or_default();
-                let p = j
-                    .get("problems")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|a| a.first())
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                let last = out.err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string());
-                Err(p.or(last).unwrap_or_else(|| format!("exit {}", out.code)))
-            })();
-            on_ui(move |ui| {
-                let label = w.args.join(" ");
-                match &res {
-                    Ok(()) => ui.ivars().controller.log(&format!("jira: {label} (ok)")),
-                    Err(e) => {
-                        ui.ivars().controller.log(&format!("jira: {label} failed: {e}"));
-                        crate::ui::toast::show(&format!("{}: {e}", w.err_prefix), "exclamationmark.triangle");
+        jira_poll_write_enqueued(w);
+    }
+
+    /// Run queued `jira_poll.py` config writes through ONE worker thread.
+    /// The old code spawned a thread per write: two quick ☆ clicks meant two
+    /// processes doing unlocked read-merge-write of config.json, and the
+    /// last writer silently dropped the first (the star visibly vanished
+    /// when the completion re-read disk). One worker = one write at a time;
+    /// the Python `jira_config.save()` flock closes the remaining window
+    /// against the launchd tick's own writes.
+    static JIRA_WRITE_Q: std::sync::Mutex<std::collections::VecDeque<crate::views::jira_view::PollWrite>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    static JIRA_WRITE_WORKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn jira_poll_write_enqueued(w: crate::views::jira_view::PollWrite) {
+        JIRA_WRITE_Q.lock().unwrap().push_back(w);
+        if JIRA_WRITE_WORKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return; // a worker already drains
+        }
+        std::thread::spawn(|| loop {
+            let next = JIRA_WRITE_Q.lock().unwrap().pop_front();
+            match next {
+                Some(w) => run_one_jira_write(w),
+                None => {
+                    JIRA_WRITE_WORKING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    if JIRA_WRITE_Q.lock().unwrap().is_empty() {
+                        break;
+                    }
+                    // A write landed while we were releasing: re-claim, or
+                    // let its producer's spawn take over.
+                    if JIRA_WRITE_WORKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        break;
                     }
                 }
-                ui.jira_surface(|l| {
-                    l.pins_dirty = false;
-                    l.reload_meta();
-                    l.refilter();
+            }
+        });
+    }
+
+    fn run_one_jira_write(w: crate::views::jira_view::PollWrite) {
+        let res = (|| -> Result<(), String> {
+            let python = crate::views::jira::find_python3().ok_or("python 3.11+ not found")?;
+            let script = crate::views::jira::jira_script();
+            let script = if w.script == "jira_poll.py" {
+                script
+            } else {
+                std::path::Path::new(&script).with_file_name(&w.script).to_string_lossy().into_owned()
+            };
+            let mut argv = vec![script];
+            argv.extend(w.args.iter().cloned());
+            let out = crate::app::process_run::run_process_deadline(
+                &python,
+                &argv,
+                w.stdin.as_deref().map(str::as_bytes),
+                None,
+                false,
+                Some(std::time::Duration::from_secs(300)),
+            )
+            .map_err(|e| e.to_string())?;
+            if out.code == 0 {
+                return Ok(());
+            }
+            // The edit commands print {ok:false, problems:[…]} on stdout.
+            let j: serde_json::Value = serde_json::from_str(out.out.trim()).unwrap_or_default();
+            let p = j
+                .get("problems")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let last = out.err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string());
+            Err(p.or(last).unwrap_or_else(|| format!("exit {}", out.code)))
+        })();
+        on_ui(move |ui| {
+            let label = w.args.join(" ");
+            match &res {
+                Ok(()) => ui.ivars().controller.log(&format!("jira: {label} (ok)")),
+                Err(e) => {
+                    ui.ivars().controller.log(&format!("jira: {label} failed: {e}"));
+                    crate::ui::toast::show(&format!("{}: {e}", w.err_prefix), "exclamationmark.triangle");
+                }
+            }
+            ui.jira_surface(|l| {
+                l.pins_dirty = false;
+                l.reload_meta();
+                l.refilter();
+            });
+        });
+    }
+
+    /// Run one queued `jira_poll.py` ANSWER-run (board tab build, sprint
+    /// keys, pin views) off the main thread and route its JSON back to the
+    /// model. These verbs used to run synchronously inside click handlers,
+    /// freezing the UI for seconds while Python parsed the issue cache.
+    fn jira_poll_run(run: crate::views::jira_view::PollRun) {
+        use crate::views::jira_view::PollRunKind as K;
+        std::thread::spawn(move || {
+            let refs: Vec<&str> = run.args.iter().map(String::as_str).collect();
+            let res = crate::views::jira::run_jira_poll(&refs, None);
+            let kind = run.kind.clone();
+            let keys_res: Result<Vec<String>, String> = match (&kind, res.clone()) {
+                (K::SprintKeys(_, _), Ok(v)) => Ok(v
+                    .get("keys")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()),
+                (_, Err(e)) => Err(e),
+                _ => Ok(Vec::new()),
+            };
+            on_ui(move |ui| {
+                ui.jira_surface(|l| match &kind {
+                    K::BoardView(b) => l.finish_board_view(b, res),
+                    K::SprintKeys(b, s) => l.apply_sprint_keys(b, s, keys_res),
+                    k => l.finish_open_pin(k, res),
                 });
             });
         });
@@ -3573,7 +3665,17 @@ mod daemon_ui {
         };
         let mut argv = vec![path];
         argv.extend(args.iter().map(|a| a.to_string()));
-        match crate::app::process_run::run_process(&python, &argv, stdin, None, false) {
+        // Bounded so a wedged child cannot strand the caller's thread:
+        // --describe / --set-* are sub-second, a live search is one page
+        // (rate-limit waits are what stretch it) — 10 min is generous.
+        match crate::app::process_run::run_process_deadline(
+            &python,
+            &argv,
+            stdin,
+            None,
+            false,
+            Some(std::time::Duration::from_secs(600)),
+        ) {
             Err(e) => (false, serde_json::Value::Null, e.to_string()),
             Ok(out) => {
                 let j: serde_json::Value = serde_json::from_str(out.out.trim()).unwrap_or(serde_json::Value::Null);
@@ -8697,9 +8799,13 @@ mod daemon_ui {
             let r = f(list);
             view.apply(list.snapshot());
             let writes = std::mem::take(&mut list.pending_writes);
+            let runs = std::mem::take(&mut list.pending_runs);
             drop(state);
             for w in writes {
                 jira_poll_write(w);
+            }
+            for run in runs {
+                jira_poll_run(run);
             }
             Some(r)
         }
@@ -8728,6 +8834,7 @@ mod daemon_ui {
         /// view's Config surface (one request in flight at a time).
         fn jira_config_refresh(&self) {
             if self.ivars().jira_config_busy.replace(true) {
+                crate::ui::toast::show("Jira: still working on the last request", "hourglass");
                 return;
             }
             std::thread::spawn(|| {
@@ -8743,25 +8850,85 @@ mod daemon_ui {
         }
 
         /// Run one `jira_poll.py ARGS` from the Config surface (Force Poll /
-        /// Stop Poll) off-main, then re-read the describe payload.
+        /// Stop Poll) off-main, then re-read the describe payload. A dropped
+        /// click (a run already in flight) says so instead of silently
+        /// no-op'ing, and a Force run ticks the dashboard every 2.5 s while
+        /// the poll is in flight so its per-job cells and the "● Polling
+        /// now…" badge move (describe reads the poller's local status.json).
+        /// Stop Poll BYPASSES the busy gate — it is exactly the escape hatch
+        /// for a run in flight; a wedged force used to reject every click
+        /// (including Stop) until the daemon restarted.
         fn jira_config_run(&self, args: Vec<String>, label: &str) {
-            if self.ivars().jira_config_busy.replace(true) {
+            let stop = label == "stop poll";
+            if !stop && self.ivars().jira_config_busy.replace(true) {
+                crate::ui::toast::show("Jira: still working on the last request", "hourglass");
                 return;
             }
             let label = label.to_string();
+            let force = label == "force poll";
+            if force {
+                crate::ui::toast::show("Force Poll — polling every enabled job", "arrow.triangle.2.circlepath");
+                let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let ticker = done.clone();
+                std::thread::spawn(move || {
+                    while !ticker.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(2500));
+                        if ticker.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        let res = crate::views::jira::run_jira_poll(&["--describe"], None)
+                            .map(|v| crate::views::jira::Describe::from_value(&v));
+                        on_ui(move |ui| {
+                            if let Some(view) = ui.jira_view() {
+                                view.set_config_result(res);
+                            }
+                        });
+                    }
+                });
+                std::thread::spawn(move || {
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let (code, _out, err) = crate::app::jira_poll::run("jira_poll.py", &refs);
+                    done.store(true, std::sync::atomic::Ordering::Relaxed);
+                    on_ui(move |ui| {
+                        ui.ivars().jira_config_busy.set(false);
+                        if code != 0 {
+                            let msg = crate::app::jira_poll::error_line(&err, &format!("exit {code}"));
+                            ui.ivars().controller.log(&format!("jira-config: {label}: {msg}"));
+                            if let Some(view) = ui.jira_view() {
+                                view.set_config_result(Err(msg));
+                            }
+                        } else {
+                            ui.ivars().controller.log(&format!("jira-config: {label} ok"));
+                            ui.jira_config_refresh();
+                        }
+                    });
+                });
+                return;
+            }
             std::thread::spawn(move || {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 let (code, _out, err) = crate::app::jira_poll::run("jira_poll.py", &refs);
                 on_ui(move |ui| {
-                    ui.ivars().jira_config_busy.set(false);
+                    // Stop never claimed the gate, so it must not clear
+                    // one another run owns (the run itself releases it via
+                    // its own completion or the 30-min timeout).
+                    if !stop {
+                        ui.ivars().jira_config_busy.set(false);
+                    }
                     if code != 0 {
                         let msg = crate::app::jira_poll::error_line(&err, &format!("exit {code}"));
                         ui.ivars().controller.log(&format!("jira-config: {label}: {msg}"));
+                        if stop {
+                            crate::ui::toast::show(&format!("Stop Poll: {msg}"), "stop.circle");
+                        }
                         if let Some(view) = ui.jira_view() {
                             view.set_config_result(Err(msg));
                         }
                     } else {
                         ui.ivars().controller.log(&format!("jira-config: {label} ok"));
+                        if stop {
+                            crate::ui::toast::show("Stop Poll — signal sent", "stop.circle");
+                        }
                         ui.jira_config_refresh();
                     }
                 });
@@ -8785,6 +8952,7 @@ mod daemon_ui {
             if !have {
                 self.present(SlotView::Jira);
             }
+            self.jira_leave_config();
             let out = self.jira_surface(|l| -> Result<(), String> {
                 match cmd {
                     B::List => {
@@ -8868,7 +9036,11 @@ mod daemon_ui {
             let sidebar_w = range.clamp(section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(168.0));
             let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(264.0);
             let mut list = JiraList::new(section, paths);
-            list.start(None);
+            // `start()`'s "the last one shown": persist across rebuilds so
+            // the window reopens where the user left it, not on whatever
+            // JSON file sorts first.
+            let last = crate::platform::get_string("jira.lastTab");
+            list.start(last.as_deref().filter(|s| !s.is_empty()));
             let colors = crate::ui::theme::section_colors("jira");
             let view = JiraView::new(mtm, colors, sidebar_w, range, insp_w);
             view.apply(list.snapshot());
@@ -9153,18 +9325,33 @@ mod daemon_ui {
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
             std::thread::spawn(move || {
-                let dir = crate::views::jira::helper_directory(&path).unwrap_or(serde_json::Value::Null);
-                let projects = crate::views::jira::helper_options(serde_json::json!({"kind": "project", "path": path, "scope": scope})).unwrap_or_default();
+                let dir_res = crate::views::jira::helper_directory(&path);
+                let projects = crate::views::jira::helper_options(serde_json::json!({"kind": "project", "path": path, "scope": scope}))
+                    .unwrap_or_default();
+                let helper_err: Option<String> = dir_res.as_ref().err().cloned();
+                let dir = dir_res.unwrap_or(serde_json::Value::Null);
                 on_ui(move |ui| {
                     let empty = dir.get("fetchedAt").and_then(serde_json::Value::as_str).unwrap_or("").is_empty();
                     let no_versions = dir.get("versions").and_then(serde_json::Value::as_array).is_none_or(|a| a.is_empty());
+                    // A helper timeout must not masquerade as "run the
+                    // weekly directory job" while directory.json is full.
+                    let cached_but_unreadable = !empty && helper_err.is_some();
                     let first = {
                         let mut st = ui.ivars().jira_search.borrow_mut();
                         let Some(st) = st.as_mut() else { return };
                         st.projects.borrow_mut().set_options(picker_options(&projects));
                         st.bar.projects().refresh();
-                        st.bar.set_fetch_shown(empty || no_versions);
-                        if empty {
+                        st.bar.set_fetch_shown((empty && helper_err.is_none()) || no_versions);
+                        if helper_err.is_some() {
+                            st.bar.set_status(
+                                if cached_but_unreadable {
+                                    "Picker lists not readable right now (helper busy) — pickers may be stale."
+                                } else {
+                                    "Picker lists unreadable on the way in."
+                                },
+                                crate::ui::theme::PopupTone::Warning,
+                            );
+                        } else if empty {
                             st.bar.set_status(
                                 "Nothing cached yet — the pickers fill after the weekly directory job runs (or Fetch from Jira now).",
                                 crate::ui::theme::PopupTone::Dim,
@@ -9189,9 +9376,15 @@ mod daemon_ui {
         /// catalog (filter kinds) and liveSearch.maxResults.
         fn jira_search_load_info(&self) {
             std::thread::spawn(|| {
-                let (_, d, _) = jira_script_json("jira_poll.py", &["--describe"], None);
+                let (ok, d, err) = jira_script_json("jira_poll.py", &["--describe"], None);
                 on_ui(move |ui| {
-                    if !d.is_object() {
+                    if !d.is_object() || !ok {
+                        // An empty search bar with NO explanation looked like
+                        // a dead feature; say what failed.
+                        if let Some(st) = ui.ivars().jira_search.borrow().as_ref() {
+                            st.bar
+                                .set_status(&format!("Search setup not loaded: {err}"), crate::ui::theme::PopupTone::Warning);
+                        }
                         return;
                     }
                     let saved = crate::platform::get_string("jiraLiveSearch.state").is_some();
@@ -9256,10 +9449,26 @@ mod daemon_ui {
             };
             let key = key.to_string();
             std::thread::spawn(move || {
+                // Log, don't just swallow: an empty picker with no message
+                // reads as "no values exist", not "the helper timed out".
                 let opts = match params {
-                    Some(p) => crate::views::jira::helper_options(p).unwrap_or_default(),
+                    Some(p) => crate::views::jira::helper_options(p).unwrap_or_else(|e| {
+                        UI_WEAK.with(|w| {
+                            if let Some(ui) = w.borrow().as_ref().and_then(|w| w.load()) {
+                                ui.ivars().controller.log(&format!("jira: options {key}: {e}"));
+                            }
+                        });
+                        Vec::new()
+                    }),
                     None => {
-                        let d = crate::views::jira::helper_directory(&path).unwrap_or_default();
+                        let d = crate::views::jira::helper_directory(&path).unwrap_or_else(|e| {
+                            UI_WEAK.with(|w| {
+                                if let Some(ui) = w.borrow().as_ref().and_then(|w| w.load()) {
+                                    ui.ivars().controller.log(&format!("jira: directory for {key}: {e}"));
+                                }
+                            });
+                            serde_json::Value::Null
+                        });
                         let field = if key == "issuetype" { "issueTypes" } else { "priorities" };
                         let vals: Vec<serde_json::Value> = d.get(field).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
                         vals.iter()
@@ -9354,18 +9563,46 @@ mod daemon_ui {
                         let weak = objc2::rc::Weak::from_retained(&self.retain());
                         let on = m == cur;
                         entries.push(MenuEntry::checked(&m.clone(), on, move || {
-                            if let Some(ui) = weak.load() {
-                                if let Some(st) = ui.ivars().jira_search.borrow().as_ref() {
-                                    st.bar.set_max(&m);
-                                }
-                                // `maxChanged`: liveSearch.maxResults in config.json.
-                                if let Ok(n) = m.parse::<i64>() {
-                                    if n > 0 && n <= 1000 {
-                                        std::thread::spawn(move || {
-                                            let body = format!("{{\"maxResults\": {n}}}");
-                                            let _ = jira_script_json("jira_config.py", &["--set-live-search"], Some(body.as_bytes()));
-                                        });
-                                    }
+                            let Some(ui) = weak.load() else { return };
+                            let Some(bar) =
+                                ui.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone())
+                            else {
+                                return;
+                            };
+                            bar.set_max(&m);
+                            // `maxChanged`: liveSearch.maxResults in config.json.
+                            // Outside the validated 1..1000 the write was
+                            // skipped SILENTLY: the chip showed a number
+                            // that never existed. Say so instead.
+                            if let Ok(n) = m.parse::<i64>() {
+                                if n > 0 && n <= 1000 {
+                                    std::thread::spawn(move || {
+                                        let body = format!("{{\"maxResults\": {n}}}");
+                                        let (ok, _, err) = jira_script_json(
+                                            "jira_config.py",
+                                            &["--set-live-search"],
+                                            Some(body.as_bytes()),
+                                        );
+                                        if !ok {
+                                            // The bar handle is main-thread-only:
+                                            // re-derive it inside `on_ui`.
+                                            on_ui(move |ui| {
+                                                if let Some(st) =
+                                                    ui.ivars().jira_search.borrow().as_ref()
+                                                {
+                                                    st.bar.set_status(
+                                                        &format!("Max {n} not saved: {err}"),
+                                                        crate::ui::theme::PopupTone::Warning,
+                                                    );
+                                                }
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    bar.set_status(
+                                        "Max must be 1-1000 to be kept — not saved.",
+                                        crate::ui::theme::PopupTone::Warning,
+                                    );
                                 }
                             }
                         }));
@@ -9848,7 +10085,7 @@ mod daemon_ui {
                     self.jira_surface(|l| l.handle(E::Query(q)));
                 }
                 E::Move(d) => {
-                    self.jira_surface(|l| jira_move(l, d));
+                    self.jira_surface(|l| jira_move(l, d, false));
                 }
                 E::Enter | E::OpenDetail => {
                     let sel = self.jira_surface(|l| l.selection).unwrap_or(0);
@@ -9971,6 +10208,7 @@ mod daemon_ui {
                     }
                 }
                 E::Sidebar(SidebarEvent::Select(i)) => {
+                    self.jira_leave_config();
                     self.jira_surface(|l| l.select_tab(i));
                 }
                 E::Sidebar(SidebarEvent::Pinned(key)) => {
@@ -9982,6 +10220,13 @@ mod daemon_ui {
                 E::Sidebar(SidebarEvent::MenuPinned(key, x, y)) => {
                     self.jira_sidebar_menu(&key, x, y);
                 }
+                E::Sidebar(SidebarEvent::TogglePin(key)) => {
+                    self.jira_surface(|l| {
+                        if key == crate::views::jira_view::BOARD_LIST_KEY {
+                            l.toggle_boards_collapsed();
+                        }
+                    });
+                }
                 E::Sidebar(SidebarEvent::Rail(_)) => {
                     let st = self.ivars().state.borrow();
                     if let Some((_, v)) = st.as_ref().and_then(|s| s.jira.as_ref()) {
@@ -9992,11 +10237,23 @@ mod daemon_ui {
             }
         }
 
+        /// Sidebar items belong to the Tickets surface: opening one while the
+        /// Config dashboard is up must flip the pill back first, otherwise
+        /// the list mutates under the Config pane and the click looks dead.
+        fn jira_leave_config(&self) {
+            use crate::views::jira_view::JiraSurface;
+            if self.ivars().controller.jira_tab() == JiraSurface::Config {
+                self.ivars().controller.set_jira_tab(JiraSurface::Tickets);
+                self.apply_jira_tab(JiraSurface::Tickets);
+            }
+        }
+
         /// Dispatch a Jira sidebar pin key: my-work / board list / board /
         /// board view / label, else release. `Some(msg)` is an error worth
         /// logging (a not-yet-synced target). Shared by the plain pin click and
         /// the sidebar row menu's "Open", so the two cannot diverge.
         fn jira_open_pin_key(&self, key: &str) -> Option<String> {
+            self.jira_leave_config();
             use crate::views::jira_view::{BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
             self.jira_surface(|l| -> Option<String> {
                 // Reasons carry the item context (`open_*` returns the bare
@@ -10339,6 +10596,13 @@ mod daemon_ui {
                     true
                 }
                 49 if key.ctrl && !key.cmd => {
+                    // Ctrl+Space ticks the selected row — a LIST key. With
+                    // the caret in a text field (search strip, live-search
+                    // row, setup form) it must reach the field editor
+                    // (rule 1: editing belongs to the focused field).
+                    if self.jira_text_focused() {
+                        return false;
+                    }
                     self.jira_surface(|l| {
                         if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
                             if !l.checked.remove(&k) {
@@ -10355,10 +10619,18 @@ mod daemon_ui {
                     if self.jira_text_focused() {
                         return false;
                     }
-                    self.jira_surface(|l| jira_move(l, if key.shift { -1 } else { 1 }));
+                    self.jira_surface(|l| jira_move(l, if key.shift { -1 } else { 1 }, true));
                     true
                 }
                 115 | 119 | 116 | 121 if plain => {
+                    // Home / End / PageUp / PageDown: list navigation ONLY
+                    // from the list. With the caret in a text field they
+                    // belong to the field editor (rule 1) — they used to be
+                    // eaten unconditionally, trapping the caret in the
+                    // search strip and the embedded setup form.
+                    if self.jira_text_focused() {
+                        return false;
+                    }
                     self.jira_surface(|l| {
                         let n = l.rows.len();
                         if n == 0 {
@@ -11375,7 +11647,7 @@ mod daemon_ui {
                 Some(SlotView::Files) => self
                     .files_surface(|b| b.list.move_selection(delta))
                     .is_some(),
-                Some(v) if v.is_jira() => self.jira_surface(|l| jira_move(l, delta)).is_some(),
+                Some(v) if v.is_jira() => self.jira_surface(|l| jira_move(l, delta, false)).is_some(),
                 _ => false,
             }
         }
@@ -12440,12 +12712,16 @@ mod daemon_ui {
         }
     }
 
-    fn jira_move(l: &mut crate::views::jira_view::JiraList, d: i64) {
+    /// Row move. Tab / Shift+Tab (`wrap = true`) cycles at the ends like
+    /// Notes/Files; arrow keys clamp — the audit's "Tab dead at the last
+    /// row" was this clamping for both paths.
+    fn jira_move(l: &mut crate::views::jira_view::JiraList, d: i64, wrap: bool) {
         let n = l.rows.len() as i64;
         if n == 0 {
             return;
         }
-        l.selection = (l.selection as i64 + d).clamp(0, n - 1) as usize;
+        let t = l.selection as i64 + d;
+        l.selection = if wrap { t.rem_euclid(n) as usize } else { t.clamp(0, n - 1) as usize };
     }
 
     fn open_url(url: &str) {

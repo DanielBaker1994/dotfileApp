@@ -1425,6 +1425,7 @@ impl FileBrowser {
                 icon: "folder".into(),
                 section: "Pinned".into(),
                 meta: String::new(),
+                ..Default::default()
             })
             .collect();
         SidebarModel {

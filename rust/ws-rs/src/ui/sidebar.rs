@@ -26,6 +26,14 @@ pub struct SidebarPin {
     pub section: String,
     pub meta: String,
     pub tip: String,
+    /// Tree depth under the section's top: 0 = top row, 1 = child (indented
+    /// under its parent's icon).
+    pub depth: u8,
+    /// `true` draws a disclosure triangle (click → `SidebarEvent::TogglePin`).
+    pub collapsible: bool,
+    /// Disclosure state for a `collapsible` pin — the owner hides the children
+    /// itself when this is `false` (the sidebar just draws the triangle).
+    pub expanded: bool,
 }
 
 /// One list row (`titles[i]` + `rowIcon` / `vMeta` / `badges[i]` / `pathTip`).
@@ -77,6 +85,9 @@ pub enum SidebarEvent {
     /// Right-click on a row / pinned key (screen-space point for a menu).
     MenuRow(usize, f64, f64),
     MenuPinned(String, f64, f64),
+    /// Click on a collapsible pin's disclosure triangle (the owner shows /
+    /// hides the child rows).
+    TogglePin(String),
 }
 
 /// `handleNavKey`'s outcome for a key while the rail has the keyboard.
@@ -236,6 +247,12 @@ impl SidebarGeometry {
         Rect::new(row.max_x() - 16.0 - 6.0, row.mid_y() - 8.0, 16.0, 16.0)
     }
 
+    /// The disclosure-triangle zone of a collapsible pinned row (drawn and
+    /// hit-tested from here so they cannot drift).
+    pub fn chevron_rect(row: Rect) -> Rect {
+        Rect::new(row.x + 2.0, row.mid_y() - 8.0, 16.0, 16.0)
+    }
+
     pub fn clamp_scroll(&self, scroll: f64, n: usize) -> f64 {
         scroll.min(Self::content_height(n) - self.list.height).max(0.0)
     }
@@ -250,6 +267,14 @@ impl SidebarGeometry {
         }
         for (k, r) in self.pinned_rows.iter().enumerate() {
             if r.contains(x, y) {
+                // A collapsible row's chevron zone asks for a toggle, not an
+                // open (the `true` flag rides along like the list's close).
+                if !self.collapsed
+                    && m.pinned.get(k).is_some_and(|p| p.collapsible)
+                    && Self::chevron_rect(*r).contains(x, y)
+                {
+                    return Some((-10 - k as i64, true));
+                }
                 return Some((-10 - k as i64, false));
             }
         }
@@ -517,9 +542,10 @@ mod appkit {
                         SidebarEvent::Rail(c)
                     }
                     HIT_ADD => SidebarEvent::Add,
-                    i if i <= -10 => match pinned_key {
-                        Some(k) => SidebarEvent::Pinned(k),
-                        None => return,
+                    i if i <= -10 => match (pinned_key, close) {
+                        (Some(k), true) => SidebarEvent::TogglePin(k),
+                        (Some(k), false) => SidebarEvent::Pinned(k),
+                        (None, _) => return,
                     },
                     i if close => SidebarEvent::Close(i as usize),
                     i => {
@@ -895,7 +921,19 @@ mod appkit {
                 if sel || hover == Some(-10 - k as i64) {
                     style::fill_rounded(*r, radius, if sel { c.surface1() } else { c.surface0() });
                 }
-                let icon_x = if collapsed { r.mid_x() - 8.0 } else { r.x + 8.0 };
+                // Tree: a collapsible row leads with a disclosure triangle,
+                // children indent one step past the parent's chevron so the
+                // parent and child icons line up.
+                let base = 8.0 + if pin.collapsible { 20.0 } else { 0.0 } + 20.0 * pin.depth.min(3) as f64;
+                let icon_x = if collapsed { r.mid_x() - 8.0 } else { r.x + base };
+                if !collapsed && pin.collapsible {
+                    style::draw_symbol(
+                        if pin.expanded { "chevron.down" } else { "chevron.right" },
+                        SidebarGeometry::chevron_rect(*r),
+                        c.dim,
+                        9.0,
+                    );
+                }
                 style::draw_symbol(
                     if pin.icon.is_empty() { "folder" } else { &pin.icon },
                     Rect::new(icon_x, r.y, 16.0, r.height),
@@ -914,7 +952,7 @@ mod appkit {
                 }
                 style::draw_text_left(
                     &pin.label,
-                    Rect::new(r.x + 30.0, r.y, (r.width - 38.0 - tag_w).max(0.0), r.height),
+                    Rect::new(r.x + base + 22.0, r.y, (r.width - base - 30.0 - tag_w).max(0.0), r.height),
                     &f,
                     c.text,
                 );
@@ -1070,6 +1108,23 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chevron_hit_toggles_a_collapsible_pin() {
+        let m = SidebarModel {
+            pinned: vec![
+                SidebarPin { key: "all".into(), label: "All".into(), section: "S".into(), collapsible: true, expanded: true, ..Default::default() },
+                SidebarPin { key: "kid".into(), label: "Kid".into(), section: "S".into(), depth: 1, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let g = SidebarGeometry::new(220.0, 600.0, &m, false);
+        let r = g.pinned_rows[0];
+        assert_eq!(g.hit(&m, 0.0, r.x + 8.0, r.mid_y()), Some((-10, true)), "chevron → toggle");
+        assert_eq!(g.hit(&m, 0.0, r.x + 80.0, r.mid_y()), Some((-10, false)), "row → open");
+        let kid = g.pinned_rows[1];
+        assert_eq!(g.hit(&m, 0.0, kid.x + 8.0, kid.mid_y()), Some((-11, false)), "no chevron zone on a child");
     }
 
     #[test]

@@ -110,12 +110,25 @@ impl JiraPane {
                     last_section = pin.section.as_str();
                 }
                 let sel = m.pinned_selected.as_deref() == Some(pin.key.as_str());
-                let label = egui::RichText::new(pin.label.as_str()).color(c(colors.text));
-                let resp = ui.selectable_label(sel, label);
-                let resp = if pin.tip.is_empty() { resp } else { resp.on_hover_text(&pin.tip) };
-                if resp.clicked() {
-                    events.push(JiraEvent::Sidebar(SidebarEvent::Pinned(pin.key.clone())));
-                }
+                // Tree rows ("All boards" ▾ + its indented starred boards),
+                // mirroring the AppKit sidebar's chevron + depth indent.
+                ui.horizontal(|ui| {
+                    if pin.collapsible {
+                        let chev = if pin.expanded { "▾" } else { "▸" };
+                        let cr = ui.selectable_label(false, egui::RichText::new(chev).color(c(colors.dim)).small());
+                        if cr.clicked() {
+                            events.push(JiraEvent::Sidebar(SidebarEvent::TogglePin(pin.key.clone())));
+                        }
+                    } else if pin.depth > 0 {
+                        ui.add_space(18.0);
+                    }
+                    let label = egui::RichText::new(pin.label.as_str()).color(c(colors.text));
+                    let resp = ui.selectable_label(sel, label);
+                    let resp = if pin.tip.is_empty() { resp } else { resp.on_hover_text(&pin.tip) };
+                    if resp.clicked() {
+                        events.push(JiraEvent::Sidebar(SidebarEvent::Pinned(pin.key.clone())));
+                    }
+                });
             }
             if !m.section_title.is_empty() {
                 ui.label(egui::RichText::new(m.section_title.to_uppercase()).color(c(colors.dim)).small());

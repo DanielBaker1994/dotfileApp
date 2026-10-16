@@ -108,7 +108,7 @@ impl Default for JiraConfigSettings {
             no_jobs: "No poll jobs configured — set the connection above.".to_string(),
             loading_paths: "Loading paths…".to_string(),
             job_detail_title: "Job".to_string(),
-            job_select_hint: "Select a job on the left to edit it.".to_string(),
+            job_select_hint: "Pick a job above to edit it.".to_string(),
             job_schedule_label: "Schedule".to_string(),
             job_schedule_placeholder: "e.g. 10m, 1h, 1d".to_string(),
             job_enabled_label: "Enabled".to_string(),
@@ -255,6 +255,25 @@ fn job_row(j: &DescribeJob) -> JobRow {
     }
 }
 
+/// A row's status tone (the `●` bullet + the status word): the same
+/// traffic-light language as the sidebar's sync dot — green ok, red failed,
+/// amber running/cancelled, dim off/never-run. Names per `color(_:)`.
+pub fn job_row_tone(status: &str, enabled: bool) -> &'static str {
+    if !enabled {
+        return "dim";
+    }
+    let s = status.trim().to_ascii_lowercase();
+    if s.contains("error") || s.contains("fail") {
+        "err"
+    } else if s.contains("running") || s.contains("cancel") || s.contains("stale") || s.contains("locked") {
+        "warn"
+    } else if s.starts_with("ok") {
+        "ok"
+    } else {
+        "dim"
+    }
+}
+
 /// The soonest next run across the enabled jobs (the poll payload already
 /// formats each `nextRun`; `"due"` wins).
 pub fn next_poll(d: &Describe) -> String {
@@ -278,13 +297,75 @@ pub fn next_poll(d: &Describe) -> String {
     best.map(str::to_string).unwrap_or_else(|| "—".to_string())
 }
 
-/// The status line + a tone key (`text` / `dim` / `warn` / `err`):
-/// polling on/off, last run, and the next poll.
+/// Seconds since the epoch, for the relative-time formatters below.
+pub fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Parse `jira_status.TIME_FMT` ("2026-10-16 09:41:45", wall-clock local) to
+/// epoch seconds. `None` on anything else (empty, `never`, `due`, `—`).
+fn parse_poll_ts(ts: &str) -> Option<i64> {
+    let (date, time) = ts.trim().split_once(' ')?;
+    let d: Vec<i32> = date.split('-').filter_map(|p| p.parse().ok()).collect();
+    let t: Vec<i32> = time.split(':').filter_map(|p| p.parse().ok()).collect();
+    if d.len() != 3 || t.len() != 3 {
+        return None;
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = d[0] - 1900;
+    tm.tm_mon = d[1] - 1;
+    tm.tm_mday = d[2];
+    tm.tm_hour = t[0];
+    tm.tm_min = t[1];
+    tm.tm_sec = t[2];
+    tm.tm_isdst = -1;
+    let secs = unsafe { libc::mktime(&mut tm) };
+    if secs == -1 {
+        None
+    } else {
+        Some(secs as i64)
+    }
+}
+
+/// A span of seconds as a compact unit: `41s` / `9m` / `5h` / `2d`.
+fn human_span(secs: i64) -> String {
+    let s = secs.abs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86400)
+    }
+}
+
+/// A poll timestamp as relative text against `now`: past → "3m ago",
+/// future → "in 9m"; `None` when it is not a timestamp (the caller keeps
+/// the raw value, e.g. `due`).
+pub fn fmt_poll_time(ts: &str, now: i64) -> Option<String> {
+    let at = parse_poll_ts(ts)?;
+    let d = at - now;
+    Some(if d <= 0 {
+        format!("{} ago", human_span(d))
+    } else {
+        format!("in {}", human_span(d))
+    })
+}
+
+/// The status line + a tone key (`ok` / `dim` / `warn` / `err`): polling
+/// on/off with relative times ("last run 41s ago · next in 9m"), and the
+/// same traffic light as the job rows.
 pub fn status_line(
     d: &Describe,
     enabled: bool,
     poll_active: bool,
     lock_held: bool,
+    now: i64,
 ) -> (String, &'static str) {
     if !enabled {
         return if poll_active {
@@ -293,20 +374,34 @@ pub fn status_line(
             ("○ Polling off".to_string(), "dim")
         };
     }
-    let last = if d.last_run.trim().is_empty() {
+    let last_raw = d.last_run.trim();
+    let last = if last_raw.is_empty() {
         "never".to_string()
     } else {
-        d.last_run.trim().to_string()
+        fmt_poll_time(last_raw, now).unwrap_or_else(|| last_raw.to_string())
     };
+    let next_raw = next_poll(d);
+    // `due` / `—` are not timestamps; they pass through.
+    let next = fmt_poll_time(&next_raw, now).unwrap_or(next_raw);
     let head = if lock_held {
         "● Polling now…"
     } else {
         "● Polling on"
     };
-    (
-        format!("{head} — last run {last} · next {}", next_poll(d)),
-        "text",
-    )
+    // Traffic light like the job rows: amber while a poll runs, red when an
+    // enabled job's last run failed, green when the sync is healthy.
+    let tone = if lock_held {
+        "warn"
+    } else if d
+        .endpoints
+        .iter()
+        .any(|j| job_row_tone(&j.status, j.enabled) == "err")
+    {
+        "err"
+    } else {
+        "ok"
+    };
+    (format!("{head} — last run {last} · next {next}"), tone)
 }
 
 /// The config / status / cache file paths the surface lists (existing files
@@ -453,13 +548,17 @@ mod appkit {
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSButtonType, NSControlSize,
-        NSControlStateValueOff, NSControlStateValueOn, NSFont, NSLineBreakMode, NSScrollView,
-        NSTextAlignment, NSTextField, NSView,
+        NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName,
+        NSForegroundColorAttributeName, NSLineBreakMode, NSScrollView, NSTextAlignment, NSTextField,
+        NSView,
     };
-    use objc2_foundation::{NSInteger, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+    use objc2_foundation::{
+        NSAttributedString, NSAttributedStringKey, NSDictionary, NSInteger, NSMutableAttributedString,
+        NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    };
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -467,9 +566,8 @@ mod appkit {
     const ROW_H: f64 = 22.0;
     const TITLE_H: f64 = 20.0;
     const LINE_H: f64 = 16.0;
-    /// The left job list's fixed width (`job-list-width`), and the right
-    /// detail pane's row grid.
-    const LIST_W: f64 = 320.0;
+    /// The per-job detail pane's row grid (the pane spans the document
+    /// width now; the job list sits above it, not beside it).
     const D_ROW: f64 = 30.0;
     const D_LABEL_W: f64 = 78.0;
     const D_FIELD_H: f64 = 24.0;
@@ -489,6 +587,25 @@ mod appkit {
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
+    }
+
+    /// One attributed run for a job row's title (font + foreground colour).
+    fn title_run(text: &str, col: Rgba, font: &Retained<NSFont>) -> Retained<NSAttributedString> {
+        let keys: Vec<&NSAttributedStringKey> =
+            unsafe { vec![NSFontAttributeName, NSForegroundColorAttributeName] };
+        let objs: Vec<Retained<AnyObject>> = vec![
+            unsafe { Retained::cast_unchecked(font.clone()) },
+            unsafe { Retained::cast_unchecked(col.to_nscolor()) },
+        ];
+        let refs: Vec<&AnyObject> = objs.iter().map(|o| &**o).collect();
+        let attrs = NSDictionary::from_slices(&keys, &refs);
+        unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(text),
+                Some(&attrs),
+            )
+        }
     }
 
     fn as_any<T: objc2::Message + ?Sized>(o: &T) -> &AnyObject {
@@ -612,6 +729,12 @@ mod appkit {
         /// The job the detail pane currently shows (its fields hold its values;
         /// an empty name = nothing selected).
         d_shown_for: RefCell<String>,
+        /// The values `populate_detail` last wrote into the four detail
+        /// fields: if the fields no longer match them, the user is mid-edit
+        /// and a refresh must NOT clobber the form (the old guard only
+        /// covered a field that still held a field editor — click anything
+        /// else and the edits vanished under the ≤5 s timer).
+        d_last_detail: RefCell<Option<(String, String, String, String)>>,
         /// The job names behind the left list's rows, by button tag.
         d_names: RefCell<Vec<String>>,
         /// `true` while a background writer is running (its buttons are off).
@@ -804,6 +927,7 @@ mod appkit {
                 d_result: result,
                 d_buttons,
                 d_shown_for: RefCell::new(String::new()),
+                d_last_detail: RefCell::new(None),
                 d_names: RefCell::new(Vec::new()),
                 d_busy: Cell::new(false),
             });
@@ -974,7 +1098,7 @@ mod appkit {
                 (err, "err")
             } else {
                 match &describe {
-                    Some(d) => status_line(d, enabled, poll_active, d.lock_held),
+                    Some(d) => status_line(d, enabled, poll_active, d.lock_held, now_epoch()),
                     None => (self.ivars().settings.loading.clone(), "dim"),
                 }
             };
@@ -1066,30 +1190,38 @@ mod appkit {
                 .unwrap_or_default();
             *self.ivars().d_names.borrow_mut() = names;
 
-            let list_w = LIST_W.min((doc_w - PAD * 2.0 - 240.0).max(160.0));
-            let right_x = PAD + list_w + 12.0;
-            let right_w = (doc_w - PAD - right_x).max(1.0);
+            let list_w = (doc_w - PAD * 2.0).max(200.0);
             let top = y + 6.0;
+            // The poll-jobs list spans the whole document width (it used to
+            // share a fixed 320 pt column with the detail pane, which chopped
+            // the job line). The detail pane sits below it, also full width;
+            // the enclosing scroll view handles a long list.
+            let mut ly = self.title_at_x(mtm, &s.jobs_title, PAD, top, list_w);
+            let list_top = ly;
+            if rows.is_empty() {
+                ly += ROW_H + 2.0;
+            } else {
+                ly += rows.len() as f64 * (ROW_H + 2.0);
+            }
+            ly += 10.0;
 
-            // Right: the selected job's detail pane (its widgets are
-            // persistent; only their values are refreshed here). Populated
-            // first so the list below highlights the resolved selection.
-            let pane_y = self.title_at_x(mtm, &s.job_detail_title, right_x, top, right_w);
+            // The selected job's detail pane (its widgets are persistent;
+            // only their values are refreshed here). Populated before the
+            // rows so the list highlights the resolved selection.
+            let pane_y = self.title_at_x(mtm, &s.job_detail_title, PAD, ly, list_w);
             let detail = self.ivars().detail.clone();
             let cur = detail.frame();
-            if cur.origin.x != right_x
+            if cur.origin.x != PAD
                 || cur.origin.y != pane_y
-                || cur.size.width != right_w
+                || cur.size.width != list_w
                 || cur.size.height != DETAIL_H
             {
-                detail.setFrame(rect(right_x, pane_y, right_w, DETAIL_H));
+                detail.setFrame(rect(PAD, pane_y, list_w, DETAIL_H));
             }
-            self.layout_detail(right_w);
+            self.layout_detail(list_w);
             self.populate_detail(describe);
             let selected = selected_job();
 
-            // Left: the poll-jobs list (one selectable row per endpoint).
-            let mut ly = self.title_at_x(mtm, &s.jobs_title, PAD, top, list_w);
             if rows.is_empty() {
                 let text = if describe.is_none() {
                     s.loading_jobs.as_str()
@@ -1098,9 +1230,8 @@ mod appkit {
                 };
                 let l = self.label(mtm, text, 12.0, false, colors.dim);
                 l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-                l.setFrame(rect(PAD, ly, list_w, LINE_H));
+                l.setFrame(rect(PAD, list_top, list_w, LINE_H));
                 self.add(&l);
-                ly += ROW_H + 2.0;
             } else {
                 let target: &AnyObject = as_any(self);
                 for (i, r) in rows.iter().enumerate() {
@@ -1108,18 +1239,34 @@ mod appkit {
                     b.setButtonType(NSButtonType::PushOnPushOff);
                     b.setBezelStyle(NSBezelStyle::Push);
                     b.setControlSize(NSControlSize::Small);
-                    b.setFont(Some(&NSFont::systemFontOfSize(11.5)));
-                    let title = format!(
-                        "● {}  ·  every {}  ·  last {}  ·  {}{}",
-                        r.name,
-                        r.interval,
-                        r.last_run,
-                        r.status,
-                        if r.enabled { "" } else { " (off)" },
-                    );
-                    b.setTitle(&NSString::from_str(&title));
+                    let font = NSFont::systemFontOfSize(11.5);
+                    b.setFont(Some(&font));
+                    b.setAlignment(NSTextAlignment::Left);
+                    b.setToolTip(Some(&NSString::from_str(&format!(
+                        "{} — next run {}, last {}",
+                        r.name, r.next_run, r.last_run
+                    ))));
+                    // The status tone colours the bullet and the status word
+                    // (green ok / red error / amber running / dim off) —
+                    // the traffic-light language of the sidebar's sync dot.
+                    let tone = self.color(job_row_tone(&r.status, r.enabled));
+                    // Relative times like the header line; the raw
+                    // `TIME_FMT` value is only the fallback for odd inputs.
+                    let last_rel = fmt_poll_time(&r.last_run, now_epoch()).unwrap_or_else(|| r.last_run.clone());
+                    let attr = NSMutableAttributedString::new();
+                    for (text, col) in [
+                        ("\u{25cf} ", tone),
+                        (&format!("{}  ·  every {}  ·  last {}  ·  ", r.name, r.interval, last_rel), colors.text),
+                        (&r.status, tone),
+                        (if r.enabled { "" } else { " (off)" }, colors.dim),
+                    ] {
+                        if !text.is_empty() {
+                            attr.appendAttributedString(&title_run(text, col, &font));
+                        }
+                    }
+                    b.setAttributedTitle(&attr.into_super());
                     b.setTag(i as NSInteger);
-                    b.setFrame(rect(PAD, ly, list_w, ROW_H));
+                    b.setFrame(rect(PAD, list_top + i as f64 * (ROW_H + 2.0), list_w, ROW_H));
                     b.setState(if selected.as_deref() == Some(r.name.as_str()) {
                         NSControlStateValueOn
                     } else {
@@ -1130,12 +1277,10 @@ mod appkit {
                         b.setAction(Some(sel!(jobClicked:)));
                     }
                     self.add(&b);
-                    ly += ROW_H + 2.0;
                 }
             }
-            let list_h = ly - top;
 
-            top + list_h.max(TITLE_H + DETAIL_H) + 10.0
+            pane_y + DETAIL_H + 10.0
         }
 
         /// Rebuild the detail pane's widget frames for the given width.
@@ -1178,6 +1323,7 @@ mod appkit {
             });
             let Some(job) = job else {
                 i.d_shown_for.borrow_mut().clear();
+                *i.d_last_detail.borrow_mut() = None;
                 i.d_heading.setStringValue(&NSString::from_str(&s.job_detail_title));
                 self.set_detail_result(&s.job_select_hint, None);
                 i.d_enabled.setState(NSControlStateValueOff);
@@ -1197,7 +1343,16 @@ mod appkit {
             let editing = [&i.d_window, &i.d_jql, &i.d_args, &i.d_columns]
                 .iter()
                 .any(|f| f.currentEditor().is_some());
-            if *i.d_shown_for.borrow() == name && editing {
+            // Same job and the fields hold un-saved user edits → leave the
+            // form alone (the value that differs from what we last wrote
+            // is the user's, not the disk's).
+            let dirty = i.d_last_detail.borrow().as_ref().is_some_and(|(w, j, a, c)| {
+                i.d_window.stringValue().to_string() != *w
+                    || i.d_jql.stringValue().to_string() != *j
+                    || i.d_args.stringValue().to_string() != *a
+                    || i.d_columns.stringValue().to_string() != *c
+            });
+            if *i.d_shown_for.borrow() == name && (editing || dirty) {
                 return;
             }
             let detail = job_detail(job);
@@ -1211,6 +1366,12 @@ mod appkit {
             i.d_jql.setStringValue(&NSString::from_str(&detail.jql));
             i.d_args.setStringValue(&NSString::from_str(&detail.args));
             i.d_columns.setStringValue(&NSString::from_str(&detail.columns));
+            *i.d_last_detail.borrow_mut() = Some((
+                detail.window.clone(),
+                detail.jql.clone(),
+                detail.args.clone(),
+                detail.columns.clone(),
+            ));
             for f in [&i.d_window, &i.d_jql, &i.d_args, &i.d_columns] {
                 f.setEnabled(true);
             }
@@ -1258,6 +1419,10 @@ mod appkit {
             match result {
                 Ok((msg, clear)) => {
                     self.set_detail_result(&msg, Some(true));
+                    // The form's content is now what the disk holds (we
+                    // just wrote it): drop the dirty guard so the refresh
+                    // can re-populate normally.
+                    *self.ivars().d_last_detail.borrow_mut() = None;
                     if clear {
                         clear_job();
                         self.ivars().d_shown_for.borrow_mut().clear();
@@ -1444,7 +1609,13 @@ mod appkit {
                         b.setEnabled(lock_held);
                     }
                     JiraConfigAction::Force => {
-                        b.setToolTip(Some(&NSString::from_str("Poll every enabled job now (jira_poll.py --force)")));
+                        // Clickable while a poll holds the lock meant a
+                        // guaranteed skipped run ("✗ exit 3"); the honest
+                        // control is a greyed button while it runs.
+                        b.setToolTip(Some(&NSString::from_str(
+                            "Poll every enabled job now (jira_poll.py --force)",
+                        )));
+                        b.setEnabled(!lock_held);
                     }
                     _ => {}
                 }
@@ -1558,24 +1729,59 @@ enabled = true
     }
 
     #[test]
+    fn job_row_tone_is_a_traffic_light() {
+        assert_eq!(job_row_tone("ok", true), "ok");
+        assert_eq!(job_row_tone("error", true), "err");
+        assert_eq!(job_row_tone("Error: 401 Unauthorized", true), "err");
+        assert_eq!(job_row_tone("running", true), "warn");
+        assert_eq!(job_row_tone("cancelled", true), "warn");
+        assert_eq!(job_row_tone("never run", true), "dim");
+        assert_eq!(job_row_tone("", true), "dim");
+        assert_eq!(job_row_tone("ok", false), "dim", "a disabled job stays quiet");
+    }
+
+    #[test]
     fn status_line_reports_on_off_and_last_run() {
         let d = describe(json!({
             "lastRun": "2026-10-14 12:00:00",
             "endpoints": [{"name": "a", "enabled": true, "nextRun": "2026-10-14 12:05:00"}]
         }));
-        let (line, tone) = status_line(&d, true, false, false);
+        let now = parse_poll_ts("2026-10-14 12:02:00").unwrap();
+        let (line, tone) = status_line(&d, true, false, false, now);
         assert!(line.starts_with("● Polling on"));
-        assert!(line.contains("last run 2026-10-14 12:00:00"));
-        assert!(line.contains("next 2026-10-14 12:05:00"));
-        assert_eq!(tone, "text");
+        assert!(line.contains("last run 2m ago"), "{line}");
+        assert!(line.contains("next in 3m"), "{line}");
+        assert_eq!(tone, "ok");
 
-        let (off, _) = status_line(&d, false, false, false);
+        let (off, _) = status_line(&d, false, false, false, now);
         assert_eq!(off, "○ Polling off");
-        let (bg, _) = status_line(&d, false, true, false);
+        let (bg, _) = status_line(&d, false, true, false, now);
         assert!(bg.starts_with("◐ Polling in the background"));
 
-        let (now, _) = status_line(&d, true, false, true);
-        assert!(now.starts_with("● Polling now…"));
+        let (now_line, now_tone) = status_line(&d, true, false, true, now);
+        assert!(now_line.starts_with("● Polling now…"));
+        assert_eq!(now_tone, "warn", "a poll in flight shows amber");
+
+        let bad = describe(json!({
+            "lastRun": "2026-10-14 12:00:00",
+            "endpoints": [{"name": "a", "enabled": true, "status": "error: 401", "nextRun": "due"}]
+        }));
+        let (_, err_tone) = status_line(&bad, true, false, false, now);
+        assert_eq!(err_tone, "err", "one failed job reddens the header");
+    }
+
+    #[test]
+    fn fmt_poll_time_is_relative_and_passes_through_non_timestamps() {
+        let at = parse_poll_ts("2026-10-14 12:00:00").unwrap();
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at + 41).unwrap(), "41s ago");
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at + 600).unwrap(), "10m ago");
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at + 5 * 3600 + 60).unwrap(), "5h ago");
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at + 2 * 86400).unwrap(), "2d ago");
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at - 540).unwrap(), "in 9m");
+        assert_eq!(fmt_poll_time("2026-10-14 12:00:00", at).unwrap(), "0s ago");
+        assert_eq!(fmt_poll_time("due", at), None);
+        assert_eq!(fmt_poll_time("never", at), None);
+        assert_eq!(fmt_poll_time("", at), None);
     }
 
     #[test]

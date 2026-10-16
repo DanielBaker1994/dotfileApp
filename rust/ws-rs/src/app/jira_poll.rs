@@ -60,30 +60,23 @@ pub fn run(script: &str, args: &[&str]) -> (i32, String, String) {
 }
 
 /// `JiraPoll.run(script, args, stdin:)` — blocking; call off the main thread.
+/// A 30-min deadline: a wedged child (rate-limit wait that never clears, a
+/// hung curl) must not hold the caller's "busy" slot forever — on expiry the
+/// child is killed and the reply says so.
 pub fn run_stdin(script: &str, args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
-    use std::io::Write;
-    use std::process::Stdio;
-    let child = Command::new(python())
-        .arg(format!("{}/{script}", jira_dir()))
-        .args(args)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            if let (Some(text), Some(mut pipe)) = (stdin, c.stdin.take()) {
-                let _ = pipe.write_all(text.as_bytes());
-            }
-            c.wait_with_output()
-        });
-    match child
-    {
-        Ok(o) => (
-            o.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&o.stdout).into_owned(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-        ),
+    let py = python();
+    let mut argv = vec![format!("{}/{script}", jira_dir())];
+    argv.extend(args.iter().map(|s| s.to_string()));
+    let env: Vec<(String, String)> = std::env::vars().chain([("PYTHONDONTWRITEBYTECODE".into(), "1".into())]).collect();
+    match crate::app::process_run::run_process_deadline(
+        &py,
+        &argv,
+        stdin.map(str::as_bytes),
+        Some(&env),
+        false,
+        Some(std::time::Duration::from_secs(1800)),
+    ) {
+        Ok(o) => (o.code, o.out, o.err),
         Err(e) => (-1, String::new(), e.to_string()),
     }
 }
@@ -149,19 +142,26 @@ pub fn enable_check() -> EnableCheck {
     EnableCheck::Login(msg)
 }
 
-/// `setJiraEnabled(_:keepPolling:)`'s config write + agent sync.
-pub fn set_enabled(on: bool, keep_polling: bool) {
-    config::save_config_values(
+/// `setJiraEnabled(_:keepPolling:)`'s config write + agent sync. `Err` =
+/// the commands.toml write did not land: the caller must NOT claim success
+/// (a silently failed write used to log "[jira] enabled = false" while the
+/// launchd agent stayed booted and polling continued behind the lie).
+pub fn set_enabled(on: bool, keep_polling: bool) -> Result<(), String> {
+    let wrote = config::save_config_values(
         "jira",
         &[
             ("enabled".into(), Some(if on { "true" } else { "false" }.into())),
             ("poll-when-disabled".into(), (!on && keep_polling).then(|| "true".into())),
         ],
     );
+    if !wrote {
+        return Err("could not write commands.toml ([jira] enabled) — is it readable?".into());
+    }
     if on {
         run("jira_status.py", &["--note-error"]);
     }
     sync_launch_agent();
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -189,7 +189,14 @@ pub fn sync_launch_agent() {
     }
     let mut changed = false;
     if let Ok(tmpl) = std::fs::read_to_string(format!("{}/com.jira.poll.plist", jira_dir())) {
-        let want = tmpl.replace("__WS_CONFIG__", Paths::from_env().asset_dir());
+        // Substitute the CONFIG HOME (where commands.toml lives), NOT
+        // `asset_dir`: an installed app's asset_dir is the read-only bundle
+        // Resources, where the wrapper's `WS_ROOT/../commands.toml` lookup
+        // fails silently → every tick decided "jira disabled" and no one
+        // polled. This matches jira-doctor.sh's substitution (which the
+        // doctor compares against — the two must agree or it forever
+        // reports "plist differs").
+        let want = tmpl.replace("__WS_CONFIG__", Paths::from_env().user_dir());
         if std::fs::read_to_string(&plist).ok().as_deref() != Some(want.as_str()) {
             let _ = std::fs::create_dir_all(format!("{home}/Library/LaunchAgents"));
             changed = std::fs::write(&plist, want).is_ok();

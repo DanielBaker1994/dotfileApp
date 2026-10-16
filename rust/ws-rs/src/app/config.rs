@@ -1645,8 +1645,11 @@ pub fn save_config_values_at(
     write_config_text_at(path, &text)
 }
 
-pub fn save_config_values(section: &str, kv: &[(String, Option<String>)]) {
-    let _ = save_config_values_at(&commands_conf_path(), section, kv);
+/// `saveConfigValues(section:_:)`. `false` = the write did not land (unreadable
+/// config, codec timeout under helper load — the documented silent-no-op
+/// footgun): callers that claim success to the user must check.
+pub fn save_config_values(section: &str, kv: &[(String, Option<String>)]) -> bool {
+    save_config_values_at(&commands_conf_path(), section, kv)
 }
 
 pub fn save_config_value(section: &str, key: &str, value: &str) {

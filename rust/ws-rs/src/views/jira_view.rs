@@ -504,6 +504,25 @@ fn str_list(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Python `os.path.expanduser` (leading `~` only).
+fn expand_user(p: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match p.strip_prefix('~') {
+        Some(rest) => format!("{home}{rest}"),
+        None => p.to_string(),
+    }
+}
+
+/// `jira_poll.py release_view_file`: the tab file name for a release / label
+/// view — alphanumerics, `._- ` kept, everything else `_`, trimmed, `.json`.
+fn view_file_name(base: &str) -> String {
+    let safe: String = base
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ') { c } else { '_' })
+        .collect();
+    format!("{}.json", safe.trim())
+}
+
 /// One queued `jira_poll.py` write (`setFavorite`, `setPinnedLabels`, …).
 /// On failure the host re-reads config.json (the revert) and toasts
 /// `err_prefix: <reason>`.
@@ -514,6 +533,32 @@ pub struct PollWrite {
     pub err_prefix: String,
     /// The script beside `jira_poll.py` to run (`jira_config.py` for columns).
     pub script: String,
+}
+
+/// What a queued [`PollRun`] does with its JSON answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PollRunKind {
+    /// `--board-view ID`: land the board's freshly built tab file.
+    BoardView(String),
+    /// `--board-sprint-keys BOARD SPRINT`: narrow the open board to a sprint.
+    SprintKeys(String, String),
+    /// `--release-view KEY`.
+    ReleaseView(String),
+    /// `--label-view NAME`.
+    LabelView(String),
+    /// `--my-work` for one view id.
+    MyWork(String),
+}
+
+/// One queued `jira_poll.py` verb whose ANSWER changes the model (a tab file
+/// to show, sprint keys to filter by). These used to run synchronously on
+/// the main thread from click handlers — a subprocess parsing the 100 MB
+/// issue cache froze the UI for seconds per click. The host drains
+/// `JiraList::pending_runs` off-main and routes the result back.
+#[derive(Clone, Debug)]
+pub struct PollRun {
+    pub args: Vec<String>,
+    pub kind: PollRunKind,
 }
 
 /// The list model.
@@ -555,6 +600,19 @@ pub struct JiraList {
     /// `jira_poll.py` config writes the model queued (stars, pins,
     /// blacklist); the host drains and runs them off the main thread.
     pub pending_writes: Vec<PollWrite>,
+    /// `jira_poll.py` answer-runs the model queued (board tab builds,
+    /// sprint key fetches, release/label/my-work views); the host drains
+    /// and runs them off the main thread like `pending_writes`.
+    pub pending_runs: Vec<PollRun>,
+    /// Sprint filter for the open board: (board, sprint token, its issue
+    /// keys). `None` shows every row — sprint `all`, a fetch in flight, or
+    /// a fetch that failed (see `sprint_error`).
+    pub sprint_filter: Option<(String, String, std::collections::HashSet<String>)>,
+    /// The `(board, sprint)` fetch currently in flight (dedupe).
+    pub sprint_pending: Option<(String, String)>,
+    /// The last sprint-fetch failure, shown in the board summary so the
+    /// lanes never lie about what they filtered.
+    pub sprint_error: Option<String>,
     /// `backToBoardList`: the open board came from "All boards", so Esc
     /// returns there.
     pub back_to_board_list: bool,
@@ -568,12 +626,20 @@ pub struct JiraList {
     pub board_group_by: Option<String>,
     /// Collapsed group names (`collapsedGroups`).
     pub collapsed: BTreeSet<String>,
+    /// The sidebar "All boards" disclosure triangle: hide the starred boards
+    /// under it (persisted per view).
+    pub boards_collapsed: bool,
     /// `[jira] page-size` and how many extra pages are shown (`visibleOffset`).
     pub page_size: usize,
     pub visible_offset: usize,
     /// The Jira directory (`directory.json`), read once per mtime.
     pub directory: Value,
     pub directory_mtime: Option<std::time::SystemTime>,
+    /// `board_catalog.json` / `boards.json` read once per mtime: the board
+    /// bar / sprint picker / sidebar re-read them per keystroke otherwise
+    /// (one `apply()` triggered ≥4 catalog parses).
+    pub cat_cache: std::cell::RefCell<(Option<std::time::SystemTime>, Value)>,
+    pub boards_cache: std::cell::RefCell<(Option<std::time::SystemTime>, Value)>,
     pub status_line: Option<(String, PopupTone)>,
     pub note: Option<String>,
     pub inspector: bool,
@@ -598,6 +664,7 @@ impl JiraList {
         });
         l.page_size = l.section.get("page-size").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
         l.group_by = crate::platform::get_string("listGroupBy.jira").filter(|g| !g.is_empty());
+        l.boards_collapsed = crate::platform::get_string("jira.boardsCollapsed").as_deref() == Some("1");
         l.reload_meta();
         l
     }
@@ -607,9 +674,39 @@ impl JiraList {
         let home = std::env::var("HOME").unwrap_or_default();
         match raw.strip_prefix('~') {
             Some(rest) => format!("{home}{rest}"),
-            None if raw.is_empty() => self.paths.as_ref().map(|p| p.out_dir.clone()).unwrap_or_default(),
+            None if raw.is_empty() => self.poller_out_dir(),
             None => raw,
         }
+    }
+
+    /// The directory the POLLER publishes tabs to: config.json's `outDir`
+    /// (which the poller always honors) else the paths.json default. The
+    /// app used to read tabs from the default even when config.json pointed
+    /// elsewhere — a custom outDir left the window showing empty lists while
+    /// the poller happily published.
+    fn poller_out_dir(&self) -> String {
+        let custom = self
+            .config
+            .get("outDir")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(expand_user);
+        custom.unwrap_or_else(|| self.paths.as_ref().map(|p| p.out_dir.clone()).unwrap_or_default())
+    }
+
+    /// A folder beside the poller's outDir (its files are not tabs) — the
+    /// mirror of the poller's `side_dir(outDir, name)`.
+    fn side_dir_path(&self, side: &str) -> Option<String> {
+        let out = self.poller_out_dir();
+        let out = out.trim_end_matches('/');
+        Some(Path::new(out).parent()?.join(side).to_string_lossy().into_owned())
+    }
+
+    /// The board's / release's / label's side dir by `paths.json` key.
+    fn side_dir_by_key(&self, key: &str) -> Option<String> {
+        let side = self.paths.as_ref()?.side_dirs.get(key)?;
+        self.side_dir_path(side)
     }
 
     fn endpoints(&self) -> Vec<Value> {
@@ -704,7 +801,7 @@ impl JiraList {
         self.status_line = self.sync_summary(&status);
         self.catalog = Vec::new();
         if let Some(p) = &self.paths {
-            let cat = read_json(&p.cache_file("boardCatalog"));
+            let cat = self.cached_json(&self.cat_cache, &p.cache_file("boardCatalog"));
             for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
                 let pk = proj.get("key").and_then(Value::as_str).unwrap_or("").to_string();
                 for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
@@ -862,6 +959,10 @@ impl JiraList {
         self.last_tab = i;
         self.back_to_board_list = false;
         self.col_filters.clear();
+        self.checked.clear(); // batch ticks belong to the shown list only
+        self.sprint_filter = None;
+        self.sprint_pending = None;
+        self.sprint_error = None;
         self.visible_offset = 0;
         self.columns = t.columns.clone();
         self.all = load_records(&t.path);
@@ -869,6 +970,10 @@ impl JiraList {
         self.shown_mtime = std::fs::metadata(&t.path).and_then(|m| m.modified()).ok();
         self.selection = 0;
         self.note = None;
+        // Remember where the user was so a rebuild restores this tab
+        // (`start()`'s documented "the last one shown"; it used to fall
+        // back to whatever sorts first — typically "Hidden releases").
+        crate::platform::set_string("jira.lastTab", &t.file);
         self.refilter();
     }
 
@@ -876,6 +981,10 @@ impl JiraList {
     pub fn show_pin_file(&mut self, key: &str, path: &str, columns: Vec<ListColumn>) {
         self.place = Some(JiraPlace::Pin(key.to_string()));
         self.col_filters.clear();
+        self.checked.clear();
+        self.sprint_filter = None;
+        self.sprint_pending = None;
+        self.sprint_error = None;
         self.visible_offset = 0;
         self.columns = columns;
         self.all = load_records(path);
@@ -888,6 +997,11 @@ impl JiraList {
     /// `boardListRows()` as records (the "All boards" pin).
     pub fn show_board_list(&mut self) {
         self.place = Some(JiraPlace::Pin(BOARD_LIST_KEY.into()));
+        self.checked.clear();
+        self.col_filters.clear();
+        self.sprint_filter = None;
+        self.sprint_pending = None;
+        self.sprint_error = None;
         self.columns = parse_columns_value(&crate::views::jira::board_list_columns());
         let mut ids: Vec<String> = self.catalog.iter().map(|c| c.0.clone()).collect();
         for (id, _) in &self.boards {
@@ -935,10 +1049,8 @@ impl JiraList {
 
     /// A pinned board's cached issues (`showBoardPin`), else poll it.
     pub fn board_path(&self, id: &str) -> Option<String> {
-        let p = self.paths.as_ref()?;
-        let side = p.side_dirs.get("boards")?;
-        let out = Path::new(&p.out_dir).parent()?.join(side).join(format!("board-{id}.json"));
-        Some(out.to_string_lossy().into_owned())
+        let dir = self.side_dir_by_key("boards")?;
+        Some(Path::new(&dir).join(format!("board-{id}.json")).to_string_lossy().into_owned())
     }
 
     pub fn open_board(&mut self, id: &str) -> bool {
@@ -946,70 +1058,151 @@ impl JiraList {
             self.board_error(id, "board path unavailable");
             return false;
         };
-        let path = if Path::new(&cached).exists() {
-            cached
-        } else {
-            // No cached tab file yet: build it from the issue cache on demand,
-            // like the sibling pins (`--release-view` / `--label-view` /
-            // `--my-work`). Never fail silently.
-            match crate::views::jira::run_jira_poll(&["--board-view", id], None) {
-                Ok(out) => match (
-                    out.get("dir").and_then(Value::as_str),
-                    out.get("file").and_then(Value::as_str),
-                ) {
-                    (Some(dir), Some(file)) => {
-                        let p = format!("{dir}/{file}");
-                        if !Path::new(&p).exists() {
-                            self.board_error(id, "board not synced yet");
-                            return false;
-                        }
-                        p
-                    }
-                    _ => {
-                        self.board_error(id, "board not synced yet");
-                        return false;
-                    }
-                },
-                Err(err) if err.contains("is not starred") => {
-                    // A board clicked from "All boards" that has no sync job
-                    // yet: `--board-view` can only shape an already-starred
-                    // board, so star it first (queues `--pin-board add`,
-                    // which fetches the board's filter off-main; a failed
-                    // write toasts "Stars not saved: <reason>") and open it
-                    // empty. The reload watcher lands the rows once the
-                    // poller publishes board-<id>.json — no more dead end.
-                    self.pin_board(id);
-                    let text = format!("Board {id}: starred — syncing; rows arrive on the next poll");
-                    self.status_line = Some((text.clone(), PopupTone::Info));
-                    #[cfg(target_os = "macos")]
-                    crate::ui::toast::show(&text, "arrow.clockwise.circle");
-                    cached
-                }
-                Err(err) => {
-                    self.board_error(id, &err);
-                    return false;
-                }
-            }
-        };
+        if !Path::new(&cached).exists() {
+            // No tab file yet: build it ASYNC like the sibling pins
+            // (`--release-view` / `--label-view` / `--my-work`) — this used
+            // to run `jira_poll.py --board-view` synchronously on the main
+            // thread, which parses the whole issue cache: seconds of frozen
+            // UI per click, forever if the child wedged. The board shows
+            // empty for a moment; `finish_board_view` lands the rows.
+            self.pending_runs.push(PollRun {
+                args: vec!["--board-view".into(), id.to_string()],
+                kind: PollRunKind::BoardView(id.to_string()),
+            });
+            self.status_line = Some((format!("Board {id}: building its tab…"), PopupTone::Info));
+        }
         // `openBoard` pins a board that is not pinned yet (the sidebar's
         // "Boards" rows), then shows its cached issues.
         let from_list = self.on_board_list();
         self.pin_board(id);
         let cols = self.default_columns();
-        self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &path, cols);
+        self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &cached, cols);
         let default_sprint = self.default_sprint(id);
-        self.board_sprint.entry(id.to_string()).or_insert(default_sprint);
+        let sp = self.board_sprint.entry(id.to_string()).or_insert(default_sprint).clone();
         self.board_mode.entry(id.to_string()).or_insert_with(|| "columns".to_string());
         self.compute_board_columns();
+        self.request_sprint(id, &sp);
         self.back_to_board_list = from_list;
         true
     }
 
+    /// The `--board-view` answer for a board opened without a tab file.
+    pub fn finish_board_view(&mut self, board: &str, res: Result<Value, String>) {
+        match res {
+            Ok(v) => {
+                if self.on_board().as_deref() != Some(board) {
+                    return; // the user moved on; the watcher shows rows anyway
+                }
+                let path = match (v.get("dir").and_then(Value::as_str), v.get("file").and_then(Value::as_str)) {
+                    (Some(d), Some(f)) => format!("{d}/{f}"),
+                    _ => return,
+                };
+                if !Path::new(&path).exists() {
+                    self.board_error(board, "board not synced yet");
+                    return;
+                }
+                if self.shown_path != path {
+                    let cols = self.default_columns();
+                    self.show_pin_file(&format!("{BOARD_PREFIX}{board}"), &path, cols);
+                    let sp = self.sprint_token(board);
+                    self.request_sprint(board, &sp);
+                } else {
+                    self.reload_shown(); // rows written to where the empty view points
+                }
+                self.compute_board_columns();
+            }
+            Err(err) if err.contains("is not starred") => {
+                // A board clicked from "All boards" that has no sync job
+                // yet: `--board-view` can only shape an already-starred
+                // board, so star it (queues `--pin-board add`, which fetches
+                // the board's filter off-main; a failed write toasts "Stars
+                // not saved: <reason>") and keep it open empty. The reload
+                // watcher lands the rows once the poller publishes
+                // board-<id>.json — no more dead end.
+                self.pin_board(board);
+                let text = format!("Board {board}: starred — syncing; rows arrive on the next poll");
+                self.status_line = Some((text.clone(), PopupTone::Info));
+                #[cfg(target_os = "macos")]
+                crate::ui::toast::show(&text, "arrow.clockwise.circle");
+            }
+            Err(err) => self.board_error(board, &err),
+        }
+    }
+
+    /// The board's remembered sprint pick (or the default).
+    fn sprint_token(&self, board: &str) -> String {
+        self.board_sprint
+            .get(board)
+            .cloned()
+            .unwrap_or_else(|| self.default_sprint(board))
+    }
+
+    /// Ask `--board-sprint-keys` for one sprint's issue keys (off-main via
+    /// `pending_runs`). `all` clears the filter; "current" maps to Jira's
+    /// `openSprints()`. The lanes and the table filter to the keys when they
+    /// arrive (`apply_sprint_keys`); until then the board shows everything
+    /// with a "loading" note so the view never silently lies.
+    pub fn request_sprint(&mut self, board: &str, sprint: &str) {
+        if sprint == "all" {
+            self.sprint_filter = None;
+            self.sprint_pending = None;
+            self.sprint_error = None;
+            return;
+        }
+        if self
+            .sprint_pending
+            .as_ref()
+            .is_some_and(|(b, s)| b == board && s == sprint)
+        {
+            return; // one request per (board, sprint) in flight
+        }
+        self.sprint_error = None;
+        self.sprint_pending = Some((board.to_string(), sprint.to_string()));
+        self.pending_runs.push(PollRun {
+            args: vec!["--board-sprint-keys".into(), board.to_string(), sprint.to_string()],
+            kind: PollRunKind::SprintKeys(board.to_string(), sprint.to_string()),
+        });
+    }
+
+    /// Route a `--board-sprint-keys` answer back to the model.
+    pub fn apply_sprint_keys(&mut self, board: &str, sprint: &str, res: Result<Vec<String>, String>) {
+        let current = self
+            .sprint_pending
+            .as_ref()
+            .is_some_and(|(b, s)| b.as_str() == board && s.as_str() == sprint);
+        if !current {
+            return; // stale answer (the user re-picked meanwhile)
+        }
+        self.sprint_pending = None;
+        let on_this = self.on_board().as_deref() == Some(board)
+            && self.board_sprint.get(board).map(String::as_str) == Some(sprint);
+        match res {
+            Ok(keys) if on_this => {
+                self.sprint_filter = Some((board.to_string(), sprint.to_string(), keys.into_iter().collect()));
+                self.sprint_error = None;
+                self.refilter();
+                self.compute_board_columns();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                if on_this {
+                    // Never hide the failure: the summary says the lanes are
+                    // unfiltered so the user does not "see the sprint".
+                    self.sprint_error = Some(e);
+                    self.sprint_filter = None;
+                    self.refilter();
+                    self.compute_board_columns();
+                }
+            }
+        }
+    }
+
     /// Surface a failure reason to the user: the sidebar's status line (which
     /// persists where the 1.4 s toast pill fades and truncates mid-string) plus
-    /// a macOS toast, always pointing at where the Jira logs live.
+    /// a macOS toast, and a pointer to the Jira Config tab (its FILES section
+    /// lists the live poll / debug / status log paths for this install).
     fn surface_error(&mut self, text: &str) {
-        self.status_line = Some((format!("{text} · logs: ~/.cache/jira"), PopupTone::Warning));
+        self.status_line = Some((format!("{text} · detail: Jira ▸ Config"), PopupTone::Warning));
         #[cfg(target_os = "macos")]
         crate::ui::toast::show(text, "exclamationmark.triangle");
     }
@@ -1020,12 +1213,15 @@ impl JiraList {
         self.surface_error(&format!("Board {id}: {msg}"));
     }
 
-    /// One Esc in the list (`onEscape`): clear the query, else go back from
-    /// a board to "All boards", else leave a pinned list for the last tab.
+    /// One Esc in the list (`onEscape`): undo the narrowing (query AND
+    /// column filters — clearing only the query left a list that looked
+    /// "stuck" filtered with no visible way back), else go back from a
+    /// board to "All boards", else leave a pinned list for the last tab.
     /// `false` when there was nothing to undo (the host backs the slot out).
     pub fn escape_step(&mut self) -> bool {
-        if !self.query.is_empty() {
+        if !self.query.is_empty() || !self.col_filters.is_empty() {
             self.query.clear();
+            self.col_filters.clear();
             self.selection = 0;
             self.refilter();
             return true;
@@ -1084,10 +1280,21 @@ impl JiraList {
             .unwrap_or_else(|| format!("Board {id}"))
     }
 
-    /// The sprints of one board (from the cached `boardCatalog.json`).
+    /// A cache JSON file read once per mtime (see `cat_cache` / `boards_cache`).
+    fn cached_json(&self, cell: &std::cell::RefCell<(Option<std::time::SystemTime>, Value)>, path: &str) -> Value {
+        let m = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let mut c = cell.borrow_mut();
+        if c.0 != m {
+            c.0 = m;
+            c.1 = read_json(path);
+        }
+        c.1.clone()
+    }
+
+    /// The sprints of one board (from the cached `board_catalog.json`).
     pub fn board_sprints(&self, id: &str) -> Vec<BoardSprint> {
         let Some(p) = &self.paths else { return Vec::new() };
-        let cat = read_json(&p.cache_file("boardCatalog"));
+        let cat = self.cached_json(&self.cat_cache, &p.cache_file("boardCatalog"));
         for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
             for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
                 if b.get("id").and_then(Value::as_str) != Some(id) {
@@ -1128,7 +1335,7 @@ impl JiraList {
     /// The board's `columns` spec from the cached `boards.json`.
     fn board_column_spec(&self, id: &str) -> Vec<Value> {
         let Some(p) = &self.paths else { return Vec::new() };
-        let boards = read_json(&p.cache_file("boards"));
+        let boards = self.cached_json(&self.boards_cache, &p.cache_file("boards"));
         boards
             .get(id)
             .and_then(|b| b.get("columns"))
@@ -1164,10 +1371,19 @@ impl JiraList {
             .as_ref()
             .map(|r| serde_json::to_value(&r.words).unwrap_or_else(|_| serde_json::json!({})))
             .unwrap_or_else(|| serde_json::json!({}));
+        // The directory's authoritative status -> category map ({name:
+        // "new"/"indeterminate"/"done"}) beats word guessing for a status
+        // like "Verified" or "Reopened" — it was hardcoded `{}` and every
+        // card fell back to the word lists.
+        let cats = self
+            .directory
+            .get("statusCategories")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         Some(serde_json::json!({
             "rows": rows,
             "columns": spec,
-            "categories": {},
+            "categories": cats,
             "words": words,
             "people": {},
             "categoryNames": ["To Do", "In Progress", "Done"],
@@ -1175,20 +1391,19 @@ impl JiraList {
     }
 
     /// Recompute the open board's columns from its loaded rows (`renderBoardColumns`).
+    ///
+    /// The pure port runs directly (parity-tested against `jira.board_columns`):
+    /// the old helper IPC hop could block a board open or sprint switch for
+    /// up to 30 s under helper-pool pressure, and bought nothing the local
+    /// port does not. `helper_board_columns` stays for the parity test.
     pub fn compute_board_columns(&mut self) {
-        let Some(params) = self.board_columns_params() else {
-            self.board_cols = Vec::new();
-            return;
-        };
-        // The Swift board called `jira.board_columns` through the Python
-        // helper; use it when the helper is up (same code the Python tests
-        // cover) and fall back to the identical pure port in unit tests.
-        self.board_cols = crate::views::jira::helper_board_columns(&params).unwrap_or_else(|_| board_columns(&params));
+        self.refresh_board_columns();
     }
 
-    /// [`compute_board_columns`] without the helper IPC — the per-keystroke
-    /// search path, where a blocking helper call would stutter the list.
+    /// The board columns from the in-process port (no IPC) — the per-keystroke
+    /// search path and the recompute path.
     fn refresh_board_columns(&mut self) {
+        self.refresh_directory(); // fresh statusCategories for the lanes
         let Some(params) = self.board_columns_params() else {
             self.board_cols = Vec::new();
             return;
@@ -1208,11 +1423,19 @@ impl JiraList {
         self.open_board(board)
     }
 
-    /// `pickSprint(_:)` — the open board's sprint picker.
+    /// `pickSprint(_:)` — the open board's sprint picker. Narrowing needs
+    /// the sprint's issue keys (`--board-sprint-keys`, a network search):
+    /// fetched off-main, the lanes filter when they land. Until then the
+    /// board shows everything with a "loading" note — the choice used to be
+    /// cosmetic and the view *said* it was the sprint.
     pub fn pick_sprint(&mut self, sprint: &str) -> bool {
         let Some(id) = self.on_board() else { return false };
-        self.board_sprint.insert(id, sprint.to_string());
+        self.board_sprint.insert(id.clone(), sprint.to_string());
+        self.sprint_filter = None;
+        self.sprint_error = None;
+        self.refilter();
         self.compute_board_columns();
+        self.request_sprint(&id, sprint);
         true
     }
 
@@ -1233,17 +1456,28 @@ impl JiraList {
         let on = self.boards.iter().any(|(bid, _)| bid == id);
         self.queue_write(&["--pin-board", if on { "add" } else { "remove" }, id], None, "Stars not saved");
         self.pins_dirty = true;
+        if on {
+            self.boards_collapsed = false; // a fresh star re-opens the tree
+        }
         true
     }
 
-    /// `openBoard`'s first step: a board that is not pinned yet joins the
+    /// `openBoard`'s first step: a board that is not starred yet joins the
     /// sidebar "Boards" section (in-memory — `--pin-board` is not ported).
     pub fn pin_board(&mut self, id: &str) {
         if !self.boards.iter().any(|(bid, _)| bid == id) {
             self.boards.push((id.to_string(), self.board_name(id)));
             self.queue_write(&["--pin-board", "add", id], None, "Stars not saved");
             self.pins_dirty = true;
+            self.boards_collapsed = false;
         }
+    }
+
+    /// The sidebar "All boards" disclosure triangle: hide / show the starred
+    /// boards under it. Persisted per app (like the rail state).
+    pub fn toggle_boards_collapsed(&mut self) {
+        self.boards_collapsed = !self.boards_collapsed;
+        crate::platform::set_string("jira.boardsCollapsed", if self.boards_collapsed { "1" } else { "0" });
     }
 
     /// `boardBar.onPin` — pin/unpin the current `board|sprint|mode` view.
@@ -1491,6 +1725,15 @@ impl JiraList {
                 parts.push(format!("{a} – {b}"));
             }
         }
+        // The sprint filter's live state — the bar never says "Current
+        // sprint" over unfiltered rows without saying so.
+        if sp != "all" {
+            if self.sprint_pending.as_ref().is_some_and(|(b, _)| b == board) {
+                parts.push("sprint rows loading…".into());
+            } else if let Some(e) = &self.sprint_error {
+                parts.push(format!("sprint filter failed — showing all: {e}"));
+            }
+        }
         parts.join(" · ")
     }
 
@@ -1548,17 +1791,31 @@ impl JiraList {
             });
         }
         match self.on_board() {
-            Some(id) => serde_json::json!({
-                "id": id,
-                "sprint": self.board_sprint.get(&id).cloned().unwrap_or_else(|| self.default_sprint(&id)),
-                "mode": self.board_mode.get(&id).cloned().unwrap_or_else(|| "columns".to_string()),
-                "columns": self.board_mode.get(&id).map(|m| m == "columns").unwrap_or(true),
-                "bar": true,
-                "sprintKeys": -1,
-                "views": self.pinned_views,
-                "selected": self.sidebar_selected(),
-                "catalog": self.catalog.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
-            }),
+            Some(id) => {
+                let keys: Vec<String> = match &self.sprint_filter {
+                    Some((b, _, set)) if b == &id => {
+                        let mut v: Vec<String> = set.iter().cloned().collect();
+                        v.sort();
+                        v
+                    }
+                    _ => Vec::new(),
+                };
+                serde_json::json!({
+                    "id": id,
+                    "sprint": self.board_sprint.get(&id).cloned().unwrap_or_else(|| self.default_sprint(&id)),
+                    "mode": self.board_mode.get(&id).cloned().unwrap_or_else(|| "columns".to_string()),
+                    "columns": self.board_mode.get(&id).map(|m| m == "columns").unwrap_or(true),
+                    "bar": true,
+                    // The sprint picker's real filter state (the old `-1`
+                    // "never fetched" sentinel was the cosmetic-picker bug).
+                    "sprintKeys": keys,
+                    "sprintPending": self.sprint_pending.as_ref().is_some_and(|(b, _)| b == &id),
+                    "sprintError": self.sprint_error.clone(),
+                    "views": self.pinned_views,
+                    "selected": self.sidebar_selected(),
+                    "catalog": self.catalog.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
+                })
+            }
             None => serde_json::json!({}),
         }
     }
@@ -1652,47 +1909,159 @@ impl JiraList {
             query: self.query.clone(),
             empty: "No board columns.".into(),
             rules: self.rules.clone(),
+            place: self.place_key(),
         })
     }
 
     /// `showReleasePin` — `--release-view KEY` writes one file per release
     /// from the issue cache (local, no request); show the pinned release's.
-    /// Err strings carry no "release" prefix: the callers add the item context.
+    /// Err strings carry no "release" prefix: the callers add the item
+    /// context. A present file opens instantly; a missing one opens the
+    /// (empty) view with a "building" note while the verb runs off-main
+    /// (`finish_open_pin`) — this used to freeze the click on a subprocess
+    /// parsing the whole issue cache.
     pub fn open_release(&mut self, key: &str) -> Result<(), String> {
-        let out = crate::views::jira::run_jira_poll(&["--release-view", key], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
-        let file = out
-            .get("releases")
-            .and_then(Value::as_array)
-            .and_then(|a| a.iter().find(|r| r.get("key").and_then(Value::as_str) == Some(key)))
-            .and_then(|r| r.get("file").and_then(Value::as_str))
-            .ok_or("not in the synced releases")?;
-        let cols = self.default_columns();
-        self.show_pin_file(key, &format!("{dir}/{file}"), cols);
+        self.open_pin_view(
+            "releases",
+            view_file_name(key),
+            key,
+            &format!("Release {key}"),
+            vec!["--release-view".into(), key.to_string()],
+            PollRunKind::ReleaseView(key.to_string()),
+        );
         Ok(())
     }
 
     /// `showLabelPin` — `--label-view NAME` -> the issues carrying the label.
     pub fn open_label(&mut self, name: &str) -> Result<(), String> {
-        let out = crate::views::jira::run_jira_poll(&["--label-view", name], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
-        let file = out.get("file").and_then(Value::as_str).ok_or("no file in output")?;
-        let cols = self.default_columns();
-        self.show_pin_file(&format!("{LABEL_PREFIX}{name}"), &format!("{dir}/{file}"), cols);
+        self.open_pin_view(
+            "labels",
+            view_file_name(&format!("label-{name}")),
+            &format!("{LABEL_PREFIX}{name}"),
+            &format!("Label {name}"),
+            vec!["--label-view".into(), name.to_string()],
+            PollRunKind::LabelView(name.to_string()),
+        );
         Ok(())
     }
 
     /// `showMyWorkPin` — `jira_poll.py --my-work` → `<dir>/<id>.json`.
     pub fn open_my_work(&mut self, id: &str) -> Result<(), String> {
-        let out = crate::views::jira::run_jira_poll(&["--my-work"], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
-        let path = format!("{dir}/{id}.json");
-        if !Path::new(&path).exists() {
-            return Err("not synced yet".into());
-        }
-        let cols = self.default_columns();
-        self.show_pin_file(&format!("{MY_WORK_PREFIX}{id}"), &path, cols);
+        self.open_pin_view(
+            "myWork",
+            format!("{id}.json"),
+            &format!("{MY_WORK_PREFIX}{id}"),
+            &format!("My work {id}"),
+            vec!["--my-work".into()],
+            PollRunKind::MyWork(id.to_string()),
+        );
         Ok(())
+    }
+
+    /// Shared pin-view open: instant show when the file exists; otherwise
+    /// show the computed candidate (empty) + status and queue the builder.
+    fn open_pin_view(&mut self, side_key: &str, file: String, place_key: &str, label: &str, args: Vec<String>, kind: PollRunKind) {
+        match self.side_dir_by_key(side_key) {
+            Some(dir) => {
+                let p = Path::new(&dir).join(&file).to_string_lossy().into_owned();
+                let exists = Path::new(&p).exists();
+                let cols = self.default_columns();
+                self.show_pin_file(place_key, &p, cols);
+                if !exists {
+                    self.status_line = Some((format!("{label}: building its view…"), PopupTone::Info));
+                    self.pending_runs.push(PollRun { args, kind });
+                }
+            }
+            None => {
+                self.status_line = Some((format!("{label}: view directory unavailable"), PopupTone::Warning));
+            }
+        }
+    }
+
+    /// A `--release-view` / `--label-view` / `--my-work` answer: show the
+    /// file it wrote, but only while that pin is still the shown one (a
+    /// stale answer must never hijack a list the user moved on to).
+    pub fn finish_open_pin(&mut self, kind: &PollRunKind, res: Result<Value, String>) {
+        let (place_key, label) = match kind {
+            PollRunKind::ReleaseView(key) => (key.clone(), format!("Release {key}")),
+            PollRunKind::LabelView(name) => (format!("{LABEL_PREFIX}{name}"), format!("Label {name}")),
+            PollRunKind::MyWork(id) => (format!("{MY_WORK_PREFIX}{id}"), format!("My work {id}")),
+            _ => return,
+        };
+        let v = match res {
+            Ok(v) => v,
+            Err(e) => {
+                self.surface_error(&format!("{label}: {e}"));
+                return;
+            }
+        };
+        let path = match kind {
+            PollRunKind::ReleaseView(key) => {
+                let Some(dir) = v.get("dir").and_then(Value::as_str) else {
+                    self.surface_error(&format!("{label}: no dir in output"));
+                    return;
+                };
+                match v
+                    .get("releases")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.iter().find(|r| r.get("key").and_then(Value::as_str) == Some(key.as_str())))
+                    .and_then(|r| r.get("file").and_then(Value::as_str))
+                {
+                    Some(f) => format!("{dir}/{f}"),
+                    None => {
+                        self.surface_error(&format!("{label}: not in the synced releases"));
+                        return;
+                    }
+                }
+            }
+            PollRunKind::LabelView(_) => {
+                let (Some(dir), Some(f)) = (v.get("dir").and_then(Value::as_str), v.get("file").and_then(Value::as_str)) else {
+                    self.surface_error(&format!("{label}: no file in output"));
+                    return;
+                };
+                format!("{dir}/{f}")
+            }
+            PollRunKind::MyWork(id) => {
+                let Some(dir) = v.get("dir").and_then(Value::as_str) else {
+                    self.surface_error(&format!("{label}: no dir in output"));
+                    return;
+                };
+                format!("{dir}/{id}.json")
+            }
+            _ => return,
+        };
+        if !Path::new(&path).exists() {
+            self.surface_error(&format!("{label}: not synced yet"));
+            return;
+        }
+        let on_place = matches!(&self.place, Some(JiraPlace::Pin(k)) if k == &place_key);
+        if !on_place {
+            return; // the user moved on; the tab is built for the next click
+        }
+        if self.shown_path == path {
+            self.reload_shown();
+        } else {
+            let cols = self.default_columns();
+            self.show_pin_file(&place_key, &path, cols);
+        }
+    }
+
+    /// Re-read the shown file after its rows changed on disk (keeps the
+    /// selection by key like `refresh`).
+    fn reload_shown(&mut self) {
+        let keep = self.selected().and_then(|r| r.get("key")).cloned();
+        self.all = load_records(&self.shown_path);
+        self.shown_mtime = std::fs::metadata(&self.shown_path).and_then(|m| m.modified()).ok();
+        self.refilter();
+        if let Some(k) = keep {
+            if let Some(i) = self
+                .rows
+                .iter()
+                .position(|&j| self.rec(j).and_then(|r| r.get("key")) == Some(&k))
+            {
+                self.selection = i;
+            }
+        }
     }
 
     fn filter_fields(&self) -> Vec<String> {
@@ -1899,6 +2268,20 @@ impl JiraList {
                 words.iter().all(|w| hay.contains(w.as_str()))
             })
             .collect();
+        // Sprint pick on a board: narrow to the fetched key set (the board
+        // rows carry no sprint field, so keys from `--board-sprint-keys`
+        // are the filter). Pending / failed fetch → no narrowing; the
+        // summary says so rather than lying about what is shown.
+        {
+            let on_board = self.on_board();
+            if let (Some((b, _, keys)), Some(cur)) = (&self.sprint_filter, on_board) {
+                if b == &cur {
+                    idx.retain(|&i| {
+                        self.all.get(i).and_then(|r| r.get("key")).map_or(true, |k| keys.contains(k))
+                    });
+                }
+            }
+        }
         if let Some((field, asc)) = &self.sort {
             if self.columns.iter().any(|c| &c.field == field) {
                 idx.sort_by(|&a, &b| {
@@ -1952,6 +2335,32 @@ impl JiraList {
         }
     }
 
+    /// The vim snapshot's row texts — one per visible row, index-aligned with
+    /// `rows` (the cursor must line up). Goes through `rec`: `rows` carries
+    /// synthetic indices (group headers, "load N more…") past `all.len()`,
+    /// and indexing `all` with them panics the daemon (the vim keypress path
+    /// hit exactly that before this accessor existed).
+    pub fn vim_row_texts(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|&i| {
+                let Some(r) = self.rec(i) else { return String::new() };
+                match (r.get("__loadmore"), r.get("__group")) {
+                    (Some(m), _) => m.clone(),
+                    (None, Some(g)) => {
+                        let n = r.get("__count").cloned().unwrap_or_default();
+                        format!("{g} {n}")
+                    }
+                    _ => {
+                        let key = r.get("key").cloned().unwrap_or_default();
+                        let sum = r.get("summary").cloned().unwrap_or_default();
+                        format!("{key} {sum}")
+                    }
+                }
+            })
+            .collect()
+    }
+
     pub fn selected(&self) -> Option<&Record> {
         self.rows.get(self.selection).and_then(|&i| self.rec(i))
     }
@@ -1979,6 +2388,15 @@ impl JiraList {
     /// The real (non-synthetic) shown rows.
     pub fn shown_records(&self) -> Vec<Record> {
         self.rows.iter().filter(|&&i| i < self.all.len()).filter_map(|&i| self.all.get(i).cloned()).collect()
+    }
+
+    /// The snapshot's place id (the view's scroll-keep heuristic).
+    fn place_key(&self) -> String {
+        match &self.place {
+            Some(JiraPlace::Tab(i)) => format!("tab:{i}"),
+            Some(JiraPlace::Pin(k)) => format!("pin:{k}"),
+            None => String::new(),
+        }
     }
 
     /// The directory cache, re-read when its file changed.
@@ -2244,6 +2662,7 @@ impl JiraList {
                 section: "Starred".into(),
                 meta: "Release".into(),
                 tip: format!("Show every issue in {r} here"),
+                ..Default::default()
             });
         }
         for l in str_list(&self.config, "pinnedLabels") {
@@ -2254,6 +2673,7 @@ impl JiraList {
                 section: "Starred".into(),
                 meta: "Label".into(),
                 tip: format!("Show every issue labelled {l} here"),
+                ..Default::default()
             });
         }
         if !self.catalog.is_empty() || !self.boards.is_empty() {
@@ -2264,16 +2684,24 @@ impl JiraList {
                 section: "Boards".into(),
                 meta: if self.catalog.is_empty() { String::new() } else { self.catalog.len().to_string() },
                 tip: "Every board in the projects in scope — ☆ one to keep it here".into(),
-            });
-        }
-        for (id, name) in &self.boards {
-            pinned.push(SidebarPin {
-                key: format!("{BOARD_PREFIX}{id}"),
-                label: name.clone(),
-                icon: "rectangle.split.3x1".into(),
-                section: "Boards".into(),
+                collapsible: !self.boards.is_empty(),
+                expanded: !self.boards_collapsed,
                 ..Default::default()
             });
+        }
+        // Starred boards are children of "All boards" (they came out of that
+        // catalog); the disclosure triangle hides them.
+        if !self.boards_collapsed {
+            for (id, name) in &self.boards {
+                pinned.push(SidebarPin {
+                    key: format!("{BOARD_PREFIX}{id}"),
+                    label: name.clone(),
+                    icon: "rectangle.split.3x1".into(),
+                    section: "Boards".into(),
+                    depth: 1,
+                    ..Default::default()
+                });
+            }
         }
         let rows = self
             .tabs
@@ -2572,6 +3000,12 @@ pub struct JiraSnapshot {
     pub query: String,
     pub empty: String,
     pub rules: Option<StyleRules>,
+    /// The shown place ("tab:<i>" / "pin:<key>" / ""): the view snaps the
+    /// scroll to the top only when this (or the columns) changed — new
+    /// rows arriving in the SAME list must not throw away where the user
+    /// scrolled (the poller sorts newest-first, so the first key changed
+    /// every tick).
+    pub place: String,
 }
 
 impl JiraList {
@@ -2616,13 +3050,14 @@ impl JiraList {
             show_inspector: self.inspector,
             query: self.query.clone(),
             empty: if self.tabs.is_empty() {
-                "No synced Jira lists yet — run the Jira setup (Settings ▸ Jira).".into()
+                "No synced Jira lists yet — run the Jira setup (Tickets ▸ Config, or the palette's \"Jira Config\").".into()
             } else if self.all.is_empty() {
                 "Nothing in this list.".into()
             } else {
                 "No matches.".into()
             },
             rules: self.rules.clone(),
+            place: self.place_key(),
         }
     }
 
@@ -2728,6 +3163,11 @@ impl JiraList {
                     self.surface_error(&format!("Release {key}: {e}"));
                 }
             }
+            JiraEvent::Sidebar(SidebarEvent::TogglePin(key)) => {
+                if key == BOARD_LIST_KEY {
+                    self.toggle_boards_collapsed();
+                }
+            }
             JiraEvent::Sidebar(_) => {}
         }
     }
@@ -2750,7 +3190,7 @@ mod appkit {
     use objc2_app_kit::{
         NSStringDrawingDeprecated, NSBezierPath, NSButton, NSButtonType, NSControlSize, NSControlTextEditingDelegate,
         NSEvent, NSFont, NSGraphicsContext, NSLineBreakMode, NSMenuItem, NSPopUpButton,
-        NSScrollView, NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSStringDrawingOptions,
+        NSScrollView, NSStringDrawingOptions,
         NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
     };
     use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -3711,7 +4151,7 @@ mod appkit {
     pub struct BoardBarIvars {
         title: Retained<NSTextField>,
         sprint: Retained<NSPopUpButton>,
-        mode: Retained<NSSegmentedControl>,
+        mode: Retained<TabPillView>,
         summary: Retained<NSTextField>,
         pin: Retained<NSButton>,
         /// The sprint menu structure (one entry per choice; the popup's
@@ -3741,12 +4181,6 @@ mod appkit {
                         self.emit(JiraEvent::BoardSprint(c.id));
                     }
                 }
-            }
-
-            #[unsafe(method(modePicked:))]
-            fn mode_picked(&self, _sender: &AnyObject) {
-                let m = if self.ivars().mode.selectedSegment() == 1 { "table" } else { "columns" };
-                self.emit(JiraEvent::BoardMode(m.to_string()));
             }
 
             #[unsafe(method(pinClicked:))]
@@ -3793,14 +4227,7 @@ mod appkit {
             sprint.setControlSize(NSControlSize::Small);
             sprint.setHidden(true);
 
-            let mode = NSSegmentedControl::new(mtm);
-            mode.setSegmentCount(2);
-            mode.setLabel_forSegment(&NSString::from_str("Columns"), 0);
-            mode.setLabel_forSegment(&NSString::from_str("Table"), 1);
-            mode.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-            mode.setSegmentStyle(NSSegmentStyle::Rounded);
-            mode.setSelectedSegment(0);
-            mode.setControlSize(NSControlSize::Small);
+            let mode = TabPillView::new(mtm, colors, &["Columns", "Table"]);
 
             let summary = NSTextField::labelWithString(&NSString::from_str(""), mtm);
             summary.setFont(Some(&style::system_font(11.5, Weight::Regular)));
@@ -3838,11 +4265,15 @@ mod appkit {
             unsafe {
                 iv.sprint.setTarget(Some(as_any(&*v)));
                 iv.sprint.setAction(Some(sel!(sprintPicked:)));
-                iv.mode.setTarget(Some(as_any(&*v)));
-                iv.mode.setAction(Some(sel!(modePicked:)));
                 iv.pin.setTarget(Some(as_any(&*v)));
                 iv.pin.setAction(Some(sel!(pinClicked:)));
             }
+            let weak_mode = objc2::rc::Weak::from_retained(&v);
+            iv.mode.set_on_pick(Box::new(move |i| {
+                if let Some(bar) = weak_mode.load() {
+                    bar.emit(JiraEvent::BoardMode(if i == 1 { "table".to_string() } else { "columns".to_string() }));
+                }
+            }));
             for sub in [&*iv.title as &NSView, &iv.sprint, &iv.mode, &iv.summary, &iv.pin] {
                 v.addSubview(sub);
             }
@@ -3894,7 +4325,7 @@ mod appkit {
             if let Some(i) = m.choices.iter().position(|c| !c.header && c.id == m.picked) {
                 iv.sprint.selectItemAtIndex(i as isize);
             }
-            iv.mode.setSelectedSegment(if m.mode == "table" { 1 } else { 0 });
+            iv.mode.set_selected(if m.mode == "table" { 1 } else { 0 });
             *iv.choices.borrow_mut() = m.choices.clone();
             self.layout_controls();
             self.setNeedsDisplay(true);
@@ -3923,8 +4354,9 @@ mod appkit {
                 iv.sprint.setFrame(ns(Rect::new(x, (h - 22.0) / 2.0, pw, 22.0)));
                 x += pw + 10.0;
             }
-            iv.mode.setFrame(ns(Rect::new(x, (h - 24.0) / 2.0, 150.0, 24.0)));
-            x += 158.0;
+            let mode_w = iv.mode.desired_width().max(1.0);
+            iv.mode.setFrame(ns(Rect::new(x, (h - 26.0) / 2.0, mode_w, 26.0)));
+            x += mode_w + 10.0;
             let sum_x = x;
             let sum_w = (w - 14.0 - sum_x).max(0.0);
             let (_, sh) = style::text_size("Ag", &style::system_font(11.5, Weight::Regular));
@@ -3971,7 +4403,7 @@ mod appkit {
         search: Retained<NSTextField>,
         search_box: Retained<NSView>,
         /// The `Tickets | Config` pill on the search row.
-        tabs: Retained<NSSegmentedControl>,
+        tabs: Retained<TabPillView>,
         /// The selected surface (`views.jira.tab`).
         tab: Cell<JiraSurface>,
         /// The Config surface, painted over the list area when selected.
@@ -4001,6 +4433,209 @@ mod appkit {
         board_theme: RefCell<String>,
     }
 
+    /// The `Tickets | Config` pill: hand-drawn capsule chips on the theme
+    /// tokens (`capsule_track` + `capsule_chip`), the same look the Confluence
+    /// mode chips use — a native `NSSegmentStyle::Capsule` control renders
+    /// system colours the theme cannot reach.
+    pub struct TabPillIvars {
+        colors: Cell<PopupColors>,
+        labels: RefCell<Vec<String>>,
+        tab: Cell<usize>,
+        hover: Cell<Option<usize>>,
+        pressed: Cell<Option<usize>>,
+        sink: RefCell<Option<Rc<dyn Fn(usize)>>>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraTabPill"]
+        #[ivars = TabPillIvars]
+        pub struct TabPillView;
+
+        impl TabPillView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _r: NSRect) {
+                let iv = self.ivars();
+                let c = iv.colors.get();
+                let b = self.bounds();
+                style::capsule_track(Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height), &c);
+                let f = style::system_font(12.0, Weight::Medium);
+                let rects = Self::chip_rects(&iv.labels.borrow(), &f, b.size.width, b.size.height);
+                for (i, r) in rects.iter().enumerate() {
+                    let on = iv.tab.get() == i;
+                    let hov = iv.pressed.get() == Some(i) || (!on && iv.hover.get() == Some(i));
+                    style::capsule_chip(*r, &c, on, hov);
+                    let col = if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim };
+                    style::draw_text_centered(&iv.labels.borrow()[i], *r, &f, col);
+                }
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let idx = self.chip_at(p.x, p.y);
+                if idx != self.ivars().tab.get() {
+                    self.ivars().pressed.set(Some(idx));
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, e: &NSEvent) {
+                let iv = self.ivars();
+                let was = iv.pressed.take();
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                self.setNeedsDisplay(true);
+                if was.is_some() && Some(self.chip_at(p.x, p.y)) == was {
+                    if let Some(s) = iv.sink.borrow().as_ref() {
+                        s(was.unwrap());
+                    }
+                }
+            }
+
+            #[unsafe(method(mouseEntered:))]
+            fn mouse_entered(&self, e: &NSEvent) {
+                self.track_hover(e);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                self.track_hover(e);
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _e: &NSEvent) {
+                if self.ivars().hover.get().is_some() {
+                    self.ivars().hover.set(None);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.reset_tracking();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for TabPillView {}
+    );
+
+    impl TabPillView {
+        fn track_hover(&self, e: &NSEvent) {
+            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let idx = self.chip_at(p.x, p.y);
+            if self.ivars().hover.get() != Some(idx) {
+                self.ivars().hover.set(Some(idx));
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        fn chip_at(&self, x: f64, y: f64) -> usize {
+            let iv = self.ivars();
+            let b = self.bounds();
+            let f = style::system_font(12.0, Weight::Medium);
+            Self::chip_rects(&iv.labels.borrow(), &f, b.size.width, b.size.height)
+                .iter()
+                .position(|r| r.contains(x, y))
+                .unwrap_or_else(|| iv.tab.get())
+        }
+
+        /// Chips share the track: intrinsic widths (text + 22) with 3 pt
+        /// track padding and 2 pt gutters — the Confluence proportions. When
+        /// the view is squeezed narrower than that, the chips share equally.
+        fn chip_rects(labels: &[String], f: &NSFont, w: f64, h: f64) -> Vec<Rect> {
+            if labels.is_empty() {
+                return Vec::new();
+            }
+            let base: Vec<f64> = labels.iter().map(|t| style::text_size(t, f).0.ceil() + 22.0).collect();
+            let total = base.iter().sum::<f64>() + 6.0 + (labels.len() - 1) as f64 * 2.0;
+            let ws: Vec<f64> = if total <= w {
+                base
+            } else {
+                let even = ((w - 6.0 - (labels.len() - 1) as f64 * 2.0) / labels.len() as f64).max(36.0);
+                vec![even; labels.len()]
+            };
+            let mut x = 3.0 + (w - total).max(0.0) / 2.0;
+            let mut out = Vec::new();
+            for wv in ws {
+                out.push(Rect::new(x, 3.0, wv, (h - 6.0).max(1.0)));
+                x += wv + 2.0;
+            }
+            out
+        }
+
+        /// The snug width of the whole pill (chips + track padding) so the
+        /// container can be sized to the buttons instead of the column.
+        pub fn desired_width(&self) -> f64 {
+            let iv = self.ivars();
+            let labels = iv.labels.borrow();
+            if labels.is_empty() {
+                return 0.0;
+            }
+            let f = style::system_font(12.0, Weight::Medium);
+            labels.iter().map(|t| style::text_size(t, &f).0.ceil() + 22.0).sum::<f64>()
+                + 6.0
+                + (labels.len() - 1) as f64 * 2.0
+        }
+
+        fn reset_tracking(&self) {
+            if let Some(old) = self.ivars().tracking.borrow_mut().take() {
+                self.removeTrackingArea(&old);
+            }
+            let opts = NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect;
+            let ta = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    self.bounds(),
+                    opts,
+                    Some(as_any(self)),
+                    None,
+                )
+            };
+            self.addTrackingArea(&ta);
+            *self.ivars().tracking.borrow_mut() = Some(ta);
+        }
+
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors, labels: &[&str]) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(TabPillIvars {
+                colors: Cell::new(colors),
+                labels: RefCell::new(labels.iter().map(|s| s.to_string()).collect()),
+                tab: Cell::new(0),
+                hover: Cell::new(None),
+                pressed: Cell::new(None),
+                sink: RefCell::new(None),
+                tracking: RefCell::new(None),
+            });
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            v.reset_tracking();
+            v
+        }
+
+        /// Reflect the selected surface (keeps the pill in step with
+        /// `set_tab`, including host-driven switches).
+        pub fn set_selected(&self, i: usize) {
+            if self.ivars().tab.get() != i {
+                self.ivars().tab.set(i);
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        pub fn set_on_pick(&self, cb: Box<dyn Fn(usize)>) {
+            *self.ivars().sink.borrow_mut() = Some(Rc::from(cb));
+        }
+    }
+
     define_class!(
         #[unsafe(super(NSView))]
         #[thread_kind = MainThreadOnly]
@@ -4017,18 +4652,6 @@ mod appkit {
             fn set_frame_size(&self, size: NSSize) {
                 let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
                 self.layout_panes();
-            }
-
-            /// The Tickets / Config pill (`NSSegmentSwitchTracking::SelectOne`).
-            #[unsafe(method(tabPicked:))]
-            fn tab_picked(&self, _sender: &AnyObject) {
-                let tab = if self.ivars().tabs.selectedSegment() == 1 {
-                    JiraSurface::Config
-                } else {
-                    JiraSurface::Tickets
-                };
-                self.set_tab(tab);
-                self.emit(JiraEvent::Tab(tab));
             }
 
             #[unsafe(method(controlTextDidChange:))]
@@ -4170,17 +4793,12 @@ mod appkit {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("jira");
             let (search_box, search) = crate::ui::field::search_box(mtm, &colors, 13.0, "search...", 6.0, 28.0);
-            // The Tickets / Config pill, mirroring the board bar's switch.
-            // Labels come from `[jira-config]` (rule 3).
+            // The Tickets / Config pill: hand-drawn capsule chips on theme
+            // tokens, the same look as the Confluence mode chips. Labels come
+            // from `[jira-config]` (rule 3).
             let cfg = crate::views::jira_config::JiraConfigSettings::load();
-            let tabs = NSSegmentedControl::new(mtm);
-            tabs.setSegmentCount(2);
-            tabs.setLabel_forSegment(&NSString::from_str(&cfg.tickets_label), 0);
-            tabs.setLabel_forSegment(&NSString::from_str(&cfg.config_label), 1);
-            tabs.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-            tabs.setSegmentStyle(NSSegmentStyle::Rounded);
-            tabs.setSelectedSegment(0);
-            tabs.setControlSize(NSControlSize::Small);
+            let tabs =
+                TabPillView::new(mtm, colors, &[cfg.tickets_label.as_str(), cfg.config_label.as_str()]);
             let config = crate::views::jira_config::JiraConfigBodyView::new(mtm, colors);
             config.setHidden(true);
             let header = JiraHeaderView::new(mtm, snap.clone(), colors);
@@ -4223,7 +4841,6 @@ mod appkit {
             for sub in [
                 &*iv.sidebar as &NSView,
                 &iv.search_box,
-                &iv.tabs,
                 &iv.config,
                 &iv.header,
                 &iv.scroll,
@@ -4232,10 +4849,19 @@ mod appkit {
             ] {
                 v.addSubview(sub);
             }
-            unsafe {
-                iv.tabs.setTarget(Some(as_any(&*v)));
-                iv.tabs.setAction(Some(sel!(tabPicked:)));
-            }
+            // The pill on top: its click target must never fall under the
+            // sidebar card it shares the column with.
+            v.addSubview(&*iv.tabs as &NSView);
+            let weak_pill = objc2::rc::Weak::from_retained(&v);
+            iv.tabs.set_on_pick(Box::new(move |i| {
+                if let Some(view) = weak_pill.load() {
+                    let tab = if i == 1 { JiraSurface::Config } else { JiraSurface::Tickets };
+                    if view.tab() != tab {
+                        view.set_tab(tab);
+                        view.emit(JiraEvent::Tab(tab));
+                    }
+                }
+            }));
             // The board kanban `WKWebView` (`JiraBoardColumnsView`): created
             // once, hidden until a board is open in `columns` mode. It posts
             // `ready` / `open:KEY` back through `board_message`.
@@ -4281,7 +4907,7 @@ mod appkit {
             self.ivars().tab.set(tab);
             self.ivars()
                 .tabs
-                .setSelectedSegment(if tab == JiraSurface::Config { 1 } else { 0 });
+                .set_selected(if tab == JiraSurface::Config { 1 } else { 0 });
             self.ivars().config.set_active(tab == JiraSurface::Config);
             self.update_board_chrome();
             self.layout_panes();
@@ -4402,16 +5028,19 @@ mod appkit {
             if !editing && iv.search.stringValue().to_string() != s.query {
                 iv.search.setStringValue(&NSString::from_str(&s.query));
             }
-            let rows_changed = {
+            let (cols_changed, place_changed) = {
                 let old = iv.snap.borrow();
-                old.rows.len() != s.rows.len()
-                    || old.rows.first().and_then(|r| r.get("key")) != s.rows.first().and_then(|r| r.get("key"))
-                    || old.columns != s.columns
+                (old.columns != s.columns, old.place != s.place)
             };
             *iv.snap.borrow_mut() = s;
             self.update_board_chrome();
             self.layout_panes();
-            if rows_changed {
+            // Snap to the top only when the SHOWN LIST changed. The old
+            // "first row key differs" heuristic fired on every poll tick
+            // (newest-first publishing), throwing away wherever the user
+            // had scrolled — within one list `scroll_selection_visible`
+            // below protects the selection without moving the viewport.
+            if cols_changed || place_changed {
                 iv.scroll.contentView().scrollToPoint(NSPoint::new(0.0, 0.0));
                 iv.scroll.reflectScrolledClipView(&iv.scroll.contentView());
             }
@@ -4438,7 +5067,19 @@ mod appkit {
             let config = iv.tab.get() == JiraSurface::Config;
             let show_insp = show_inspector && !kanban && !config;
             let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
-            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
+            // The `Tickets | Config` pill heads the sidebar column (like the
+            // Confluence scope chips): the surface switch belongs to the nav,
+            // not the list's search strip. Fixed band at the top; the sidebar
+            // card starts below it. In the collapsed rail there is no room —
+            // the palette's Config command still reaches the dashboard, and
+            // clicking a ticket from the rail flips back automatically.
+            // The pill hugs its buttons (track sized to the chips, like the
+            // Confluence segment group) — only a narrow sidebar squeezes it,
+            // and then the chips share what's left equally.
+            let pill_w = iv.tabs.desired_width().min((sw - 24.0).max(80.0)).max(1.0);
+            iv.tabs.setFrame(ns(Rect::new(12.0, 9.0, pill_w, 26.0)));
+            iv.tabs.setHidden(iv.sidebar.collapsed());
+            iv.sidebar.setFrame(ns(Rect::new(0.0, 44.0, sw, (h - 44.0).max(60.0))));
             iv.divider.place(ns(Rect::new(sw - 4.0, 0.0, 8.0, h)));
             iv.divider.set_width(sw);
             iv.divider.setHidden(iv.sidebar.collapsed());
@@ -4458,16 +5099,9 @@ mod appkit {
             iv.bar.setFrame(ns(Rect::new(x0, bar_h, mw, board_bar_h)));
             iv.bar.layout_controls();
             let top = bar_h + board_bar_h;
-            // The Tickets / Config pill, right-aligned on the search row. It
-            // sits in the free gutter the search box leaves on the right; only
-            // when that is too narrow does the search box give up width.
-            iv.tabs.sizeToFit();
-            let pill_w = iv.tabs.frame().size.width.max(120.0);
-            let pill_x = (x0 + mw - pill_w - 8.0).max(x0);
-            iv.tabs.setFrame(ns(Rect::new(pill_x, top + 11.0, pill_w, 24.0)));
-            let search_w = (mw * 0.9 - 22.0)
-                .max(80.0)
-                .min((pill_x - 10.0 - (x0 + 22.0)).max(80.0));
+            // The pill now lives in the sidebar column (see above); the
+            // search strip owns its whole row.
+            let search_w = (mw - 22.0 - 10.0 - 8.0).max(80.0);
             iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, top + 9.0, search_w, 28.0)));
             iv.header.setFrame(ns(Rect::new(x0, top + 50.0, mw, HEADER_H)));
             let ty = top + 50.0 + HEADER_H + 2.0;
@@ -4779,6 +5413,25 @@ mod tests {
     }
 
     #[test]
+    fn vim_row_texts_cover_synthetic_rows() {
+        // The daemon used to index `all` with the synthetic row indices here
+        // (a paged or grouped list + any vim keypress = index-out-of-bounds).
+        let mut l = filter_list();
+        l.page_size = 2;
+        l.refilter();
+        assert!(l.rows.iter().any(|&i| i >= l.all.len())); // synth present
+        let t = l.vim_row_texts();
+        assert_eq!(t.len(), l.rows.len());
+        assert_eq!(t[2], "load 3 more…");
+        l.group_by = Some("assignee".into());
+        l.refilter();
+        let t = l.vim_row_texts();
+        assert_eq!(t.len(), l.rows.len());
+        // A group header reads "name count", never an "A-n" issue row.
+        assert!(t.iter().any(|x| x == "ann 2"));
+    }
+
+    #[test]
     fn escape_steps_back_out() {
         let mut l = filter_list();
         l.tabs = vec![JiraTab { path: "/x/a.json".into(), file: "a.json".into(), title: "A".into(), columns: l.columns.clone(), badge: None }];
@@ -4824,6 +5477,30 @@ mod tests {
         l.toggle_star(0);
         assert!(l.boards.iter().all(|(b, _)| b != "42"), "the ☆ unstars");
         assert_eq!(l.pending_writes.last().unwrap().args, vec!["--pin-board".to_string(), "remove".into(), "42".into()]);
+    }
+
+    #[test]
+    fn starred_boards_are_children_of_all_boards() {
+        let mut l = JiraList::default();
+        l.catalog = vec![("42".into(), "Demo board".into(), "D".into()), ("7".into(), "Other".into(), "O".into())];
+        l.toggle_pin_board("42");
+        l.toggle_pin_board("7");
+        let pins = l.sidebar_model().pinned;
+        let all = pins.iter().find(|p| p.key == BOARD_LIST_KEY).unwrap();
+        assert!(all.collapsible && all.expanded, "the parent has an open disclosure");
+        let kids: Vec<&str> = pins.iter().filter(|p| p.depth > 0).map(|p| p.key.as_str()).collect();
+        assert_eq!(kids, vec![format!("{BOARD_PREFIX}42"), format!("{BOARD_PREFIX}7")]);
+        // Collapsing hides the children; the parent stays selectable.
+        l.boards_collapsed = true;
+        let pins = l.sidebar_model().pinned;
+        let all = pins.iter().find(|p| p.key == BOARD_LIST_KEY).unwrap();
+        assert!(!all.expanded && pins.iter().all(|p| p.depth == 0), "children hidden");
+        // Starring a board while collapsed re-opens the tree so the new star
+        // is not hidden away.
+        l.toggle_pin_board("42"); // unstar
+        l.toggle_pin_board("42"); // re-star
+        let pins = l.sidebar_model().pinned;
+        assert!(pins.iter().any(|p| p.depth > 0), "a fresh star re-expands");
     }
 
     #[test]
@@ -5022,8 +5699,36 @@ mod tests {
         assert_eq!(st["mode"], json!("columns"));
         assert_eq!(st["columns"], json!(true));
         assert_eq!(st["bar"], json!(true));
-        assert_eq!(st["sprintKeys"], json!(-1));
+        // The sprint picker is REAL now: opening queues a
+        // `--board-sprint-keys` fetch (the old `-1` sentinel hid a
+        // cosmetic control); no keys landed yet → empty list + pending.
+        assert_eq!(st["sprintKeys"], json!([]));
+        assert_eq!(st["sprintPending"], json!(true));
+        assert!(l
+            .pending_runs
+            .iter()
+            .any(|r| r.kind == PollRunKind::SprintKeys("42".into(), "current".into())));
         assert_eq!(st["catalog"], json!(["42"]));
+
+        // Keys arrive → the lanes AND the row list narrow to them.
+        let other = l.all.iter().find(|r| r.get("key").map(String::as_str) == Some("DEMO-1")).cloned();
+        assert!(other.is_some(), "fixture row DEMO-1");
+        l.apply_sprint_keys("42", "current", Ok(vec!["DEMO-1".into()]));
+        assert_eq!(l.board_state()["sprintKeys"], json!(["DEMO-1"]));
+        assert!(l
+            .rows
+            .iter()
+            .all(|&i| l.rec(i).and_then(|r| r.get("key").cloned()) == Some("DEMO-1".into())));
+        // A failed fetch says so and shows everything (never a fake filter).
+        l.pick_sprint("all");
+        assert!(l.sprint_filter.is_none());
+        l.pick_sprint("current");
+        l.apply_sprint_keys("42", "current", Err("401 nope".into()));
+        assert!(l.sprint_filter.is_none());
+        assert_eq!(l.sprint_error.as_deref(), Some("401 nope"));
+        assert!(l.board_summary("42", "current").contains("sprint filter failed"));
+        l.pick_sprint("all");
+        assert!(!l.board_summary("42", "all").contains("sprint"));
 
         // columns mode draws the board table (column + key fields).
         let snap = l.snapshot();

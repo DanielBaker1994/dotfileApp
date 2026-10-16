@@ -274,7 +274,10 @@ pub fn detect(v: &SetupValues, hint: &str) -> Result<(String, String), String> {
     read_detect(code, &out, &err, hint)
 }
 
-/// `parseProjectKeys(_:)` through the helper (`jira.project_keys`).
+/// `parseProjectKeys(_:)` through the helper (`jira.project_keys`). A helper
+/// failure used to answer (empty, empty): keys the user had typed simply
+/// vanished. The grammar is tiny — port it as the fallback (same rules as
+/// pylib/jira_setup.py).
 pub fn parse_project_keys(raw: &str) -> (Vec<String>, Vec<String>) {
     let list = |v: &Value, k: &str| -> Vec<String> {
         v.get(k)
@@ -289,8 +292,30 @@ pub fn parse_project_keys(raw: &str) -> (Vec<String>, Vec<String>) {
         std::time::Duration::from_secs(5),
     ) {
         Ok(v) => (list(&v, "keys"), list(&v, "bad")),
-        Err(_) => (Vec::new(), Vec::new()),
+        Err(_) => project_keys_native(raw),
     }
+}
+
+fn project_keys_native(raw: &str) -> (Vec<String>, Vec<String>) {
+    let mut keys: Vec<String> = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
+    let up = raw.to_uppercase();
+    for part in up.split(|c: char| c == ',' || c.is_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
+        let ok = {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+                && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        };
+        if !ok {
+            bad.push(part.to_string());
+        } else if !keys.iter().any(|k| k == part) {
+            keys.push(part.to_string());
+        }
+    }
+    (keys, bad)
 }
 
 /// `JiraPoll.configPath`.

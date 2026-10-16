@@ -1,7 +1,8 @@
 """Jira board: the column/card mapping and the board page template.
 
-The app hosts the page in a WKWebView; colors arrive as hex/rgba strings
-(the theme algebra still lives in Swift for now).
+The app hosts the page in a WKWebView (macOS) or a minihtml pane (egui);
+colors arrive as hex/rgba strings, the Rust twin in views/jira.rs renders the
+same page.
 """
 from __future__ import annotations
 
@@ -100,6 +101,9 @@ def board_columns(params: dict) -> dict:
     words = params.get("words") or {}
     people = params.get("people") or {}
     names = params.get("categoryNames") or list(jira_pages.CATEGORY_NAMES)
+    names = list(names)
+    if len(names) < 3:   # a short list would IndexError on cat == 2 below
+        names += list(jira_pages.CATEGORY_NAMES)[len(names):3]
 
     if spec:
         cols = [{"name": _s(c.get("name")),
