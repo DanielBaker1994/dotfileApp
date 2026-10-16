@@ -137,7 +137,7 @@ mod appkit {
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSControlTextEditingDelegate, NSEvent, NSFont, NSProgressIndicator, NSProgressIndicatorStyle,
+        NSControlTextEditingDelegate, NSEvent, NSProgressIndicator, NSProgressIndicatorStyle,
         NSScrollView, NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions,
         NSView, NSControlSize,
     };
@@ -695,18 +695,14 @@ mod appkit {
             iv.web.setFrame(ns(Rect::new(preview.x, preview.y + 84.0, preview.width, (preview.height - 84.0).max(0.0))));
         }
 
-        fn widths(items: &[&str], f: &NSFont, pad: f64) -> Vec<f64> {
-            items.iter().map(|t| style::text_size(t, f).0.ceil() + pad).collect()
-        }
-
         fn seg_width(&self) -> f64 {
             let f = style::system_font(12.0, Weight::Medium);
-            Self::widths(&MODES, &f, 22.0).iter().sum::<f64>() + 6.0 + 2.0 * 2.0
+            style::capsule_metrics(&MODES, &f).1
         }
 
         fn top_row_right_start(&self, strip: Rect) -> f64 {
             let f = style::system_font(12.0, Weight::Medium);
-            let toggle = style::text_size("Title only", &f).0.ceil() + 22.0;
+            let toggle = style::capsule_metrics(&["Title only"], &f).0[0];
             let search = style::text_size("Search", &style::system_font(12.0, Weight::Semibold)).0.ceil() + 30.0;
             strip.max_x() - 12.0 - search - 8.0 - toggle - 8.0 - self.seg_width()
         }
@@ -722,15 +718,17 @@ mod appkit {
             let sw = style::text_size("Search", &style::system_font(12.0, Weight::Semibold)).0.ceil() + 30.0;
             x -= sw;
             out.push((C_SEARCH, Rect::new(x, 10.0, sw, STRIP_ROW_H)));
-            let tw = style::text_size("Title only", &f).0.ceil() + 22.0;
+            let tw = style::capsule_metrics(&["Title only"], &f).0[0];
             x -= 8.0 + tw;
             out.push((C_TITLE, Rect::new(x, 10.0, tw, STRIP_ROW_H)));
             let seg = self.seg_width();
             x -= 8.0 + seg;
-            let mut sx = x + 3.0;
-            for (i, w) in Self::widths(&MODES, &f, 22.0).iter().enumerate() {
-                out.push((C_MODE + i as i32, Rect::new(sx, 10.0 - 1.0, *w, STRIP_ROW_H + 2.0)));
-                sx += w + 2.0;
+            let geo = style::CAPSULE_GEO;
+            let (ws, _) = style::capsule_metrics(&MODES, &f);
+            let mut sx = x + geo.track_pad;
+            for (i, w) in ws.iter().enumerate() {
+                out.push((C_MODE + i as i32, Rect::new(sx, 10.0, *w, STRIP_ROW_H)));
+                sx += w + geo.gutter;
             }
             // Bottom row chips.
             let y2 = 10.0 + STRIP_ROW_H + 8.0;
@@ -809,11 +807,20 @@ mod appkit {
             style::fill_rect(preview, c.mantle().with_alpha(0.15));
             style::fill_rect(Rect::new(table.max_x(), STRIP_H, 6.0, preview.height), c.mantle().with_alpha(0.2));
             let f = style::system_font(12.0, Weight::Medium);
+            let geo = style::CAPSULE_GEO;
             // Mode segments (ConfSegmented).
             if let (Some(a), Some(b)) = (rect_of(C_MODE), rect_of(C_MODE + 2)) {
-                style::capsule_track(Rect::new(a.x - 3.0, a.y - 3.0 + 1.0, b.max_x() - a.x + 6.0, a.height + 4.0), &c);
+                style::capsule_track(
+                    Rect::new(
+                        a.x - geo.track_pad,
+                        a.y - geo.track_pad,
+                        b.max_x() - a.x + 2.0 * geo.track_pad,
+                        a.height + 2.0 * geo.track_pad,
+                    ),
+                    &c,
+                );
                 for i in 0..3 {
-                    let r = rect_of(C_MODE + i as i32).unwrap().inset_by(0.0, 2.0);
+                    let r = rect_of(C_MODE + i as i32).unwrap();
                     let on = snap.mode == i;
                     let hov = hover == Some(C_MODE + i as i32);
                     style::capsule_chip(r, &c, on, hov);
@@ -825,7 +832,7 @@ mod appkit {
             if let Some(r) = rect_of(C_TITLE) {
                 style::capsule_track(r.inset_by(0.5, 0.5), &c);
                 if snap.title_only {
-                    style::capsule_chip(r.inset_by(3.0, 3.0), &c, true, false);
+                    style::capsule_chip(r.inset_by(geo.track_pad, geo.track_pad), &c, true, false);
                 }
                 style::draw_text_centered("Title only", r, &f, if snap.title_only { c.text } else { c.dim });
             }

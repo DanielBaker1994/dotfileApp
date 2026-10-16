@@ -446,13 +446,13 @@ mod appkit {
             let cw = style::text_size(&snap.copy_title, &style::system_font(12.0, Weight::Semibold)).0.ceil() + 26.0;
             let mut x = rbox.max_x() - 8.0 - cw;
             out.push((C_COPY, Rect::new(x, rbox.y + (HEAD_H - 24.0) / 2.0, cw, 24.0)));
-            let widths: Vec<f64> = snap.modes.iter().map(|m| style::text_size(m, &bf).0.ceil() + 22.0).collect();
-            let total = widths.iter().sum::<f64>() + 6.0 + (widths.len().saturating_sub(1)) as f64 * 2.0;
+            let geo = style::CAPSULE_GEO;
+            let (widths, total) = style::capsule_metrics(&snap.modes, &bf);
             x -= 6.0 + total;
-            let mut sx = x + 3.0;
+            let mut sx = x + geo.track_pad;
             for (i, w) in widths.iter().enumerate() {
-                out.push((C_MODE + i as i32, Rect::new(sx, rbox.y + (HEAD_H - 26.0) / 2.0 + 3.0, *w, 20.0)));
-                sx += w + 2.0;
+                out.push((C_MODE + i as i32, Rect::new(sx, rbox.y + (HEAD_H - 26.0) / 2.0 + geo.track_pad, *w, 20.0)));
+                sx += w + geo.gutter;
             }
             let title = if snap.running { "Stop  ⌘." } else { "Run  ⌃↩" };
             let rw = style::text_size(title, &style::system_font(13.0, Weight::Semibold)).0.ceil() + 40.0;
@@ -530,8 +530,17 @@ mod appkit {
             }
             // Mode segments + copy.
             let bf = style::system_font(12.0, Weight::Medium);
+            let geo = style::CAPSULE_GEO;
             if let (Some(a), Some(b)) = (rect_of(C_MODE), rect_of(C_MODE + snap.modes.len() as i32 - 1)) {
-                style::capsule_track(Rect::new(a.x - 3.0, a.y - 3.0, b.max_x() - a.x + 6.0, a.height + 6.0), &c);
+                style::capsule_track(
+                    Rect::new(
+                        a.x - geo.track_pad,
+                        a.y - geo.track_pad,
+                        b.max_x() - a.x + 2.0 * geo.track_pad,
+                        a.height + 2.0 * geo.track_pad,
+                    ),
+                    &c,
+                );
                 for (i, m) in snap.modes.iter().enumerate() {
                     let r = rect_of(C_MODE + i as i32).unwrap();
                     let on = snap.mode == i;

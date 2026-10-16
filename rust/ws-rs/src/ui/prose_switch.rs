@@ -190,7 +190,12 @@ mod appkit {
 
         fn seg_widths(&self) -> Vec<f64> {
             let f = style::system_font(11.5, Weight::Medium);
-            self.labels().iter().map(|(_, t)| style::text_size(t, &f).0 + 38.0).collect()
+            // Canonical text chip (CAPSULE_GEO chip pad 22) + a 16 pt symbol
+            // allowance: the icon sits at x + 8 (14 pt wide) and the label at
+            // x + 26, so the segment is text + 38 = metrics width + 16.
+            let labels: Vec<String> = self.labels().iter().map(|(_, t)| t.clone()).collect();
+            let (ws, _) = style::capsule_metrics(&labels, &f);
+            ws.iter().map(|w| w + 16.0).collect()
         }
 
         fn seg(&self, i: usize) -> Rect {

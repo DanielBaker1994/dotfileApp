@@ -12,6 +12,7 @@ pub mod list_panel;
 pub mod menu_kit;
 pub mod multi_picker;
 pub mod pane_divider;
+pub mod pill_selector;
 #[cfg(target_os = "macos")]
 pub mod panel_frame;
 pub mod popup;

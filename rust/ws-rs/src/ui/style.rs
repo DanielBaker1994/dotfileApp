@@ -285,6 +285,41 @@ mod appkit {
         fill_rounded(bar, 1.0, button_accent(c));
     }
 
+    /// The canonical segmented-capsule geometry every mutually exclusive
+    /// button group shares (`capsule_track` + `capsule_chip`; see
+    /// `pill_selector::TabPillView`): chip width = text + `chip_pad`, chips
+    /// separated by `gutter`, the track wrapping the chip row by `track_pad`
+    /// on all sides. The numbers are the original Confluence strip ones —
+    /// they live here so no surface can drift (chip pad 22, gutter 2, track
+    /// pad 3).
+    #[derive(Clone, Copy, Debug)]
+    pub struct CapsuleGeometry {
+        pub chip_pad: f64,
+        pub gutter: f64,
+        pub track_pad: f64,
+    }
+
+    /// The shared constants: chip pad 22 pt, gutters 2 pt, track padding 3 pt.
+    pub const CAPSULE_GEO: CapsuleGeometry =
+        CapsuleGeometry { chip_pad: 22.0, gutter: 2.0, track_pad: 3.0 };
+
+    /// Shared segmented-capsule metrics: the intrinsic chip widths for
+    /// `labels` at font `f` (text + [`CAPSULE_GEO`].chip_pad) and the snug
+    /// track width (chips + gutters + track padding). Every inline strip
+    /// drawer (Confluence, AI, Compare) and `TabPillView` sizes itself from
+    /// this so the geometry cannot drift per file.
+    pub fn capsule_metrics(labels: &[impl AsRef<str>], f: &NSFont) -> (Vec<f64>, f64) {
+        let geo = CAPSULE_GEO;
+        let widths: Vec<f64> = labels
+            .iter()
+            .map(|t| text_size(t.as_ref(), f).0.ceil() + geo.chip_pad)
+            .collect();
+        let total = widths.iter().sum::<f64>()
+            + 2.0 * geo.track_pad
+            + widths.len().saturating_sub(1) as f64 * geo.gutter;
+        (widths, total)
+    }
+
     /// `CapsuleStyle.track`.
     pub fn capsule_track(r: Rect, c: &PopupColors) {
         fill_rounded(r, r.height / 2.0, track_fill(c));

@@ -554,20 +554,24 @@ mod appkit {
                 }
                 // The capsule (CapsuleButtons): Compare ⏎ (primary) | New Text Compare.
                 let f = style::system_font(12.5, Weight::Semibold);
+                let geo = style::CAPSULE_GEO;
+                // Icon + label commands: the +48 is the symbol allowance on
+                // top of the canonical text chip; gutters/track padding stay
+                // the shared CAPSULE_GEO numbers.
                 let w1 = style::text_size("Compare  ⏎", &f).0.ceil() + 48.0;
                 let w2 = style::text_size("New Text Compare", &f).0.ceil() + 48.0;
-                let total = 8.0 + w1 + w2 + 2.0;
+                let total = 2.0 * geo.track_pad + w1 + w2 + geo.gutter;
                 let cx = x + (w - total) / 2.0 + lw / 2.0;
-                out.push((C_COMPARE, Rect::new(cx + 4.0, y - 2.0 + 4.0, w1, 26.0)));
-                out.push((C_NEWTEXT, Rect::new(cx + 4.0 + w1 + 2.0, y - 2.0 + 4.0, w2, 26.0)));
+                out.push((C_COMPARE, Rect::new(cx + geo.track_pad, y + geo.track_pad, w1, 26.0)));
+                out.push((C_NEWTEXT, Rect::new(cx + geo.track_pad + w1 + geo.gutter, y + geo.track_pad, w2, 26.0)));
                 let (head, list) = self.recent_regions();
                 let missing = snap.recent.iter().filter(|r| r.missing()).count();
-                let mut ax = x + 66.0 + 4.0;
+                let mut ax = x + 66.0 + geo.track_pad;
                 if missing > 0 {
                     let t = format!("Clear Missing ({missing})");
                     let mw = style::text_size(&t, &f).0.ceil() + 48.0;
-                    out.push((C_CLEAR_MISSING, Rect::new(ax, head - 4.0 + 4.0, mw, 22.0)));
-                    ax += mw + 2.0;
+                    out.push((C_CLEAR_MISSING, Rect::new(ax, head, mw, 22.0)));
+                    ax += mw + geo.gutter;
                 }
                 if !snap.recent.is_empty() {
                     let cw = style::text_size("Clear All", &f).0.ceil() + 48.0;
@@ -584,11 +588,12 @@ mod appkit {
                 }
             } else {
                 let f = style::system_font(12.0, Weight::Medium);
-                let mut sx = left + 12.0 + 3.0;
-                for (i, t) in FILTERS.iter().enumerate() {
-                    let w = style::text_size(t, &f).0.ceil() + 22.0;
-                    out.push((C_FILTER + i as i32, Rect::new(sx, (TOOLBAR_H - 26.0) / 2.0 + 3.0, w, 20.0)));
-                    sx += w + 2.0;
+                let geo = style::CAPSULE_GEO;
+                let (ws, _) = style::capsule_metrics(&FILTERS, &f);
+                let mut sx = left + 12.0 + geo.track_pad;
+                for (i, w) in ws.iter().enumerate() {
+                    out.push((C_FILTER + i as i32, Rect::new(sx, (TOOLBAR_H - 26.0) / 2.0 + geo.track_pad, *w, 20.0)));
+                    sx += w + geo.gutter;
                 }
                 let mut bx = b.size.width - 10.0;
                 for i in (0..TOOLS.len()).rev() {
@@ -626,7 +631,13 @@ mod appkit {
                     y += FIELD_H + 12.0;
                 }
                 if let (Some(a), Some(bb)) = (rect_of(C_COMPARE), rect_of(C_NEWTEXT)) {
-                    let track = Rect::new(a.x - 4.0, a.y - 4.0, bb.max_x() - a.x + 8.0, a.height + 8.0);
+                    let geo = style::CAPSULE_GEO;
+                    let track = Rect::new(
+                        a.x - geo.track_pad,
+                        a.y - geo.track_pad,
+                        bb.max_x() - a.x + 2.0 * geo.track_pad,
+                        a.height + 2.0 * geo.track_pad,
+                    );
                     style::capsule_track(track, &c);
                     style::capsule_primary(a, &c, hover == Some(C_COMPARE), pressed == Some(C_COMPARE));
                     style::capsule_chip(bb, &c, false, hover == Some(C_NEWTEXT) || pressed == Some(C_NEWTEXT));
@@ -652,7 +663,16 @@ mod appkit {
                 .filter(|(id, _, _)| rect_of(*id).is_some())
                 .collect();
                 if let (Some(first), Some(last)) = (actions.first().and_then(|a| rect_of(a.0)), actions.last().and_then(|a| rect_of(a.0))) {
-                    style::capsule_track(Rect::new(first.x - 4.0, first.y - 4.0, last.max_x() - first.x + 8.0, first.height + 8.0), &c);
+                    let geo = style::CAPSULE_GEO;
+                    style::capsule_track(
+                        Rect::new(
+                            first.x - geo.track_pad,
+                            first.y - geo.track_pad,
+                            last.max_x() - first.x + 2.0 * geo.track_pad,
+                            first.height + 2.0 * geo.track_pad,
+                        ),
+                        &c,
+                    );
                     for (id, sym, t) in &actions {
                         let r = rect_of(*id).unwrap();
                         style::capsule_chip(r, &c, false, hover == Some(*id));
@@ -737,7 +757,16 @@ mod appkit {
             style::fill_rect(Rect::new(left, 0.0, b.size.width - left, TOOLBAR_H), c.mantle());
             let f = style::system_font(12.0, Weight::Medium);
             if let (Some(a), Some(z)) = (rect_of(C_FILTER), rect_of(C_FILTER + 3)) {
-                style::capsule_track(Rect::new(a.x - 3.0, a.y - 3.0, z.max_x() - a.x + 6.0, a.height + 6.0), &c);
+                let geo = style::CAPSULE_GEO;
+                style::capsule_track(
+                    Rect::new(
+                        a.x - geo.track_pad,
+                        a.y - geo.track_pad,
+                        z.max_x() - a.x + 2.0 * geo.track_pad,
+                        a.height + 2.0 * geo.track_pad,
+                    ),
+                    &c,
+                );
                 for i in 0..4 {
                     let r = rect_of(C_FILTER + i).unwrap();
                     let on = snap.filter == i as usize;

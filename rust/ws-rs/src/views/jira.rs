@@ -3290,14 +3290,15 @@ pub fn build_content(
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ui::pill_selector::{TabPillView, HEIGHT as PILL_HEIGHT};
     use crate::ui::theme::PopupThemeDefaults;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSButton, NSButtonType, NSFont, NSScrollView, NSTextField, NSView,
+        NSAutoresizingMaskOptions, NSFont, NSScrollView, NSTextField, NSView,
     };
-    use objc2_foundation::{NSInteger, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
 
     fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
@@ -3360,7 +3361,7 @@ mod macos {
         pub detail_view: Retained<NSView>,
         pub colors: PopupColors,
         pub tabs: RefCell<Vec<JiraTabInfo>>,
-        pub buttons: RefCell<Vec<Retained<NSButton>>>,
+        pub pill: RefCell<Option<Retained<TabPillView>>>,
         pub active: Cell<JiraSection>,
         pub search: Vec<JiraRowLine>,
         pub board: Vec<JiraRowLine>,
@@ -3374,30 +3375,6 @@ mod macos {
         #[name = "WSJiraHandler"]
         #[ivars = JiraHandlerIvars]
         pub struct JiraHandler;
-
-        impl JiraHandler {
-            #[unsafe(method(selectSection:))]
-            fn select_section(&self, sender: Option<&AnyObject>) {
-                let tag: NSInteger = sender
-                    .map(|s| unsafe { msg_send![as_any(s), tag] })
-                    .unwrap_or(0);
-                let Some(section) = JiraSection::from_tag(tag as i64) else {
-                    return;
-                };
-                let enabled = self
-                    .ivars()
-                    .tabs
-                    .borrow()
-                    .iter()
-                    .any(|t| t.section == section && t.enabled);
-                if !enabled {
-                    return;
-                }
-                self.ivars().active.set(section);
-                self.sync_tabs();
-                self.rebuild();
-            }
-        }
 
         unsafe impl NSObjectProtocol for JiraHandler {}
     );
@@ -3417,7 +3394,7 @@ mod macos {
                 detail_view,
                 colors: PopupThemeDefaults::colors(),
                 tabs: RefCell::new(model.tabs),
-                buttons: RefCell::new(Vec::new()),
+                pill: RefCell::new(None),
                 active: Cell::new(active),
                 search: model.search,
                 board: model.board,
@@ -3427,29 +3404,32 @@ mod macos {
             unsafe { msg_send![super(this), init] }
         }
 
-        pub fn set_buttons(&self, buttons: Vec<Retained<NSButton>>) {
-            *self.ivars().buttons.borrow_mut() = buttons;
-            self.sync_tabs();
+        /// Attach the header pill (`TabPillView`): the pill keeps exclusive
+        /// state in the capsule vocabulary (selected chip), not NSButton
+        /// caption tinting. `build_tree` wires the pick sink back here.
+        pub fn set_pill(&self, pill: Retained<TabPillView>) {
+            let idx = {
+                let tabs = self.ivars().tabs.borrow();
+                tabs.iter()
+                    .position(|t| t.section == self.ivars().active.get())
+                    .unwrap_or(0)
+            };
+            pill.set_selected(idx);
+            *self.ivars().pill.borrow_mut() = Some(pill);
         }
 
-        /// Tint the tab captions for the active section.
-        pub fn sync_tabs(&self) {
-            let active = self.ivars().active.get();
-            let colors = self.ivars().colors;
-            let buttons = self.ivars().buttons.borrow();
-            for (i, button) in buttons.iter().enumerate() {
-                let section = match i {
-                    0 => JiraSection::Search,
-                    1 => JiraSection::Board,
-                    _ => JiraSection::Ticket,
-                };
-                let color = if section == active {
-                    colors.accent_on()
-                } else {
-                    colors.dim
-                };
-                button.setContentTintColor(Some(&color.to_nscolor()));
+        /// A pick on the pill: switch sections when that tab is enabled.
+        pub fn pick_tab(&self, idx: usize) {
+            let enabled = {
+                let tabs = self.ivars().tabs.borrow();
+                tabs.get(idx).filter(|t| t.enabled).map(|t| t.section)
+            };
+            let Some(section) = enabled else { return };
+            self.ivars().active.set(section);
+            if let Some(pill) = self.ivars().pill.borrow().as_ref() {
+                pill.set_selected(idx);
             }
+            self.rebuild();
         }
 
         fn lines(&self, section: JiraSection) -> Vec<JiraRowLine> {
@@ -3625,34 +3605,24 @@ mod macos {
             detail_view.into_super(),
         );
 
-        // Header tabs, now that the handler exists to serve as their target.
-        let mut buttons: Vec<Retained<NSButton>> = Vec::new();
-        let mut x = 72.0;
-        for tab in &tabs {
-            let button = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(&tab_label(tab)),
-                    Some(as_any(&*handler)),
-                    Some(objc2::sel!(selectSection:)),
-                    mtm,
-                )
-            };
-            button.setTag(tab.section.tag() as NSInteger);
-            button.setButtonType(NSButtonType::MomentaryPushIn);
-            button.setBordered(false);
-            button.setFont(Some(&NSFont::systemFontOfSize(12.5)));
-            button.setEnabled(tab.enabled);
-            button.sizeToFit();
-            let w = button.frame().size.width.max(1.0);
-            button.setFrame(NSRect::new(
-                NSPoint::new(x, (JIRA_HEADER_HEIGHT - 20.0) / 2.0),
-                NSSize::new(w, 20.0),
-            ));
-            header.addSubview(&button);
-            x += w + 10.0;
-            buttons.push(button);
-        }
-        handler.set_buttons(buttons);
+        // Header tabs as the canonical capsule pill (exclusive state on theme
+        // tokens; a pick routes through the handler).
+        let labels: Vec<String> = tabs.iter().map(tab_label).collect();
+        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let pill = TabPillView::new(mtm, colors, &label_refs);
+        let weak = objc2::rc::Weak::from_retained(&handler);
+        pill.set_on_pick(Box::new(move |i| {
+            if let Some(h) = weak.load() {
+                h.pick_tab(i);
+            }
+        }));
+        handler.set_pill(pill.clone());
+        let pw = pill.desired_width().max(80.0);
+        pill.setFrame(NSRect::new(
+            NSPoint::new(72.0, (JIRA_HEADER_HEIGHT - PILL_HEIGHT) / 2.0),
+            NSSize::new(pw, PILL_HEIGHT),
+        ));
+        header.addSubview(&pill);
 
         LIVE_HANDLERS.with(|v| v.borrow_mut().push(handler.clone()));
         handler.rebuild();
