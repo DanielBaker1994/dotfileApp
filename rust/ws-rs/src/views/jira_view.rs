@@ -1249,16 +1249,12 @@ impl JiraList {
         self.request_sprint(board, sprint);
     }
 
-    /// Route a `--board-sprint-keys` answer back to the model.
+    /// Route a `--board-sprint-keys` answer back to the model. A stale answer
+    /// (the user re-picked meanwhile) must not touch the view, but its keys
+    /// are still facts — memoize first, or a board re-show between pick and
+    /// answer (which resets `sprint_pending`) would throw the fetch away AND
+    /// force every later pick to refetch.
     pub fn apply_sprint_keys(&mut self, board: &str, sprint: &str, res: Result<Vec<String>, String>) {
-        let current = self
-            .sprint_pending
-            .as_ref()
-            .is_some_and(|(b, s)| b.as_str() == board && s.as_str() == sprint);
-        if !current {
-            return; // stale answer (the user re-picked meanwhile)
-        }
-        self.sprint_pending = None;
         if let Ok(keys) = &res {
             // Mechanism 3: remember the set so a re-show re-applies it
             // instead of refetching. Bounded crudely — a session browses a
@@ -1270,6 +1266,14 @@ impl JiraList {
             self.sprint_keys_memo
                 .insert((board.to_string(), sprint.to_string()), keys.iter().cloned().collect());
         }
+        let current = self
+            .sprint_pending
+            .as_ref()
+            .is_some_and(|(b, s)| b.as_str() == board && s.as_str() == sprint);
+        if !current {
+            return; // stale answer (the user re-picked meanwhile)
+        }
+        self.sprint_pending = None;
         let on_this = self.on_board().as_deref() == Some(board)
             && self.board_sprint.get(board).map(String::as_str) == Some(sprint);
         match res {
@@ -4485,7 +4489,7 @@ mod appkit {
                 .setFrame(NSRect::new(NSPoint::new(x, (h - th) / 2.0), NSSize::new(title_w, th)));
             x += title_w + 10.0;
             if !iv.sprint.isHidden() {
-                let pw = 150.0_f64.min((w * 0.22).max(90.0));
+                let pw = 200.0_f64.min((w * 0.29).max(120.0));
                 iv.sprint.setFrame(ns(Rect::new(x, (h - 22.0) / 2.0, pw, 22.0)));
                 x += pw + 10.0;
             }
@@ -5770,6 +5774,24 @@ mod tests {
         l.request_sprint("42", "7");
         assert!(l.sprint_filter.is_some(), "the memo filters immediately — no unfiltered window");
         assert_eq!(l.rows.len(), 1, "rows narrow without waiting for the answer");
+
+        // A STALE answer (its `sprint_pending` was reset by a re-show before
+        // it landed) must not touch the view — but it is still a fact, so it
+        // lands in the memo and the next pick applies it synchronously
+        // instead of refetching (the old code dropped it on the floor).
+        l.sprint_filter = None;
+        l.sprint_pending = None; // what `show_pin_file` leaves behind
+        let runs_before = l.pending_runs.len();
+        l.apply_sprint_keys("42", "7", Ok(vec!["DEMO-1".into(), "DEMO-2".into()]));
+        assert!(l.sprint_filter.is_none(), "a stale answer must not re-filter the view");
+        assert_eq!(l.pending_runs.len(), runs_before, "a stale answer must not queue a refetch");
+        l.request_sprint("42", "7");
+        assert!(
+            l.sprint_filter
+                .as_ref()
+                .is_some_and(|(_, _, keys)| keys.len() == 2),
+            "the stale answer was memoized — the next pick applies it synchronously"
+        );
 
         // list-star unpins the board; pin re-adds it.
         assert!(l.toggle_pin_board("42"));

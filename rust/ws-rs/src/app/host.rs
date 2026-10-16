@@ -3564,7 +3564,18 @@ mod daemon_ui {
         std::thread::spawn(|| loop {
             let next = JIRA_WRITE_Q.lock().unwrap().pop_front();
             match next {
-                Some(w) => run_one_jira_write(w),
+                // `settled`: nothing else queued behind this one, so ITS
+                // callback may let `reload_meta` re-read the pin lists off
+                // disk again. A re-point runs `--pin-view add` then
+                // `--pin-view remove`; clearing after the FIRST of those
+                // re-imported the not-yet-repointed disk list and brought the
+                // stale board|sprint spec back into `pinned_views` (and its
+                // row back into the sidebar) — one click on that row reset the
+                // sprint the user had just picked (DEBUG-jira-sprint-switch-revert.md).
+                Some(w) => {
+                    let settled = JIRA_WRITE_Q.lock().unwrap().is_empty();
+                    run_one_jira_write(w, settled)
+                }
                 None => {
                     JIRA_WRITE_WORKING.store(false, std::sync::atomic::Ordering::SeqCst);
                     if JIRA_WRITE_Q.lock().unwrap().is_empty() {
@@ -3580,7 +3591,7 @@ mod daemon_ui {
         });
     }
 
-    fn run_one_jira_write(w: crate::views::jira_view::PollWrite) {
+    fn run_one_jira_write(w: crate::views::jira_view::PollWrite, settled: bool) {
         let res = (|| -> Result<(), String> {
             let python = crate::views::jira::find_python3().ok_or("python 3.11+ not found")?;
             let script = crate::views::jira::jira_script();
@@ -3623,8 +3634,22 @@ mod daemon_ui {
                     crate::ui::toast::show(&format!("{}: {e}", w.err_prefix), "exclamationmark.triangle");
                 }
             }
+            // Re-reading disk is only safe once the whole pin queue has
+            // landed AND every write in it succeeded. Clearing `pins_dirty`
+            // after the first of a re-point's two writes let `reload_meta`
+            // restore the stale `board|current|mode` spec into
+            // `pinned_views` (its row back into the sidebar), and one click
+            // on that row then reset the sprint the user had just picked.
+            // On failure the in-memory pins stay authoritative for the
+            // session, as the toast already says the star was not saved —
+            // and only a PIN write may clear the flag: an unrelated settled
+            // success (favorites, columns) must not pull a stale on-disk pin
+            // list over a failed pin write's optimistic edit.
+            let touches_pins = w.args.first().is_some_and(|a| a.starts_with("--pin"));
             ui.jira_surface(|l| {
-                l.pins_dirty = false;
+                if settled && res.is_ok() && touches_pins {
+                    l.pins_dirty = false;
+                }
                 l.reload_meta();
                 l.refilter();
             });
