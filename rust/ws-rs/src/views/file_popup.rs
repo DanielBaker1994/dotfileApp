@@ -10,8 +10,9 @@
 //! The panel mirrors Swift `FilePopupPanel` / `FilePopupGrip` /
 //! `FilePopupRing`: borderless, non-activating but key-capable, floating,
 //! joins the active space, resizable from 8 edge/corner grips, `Cmd`+`±`/`0`
-//! zoom, `Cmd+C`/`Cmd+A` on text, Esc (or losing key) closes it. One popup at
-//! a time — a new one replaces the old.
+//! zoom, `Cmd+C`/`Cmd+A` on text, Esc (or losing key) closes it, and a
+//! right-click pops the shared rule-2 file menu (`file_context_menu`) for the
+//! file on show. One popup at a time — a new one replaces the old.
 
 use std::path::Path;
 
@@ -178,9 +179,9 @@ mod appkit {
                     open_in_workspace(path);
                     return;
                 };
-                show_image(img, over);
+                show_image(img, over, path);
             }
-            FilePopupRoute::Text(text) => show_text(&text, over),
+            FilePopupRoute::Text(text) => show_text(&text, over, path),
             FilePopupRoute::System => open_in_workspace(path),
         }
     }
@@ -235,7 +236,7 @@ mod appkit {
     }
 
     /// `FilePopup.show(image:label:over:)`.
-    fn show_image(img: Retained<NSImage>, over: Option<&NSWindow>) {
+    fn show_image(img: Retained<NSImage>, over: Option<&NSWindow>, path: &str) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let is = img.size();
         let room = room_for(over);
@@ -260,11 +261,11 @@ mod appkit {
             size,
         );
         let scroll = zoom_scroll(mtm, &iv, NSRect::new(NSPoint::new(0.0, 0.0), size));
-        present(mtm, scroll, frame, over, None);
+        present(mtm, scroll, frame, over, None, path);
     }
 
     /// `FilePopup.showText(_:path:over:)`.
-    fn show_text(text: &str, over: Option<&NSWindow>) {
+    fn show_text(text: &str, over: Option<&NSWindow>, path: &str) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let colors = crate::ui::theme::section_colors("notes");
         let room = room_for(over);
@@ -306,7 +307,7 @@ mod appkit {
         let scroll = zoom_scroll(mtm, &tv, NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
         scroll.setDrawsBackground(true);
         scroll.setBackgroundColor(&colors.background.with_alpha(1.0).to_nscolor());
-        present(mtm, scroll, frame, over, Some(tv));
+        present(mtm, scroll, frame, over, Some(tv), path);
     }
 
     /// `FilePopup.present` — the panel + ring + grips around `scroll`.
@@ -316,6 +317,7 @@ mod appkit {
         frame: NSRect,
         parent: Option<&NSWindow>,
         text: Option<Retained<NSTextView>>,
+        path: &str,
     ) {
         close();
         let panel = FilePopupPanel::create(mtm, frame);
@@ -351,6 +353,7 @@ mod appkit {
         panel.setContentView(Some(&box_view));
         *panel.ivars().zoom.borrow_mut() = Some(scroll);
         *panel.ivars().text.borrow_mut() = text.clone();
+        *panel.ivars().path.borrow_mut() = Some(path.to_string());
 
         // `p.onEscape`: close, then give the parent the keyboard back.
         let parent_ret: Option<Retained<NSWindow>> = parent.map(|p| p.retain());
@@ -380,6 +383,8 @@ mod appkit {
         on_escape: RefCell<Option<Rc<dyn Fn()>>>,
         zoom: RefCell<Option<Retained<NSScrollView>>>,
         text: RefCell<Option<Retained<NSTextView>>>,
+        /// The file on show — the right-click menu's subject.
+        path: RefCell<Option<String>>,
     }
 
     define_class!(
@@ -393,6 +398,14 @@ mod appkit {
         impl FilePopupPanel {
             #[unsafe(method(canBecomeKeyWindow))]
             fn can_become_key(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool {
+                // The preview sits over the user's app without activating it;
+                // the first right-click must still open the file menu (the
+                // grips take first mouse the same way).
                 true
             }
 
@@ -458,9 +471,26 @@ mod appkit {
             }
 
             /// `FilePopupPanel.sendEvent`: grips resize, the top strip (or any
-            /// spot without a text view) drags the window.
+            /// spot without a text view) drags the window, a right-click pops
+            /// the shared file menu.
             #[unsafe(method(sendEvent:))]
             fn send_event(&self, event: &NSEvent) {
+                if event.r#type() == NSEventType::RightMouseDown {
+                    // Right-click anywhere on the preview opens the rule-2
+                    // file menu for the file on show — the same
+                    // `file_context_menu` core the Files browser rows and
+                    // the "Find Recent Files" shelf build. The panel is
+                    // non-activating (like the grip's `acceptsFirstMouse:`,
+                    // the menu must not activate the app either), and
+                    // `popup_context` shows it over this window at floating
+                    // level (the screenshot recents grid's pattern).
+                    if self.ivars().path.borrow().is_some() {
+                        if let Some(cv) = self.contentView() {
+                            self.show_file_menu(&cv);
+                            return;
+                        }
+                    }
+                }
                 if event.r#type() == NSEventType::LeftMouseDown {
                     if let Some(box_view) = self.contentView() {
                         let p = event.locationInWindow();
@@ -526,6 +556,7 @@ mod appkit {
                 on_escape: RefCell::new(None),
                 zoom: RefCell::new(None),
                 text: RefCell::new(None),
+                path: RefCell::new(None),
             });
             let panel: Retained<Self> = unsafe {
                 msg_send![
@@ -562,6 +593,70 @@ mod appkit {
                     cb();
                 });
             }
+        }
+
+        /// The shared rule-2 menu for the file on show, popped over `cv`
+        /// at the pointer. Actions run through the daemon's popup backends
+        /// ([`crate::app::host::popup_file_menu_actions`]) and the preview
+        /// follows the file: rename re-targets the shown path, trash closes
+        /// the popup — no ghost preview of a gone file, and the recents rows
+        /// are re-pulled by the backends themselves.
+        fn show_file_menu(&self, cv: &NSView) {
+            let Some(path) = self.ivars().path.borrow().clone() else { return };
+            let sheet: Retained<NSWindow> =
+                Retained::into_super(Retained::into_super(self.retain()));
+            let mut actions = crate::app::host::popup_file_menu_actions(&path, Some(sheet));
+            // Rename… is preview-local: the same `form_sheet` prompt the
+            // Files rename flow falls back to (there is no inline row editor
+            // here) and the same `rename_into` commit — `record_rename` lands
+            // on the UndoStack and the toast/refresh run in the daemon —
+            // plus the re-target: the next menu acts on the renamed file.
+            actions.rename = Some(Box::new({
+                let me = self.retain();
+                let p = path.clone();
+                move || {
+                    let name = std::path::Path::new(&p)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if name.is_empty() {
+                        return;
+                    }
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    // Two handles: the panel hosts the sheet, a clone is
+                    // captured by the completion to re-target the path.
+                    let host: &NSWindow = &me;
+                    let editor = me.clone();
+                    crate::ui::sheet::form_sheet(
+                        host,
+                        "Rename",
+                        &crate::views::notes::tilde_path(&p, &home),
+                        vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
+                        "Rename",
+                        move |answer| {
+                            let Some(text) = answer.and_then(|v| v.into_iter().next()) else { return };
+                            if let Ok(Some(dst)) = crate::app::host::popup_rename_commit(&p, &text) {
+                                *editor.ivars().path.borrow_mut() = Some(dst);
+                            }
+                        },
+                    );
+                }
+            }));
+            // A trashed file gets no ghost preview: close after the backend
+            // op. Deferred — closing inside this panel's own event frame
+            // would release the panel mid-send (`windowDidResignKey`'s
+            // pattern).
+            if let Some(f) = actions.trash.take() {
+                actions.trash = Some(Box::new(move || {
+                    f();
+                    crate::platform::run_on_main(close);
+                }));
+            }
+            let entries = crate::views::files::file_context_menu(&path, actions);
+            if entries.is_empty() {
+                return; // daemon UI not up: nothing wired.
+            }
+            crate::ui::menu_kit::popup_context(entries, cv);
         }
     }
 

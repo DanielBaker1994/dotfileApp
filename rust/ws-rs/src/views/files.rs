@@ -785,6 +785,79 @@ pub fn transfer_paths(paths: &[String], into: &str, move_: bool, undo: &UndoStac
     FileOps::transfer(paths, into, move_, undo)
 }
 
+// ---------------------------------------------------------- shared context menu
+
+/// One row action of [`file_context_menu`]. Surfaces wire these to their own
+/// backends — an inline editor, a prompt sheet, the Files browser's ops — so
+/// a surface without a `DaemonUi` (a standalone popup) passes its own.
+pub type FileMenuAction = Box<dyn FnOnce()>;
+
+/// The injectable actions behind [`file_context_menu`]; `None` drops that
+/// row (a surface without the backend stays quiet, and the empty blocks —
+/// with their separators — collapse).
+#[derive(Default)]
+pub struct FileMenuActions {
+    pub open: Option<FileMenuAction>,
+    pub reveal: Option<FileMenuAction>,
+    pub rename: Option<FileMenuAction>,
+    pub compress: Option<FileMenuAction>,
+    pub trash: Option<FileMenuAction>,
+    pub copy_file: Option<FileMenuAction>,
+    pub copy_path: Option<FileMenuAction>,
+    pub open_in_notes: Option<FileMenuAction>,
+}
+
+/// THE rule-2 file context menu — one builder for the Files browser row menu,
+/// the terminal's selected-path menu and the "Find Recent Files" popup, so a
+/// right-click on a file reads the same everywhere. Canonical order:
+/// `Open / Reveal in Files / ── / Rename… / Compress / Move to Trash / ── /
+/// Copy File / Copy Absolute Path / Open in Notes`. "Open in Notes" is a
+/// file-only row (a directory has nothing to edit). Surfaces splice their
+/// extra rows (Quick Look, the Copy/Cut/Duplicate block, Compare) around the
+/// core; richer surface variants of a core row keep their own label and
+/// action and pass `None` here.
+pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_kit::MenuEntry> {
+    use crate::ui::menu_kit::MenuEntry;
+    let mut blocks: Vec<Vec<MenuEntry>> = vec![Vec::new(), Vec::new(), Vec::new()];
+    if let Some(f) = a.open {
+        blocks[0].push(MenuEntry::item("Open", f));
+    }
+    if let Some(f) = a.reveal {
+        blocks[0].push(MenuEntry::item("Reveal in Files", f));
+    }
+    if let Some(f) = a.rename {
+        blocks[1].push(MenuEntry::item("Rename\u{2026}", f));
+    }
+    if let Some(f) = a.compress {
+        blocks[1].push(MenuEntry::item("Compress", f));
+    }
+    if let Some(f) = a.trash {
+        blocks[1].push(MenuEntry::item("Move to Trash", f));
+    }
+    if let Some(f) = a.copy_file {
+        blocks[2].push(MenuEntry::item("Copy File", f));
+    }
+    if let Some(f) = a.copy_path {
+        blocks[2].push(MenuEntry::item("Copy Absolute Path", f));
+    }
+    if !Path::new(path).is_dir() {
+        if let Some(f) = a.open_in_notes {
+            blocks[2].push(MenuEntry::item("Open in Notes", f));
+        }
+    }
+    let mut e: Vec<MenuEntry> = Vec::new();
+    for block in blocks {
+        if block.is_empty() {
+            continue;
+        }
+        if !e.is_empty() {
+            e.push(MenuEntry::Separator);
+        }
+        e.extend(block);
+    }
+    e
+}
+
 // ------------------------------------------------------------------ appkit layout
 
 // `PopupFileBrowser` surface geometry (flipped, top-left origin).
@@ -2319,6 +2392,110 @@ mod tests {
         assert!(names.lines().any(|l| l == "a.txt"), "{names}");
         assert!(names.lines().any(|l| l == "proj/sub/x.txt"), "{names}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Row titles of a built menu (`──` for separators) — the drift test for
+    /// [`file_context_menu`]'s canonical order.
+    fn menu_titles(entries: Vec<crate::ui::menu_kit::MenuEntry>) -> Vec<String> {
+        entries
+            .into_iter()
+            .map(|e| match e {
+                crate::ui::menu_kit::MenuEntry::Item { title, .. } => title,
+                crate::ui::menu_kit::MenuEntry::Separator => "\u{2500}\u{2500}".to_string(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    /// Every core action present — the full canonical menu.
+    fn all_menu_actions() -> FileMenuActions {
+        FileMenuActions {
+            open: Some(Box::new(|| {})),
+            reveal: Some(Box::new(|| {})),
+            rename: Some(Box::new(|| {})),
+            compress: Some(Box::new(|| {})),
+            trash: Some(Box::new(|| {})),
+            copy_file: Some(Box::new(|| {})),
+            copy_path: Some(Box::new(|| {})),
+            open_in_notes: Some(Box::new(|| {})),
+        }
+    }
+
+    #[test]
+    fn file_context_menu_core_order_for_a_file() {
+        let dir = std::env::temp_dir().join(format!("ks-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        let got = menu_titles(file_context_menu(
+            &file.to_string_lossy(),
+            all_menu_actions(),
+        ));
+        assert_eq!(
+            got,
+            vec![
+                "Open",
+                "Reveal in Files",
+                "\u{2500}\u{2500}",
+                "Rename\u{2026}",
+                "Compress",
+                "Move to Trash",
+                "\u{2500}\u{2500}",
+                "Copy File",
+                "Copy Absolute Path",
+                "Open in Notes",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_context_menu_dir_drops_open_in_notes_only() {
+        let dir = std::env::temp_dir().join(format!("ks-menudir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let got = menu_titles(file_context_menu(
+            &dir.to_string_lossy(),
+            all_menu_actions(),
+        ));
+        // Only "Open in Notes" is dropped; the rest of the core — rename /
+        // compress / trash included — is a directory's too (Finder parity).
+        assert_eq!(
+            got,
+            vec![
+                "Open",
+                "Reveal in Files",
+                "\u{2500}\u{2500}",
+                "Rename\u{2026}",
+                "Compress",
+                "Move to Trash",
+                "\u{2500}\u{2500}",
+                "Copy File",
+                "Copy Absolute Path",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_context_menu_collapses_missing_rows_and_separators() {
+        // A surface with no DaemonUi can pass only what it backs; empty
+        // blocks and their separators vanish.
+        let mut a = FileMenuActions::default();
+        a.copy_path = Some(Box::new(|| {}));
+        assert_eq!(
+            menu_titles(file_context_menu("/nonexistent.txt", a)),
+            vec!["Copy Absolute Path"]
+        );
+        let mut a = FileMenuActions::default();
+        a.open = Some(Box::new(|| {}));
+        a.copy_path = Some(Box::new(|| {}));
+        assert_eq!(
+            menu_titles(file_context_menu("/nonexistent.txt", a)),
+            vec!["Open", "\u{2500}\u{2500}", "Copy Absolute Path"]
+        );
+        assert!(file_context_menu("/nonexistent.txt", FileMenuActions::default()).is_empty());
     }
 
     use super::*;

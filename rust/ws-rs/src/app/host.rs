@@ -3074,6 +3074,33 @@ pub fn reveal_in_files(paths: &[String]) {
     let _ = paths;
 }
 
+/// The rule-2 popup actions (rename / compress / trash wired to the daemon's
+/// Files backends, with the recents rows repainted) for a standalone popup
+/// showing `path` — the preview panel's right-click menu builds its
+/// `file_context_menu` from these. `sheet` hosts the Rename… prompt. macOS
+/// only: the surface has no AppKit half elsewhere.
+#[cfg(target_os = "macos")]
+pub fn popup_file_menu_actions(
+    path: &str,
+    sheet: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+) -> crate::views::files::FileMenuActions {
+    daemon_ui::popup_file_menu_actions(path, sheet)
+}
+
+/// [`daemon_ui::popup_rename_commit`] for outside-`daemon_ui` popups (main
+/// thread). Off macOS there is no popup to commit for.
+pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        daemon_ui::popup_rename_commit(path, name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, name);
+        Ok(None)
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod daemon_ui {
     mod host_vim;
@@ -4822,31 +4849,32 @@ mod daemon_ui {
                     }
                 }
                 E::RowMenu { row, x, y } => {
-                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    // One shared core with the Files browser: the rule-2 row
+                    // set plus Rename… / Compress / Move to Trash. The row
+                    // under the pointer is already hit-tested (`FileListView`
+                    // `rightMouseDown:` with `acceptsFirstMouse:` — this
+                    // panel never activates the app), and Rename… prompts in
+                    // a sheet on the panel itself: the popup has no inline
+                    // row editing for a menu pick. Ops repaint the shelf
+                    // rows, so a trashed path leaves no ghost.
                     let Some(Some(path)) = self.paths_surface(|w| {
                         w.selection = row;
                         w.rows.get(row).map(|r| r.path.clone())
                     }) else {
                         return;
                     };
-                    let w1 = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p2, p3, p4) = (path.clone(), path.clone(), path.clone(), path.clone());
-                    popup(
-                        vec![
-                            MenuEntry::item("Copy File", move || { copy_files_toast(&[p1]); }),
-                            MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p2)),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Open in Notes", move || {
-                                if let Some(ui) = w1.load() {
-                                    ui.open_in_notes(&p3);
-                                }
-                            }),
-                            MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])),
-                        ],
-                        None,
-                        x,
-                        y,
+                    let sheet = self
+                        .paths_surface(|w| {
+                            w.window
+                                .as_ref()
+                                .map(|p| Retained::into_super(Retained::into_super(p.clone())))
+                        })
+                        .flatten();
+                    let entries = crate::views::files::file_context_menu(
+                        &path,
+                        self.popup_file_actions(&path, sheet),
                     );
+                    crate::ui::menu_kit::popup(entries, None, x, y);
                 }
             }
         }
@@ -10919,9 +10947,12 @@ mod daemon_ui {
             }
         }
 
-        /// The rule-2 file context menu: open in notes, reveal in the app's
-        /// own Files view, copy the absolute path, copy the file, Quick Look,
-        /// trash.
+        /// The rule-2 file context menu. A single row is the shared core
+        /// (`crate::views::files::file_context_menu`); the rows this surface
+        /// backs richer (Quick Look, the Copy/Cut/Duplicate block, the
+        /// Finder-titled `Compress “{name}”`, Compare) splice around it.
+        /// Multi-selection keeps its count-labelled assembly: the core is a
+        /// single-path builder and there is no single-row rename for a set.
         fn files_row_menu(&self, x: f64, y: f64) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::views::files::{can_perform, Action};
@@ -10944,8 +10975,6 @@ mod daemon_ui {
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             let many = paths.len() > 1;
             let first = paths[0].clone();
-            let is_dir = std::path::Path::new(&first).is_dir();
-            let mut entries: Vec<MenuEntry> = Vec::new();
             let call = |f: fn(&Self)| {
                 let w = weak.clone();
                 move || {
@@ -10954,97 +10983,130 @@ mod daemon_ui {
                     }
                 }
             };
-            if !many {
+            // Surface extras with no core twin.
+            let quick_look = can_perform(Action::QuickLook, &ctx).then(|| {
                 let w = weak.clone();
-                let p = first.clone();
-                entries.push(MenuEntry::item("Open", move || {
-                    if let Some(ui) = w.load() {
-                        if std::path::Path::new(&p).is_dir() {
-                            ui.files_surface(|b| b.cd(&p));
-                        } else {
-                            open_path(&p);
-                        }
-                    }
-                }));
-                if !is_dir {
-                    let w = weak.clone();
-                    let p = first.clone();
-                    entries.push(MenuEntry::item("Open in Notes", move || {
-                        if let Some(ui) = w.load() {
-                            ui.open_in_notes(&p);
-                        }
-                    }));
-                }
-            }
-            if can_perform(Action::QuickLook, &ctx) {
-                let w = weak.clone();
-                entries.push(MenuEntry::item("Quick Look", move || {
+                MenuEntry::item("Quick Look", move || {
                     if let (Some(ui), Some(mtm)) = (w.load(), MainThreadMarker::new()) {
                         ui.files_quick_look(mtm);
                     }
-                }));
-            }
-            entries.push(MenuEntry::Separator);
-            {
-                let joined = paths.join("\n");
-                entries.push(MenuEntry::item(
-                    if many { "Copy Absolute Paths" } else { "Copy Absolute Path" },
-                    move || copy_text_to_pasteboard(&joined),
-                ));
-            }
+                })
+            });
+            let mut clipboard: Vec<MenuEntry> = Vec::new();
             if can_perform(Action::Copy, &ctx) {
-                entries.push(MenuEntry::item(
+                clipboard.push(MenuEntry::item(
                     &if many { format!("Copy {} Items", paths.len()) } else { "Copy".to_string() },
                     call(Self::files_copy),
                 ));
             }
             if can_perform(Action::Cut, &ctx) {
-                entries.push(MenuEntry::item(
+                clipboard.push(MenuEntry::item(
                     &if many { format!("Cut {} Items", paths.len()) } else { "Cut".to_string() },
                     call(Self::files_cut),
                 ));
             }
             if can_perform(Action::Duplicate, &ctx) {
-                entries.push(MenuEntry::item("Duplicate", call(Self::files_duplicate)));
+                clipboard.push(MenuEntry::item("Duplicate", call(Self::files_duplicate)));
                 let title = if many {
                     format!("Compress {} Items", paths.len())
                 } else {
                     let name = std::path::Path::new(&first).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     format!("Compress \u{201c}{name}\u{201d}")
                 };
-                entries.push(MenuEntry::item(&title, call(Self::files_compress)));
+                clipboard.push(MenuEntry::item(&title, call(Self::files_compress)));
             }
-            entries.push(MenuEntry::Separator);
-            {
-                let ps = paths.clone();
-                entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&ps)));
-            }
-            if rows_sel.len() == 2 && rows_sel[0].1 == rows_sel[1].1 {
-                let (l, r) = (rows_sel[0].0.clone(), rows_sel[1].0.clone());
-                let dirs = rows_sel[0].1;
-                let w = weak.clone();
+            let mut entries: Vec<MenuEntry> = Vec::new();
+            if many {
+                if let Some(e) = quick_look {
+                    entries.push(e);
+                }
                 entries.push(MenuEntry::Separator);
-                entries.push(MenuEntry::item("Compare", move || {
-                    let Some(ui) = w.load() else { return };
-                    ui.ivars().controller.open(SlotView::Compare);
-                    ui.present(SlotView::Compare);
-                    ui.compare_with(|m| {
-                        if dirs {
-                            m.open_folders(&l, &r);
-                        } else {
-                            m.open_pair(Some(&l), Some(&r));
+                {
+                    let joined = paths.join("\n");
+                    entries.push(MenuEntry::item("Copy Absolute Paths", move || copy_text_to_pasteboard(&joined)));
+                }
+                entries.extend(clipboard);
+                entries.push(MenuEntry::Separator);
+                {
+                    let ps = paths.clone();
+                    entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&ps)));
+                }
+                if rows_sel.len() == 2 && rows_sel[0].1 == rows_sel[1].1 {
+                    let (l, r) = (rows_sel[0].0.clone(), rows_sel[1].0.clone());
+                    let dirs = rows_sel[0].1;
+                    let w = weak.clone();
+                    entries.push(MenuEntry::Separator);
+                    entries.push(MenuEntry::item("Compare", move || {
+                        let Some(ui) = w.load() else { return };
+                        ui.ivars().controller.open(SlotView::Compare);
+                        ui.present(SlotView::Compare);
+                        ui.compare_with(|m| {
+                            if dirs {
+                                m.open_folders(&l, &r);
+                            } else {
+                                m.open_pair(Some(&l), Some(&r));
+                            }
+                        });
+                    }));
+                }
+                entries.push(MenuEntry::Separator);
+                entries.push(MenuEntry::item(
+                    &format!("Move {} Items to Trash", paths.len()),
+                    call(Self::files_trash),
+                ));
+            } else {
+                // One shared core for every file-menu surface. Rows this
+                // surface builds richer pass `None` and join in below.
+                let actions = crate::views::files::FileMenuActions {
+                    open: Some(Box::new({
+                        let w = weak.clone();
+                        let p = first.clone();
+                        move || {
+                            if let Some(ui) = w.load() {
+                                if std::path::Path::new(&p).is_dir() {
+                                    ui.files_surface(|b| b.cd(&p));
+                                } else {
+                                    open_path(&p);
+                                }
+                            }
                         }
-                    });
-                }));
+                    })),
+                    reveal: Some(Box::new({
+                        let ps = vec![first.clone()];
+                        move || reveal_in_files(&ps)
+                    })),
+                    rename: Some(Box::new(call(Self::files_begin_rename))),
+                    compress: None, // the `Compress “{name}”` row below is the richer twin
+                    trash: Some(Box::new(call(Self::files_trash))),
+                    copy_file: None, // `Copy` below is the richer twin
+                    copy_path: Some(Box::new({
+                        let p = first.clone();
+                        move || copy_text_to_pasteboard(&p)
+                    })),
+                    open_in_notes: Some(Box::new({
+                        let w = weak.clone();
+                        let p = first.clone();
+                        move || {
+                            if let Some(ui) = w.load() {
+                                ui.open_in_notes(&p);
+                            }
+                        }
+                    })),
+                };
+                entries = crate::views::files::file_context_menu(&first, actions);
+                if let Some(e) = quick_look {
+                    // Quick Look joins the open block, right before Reveal.
+                    let at = entries
+                        .iter()
+                        .position(|e| matches!(e, MenuEntry::Item { title, .. } if title == "Reveal in Files"))
+                        .unwrap_or(entries.len());
+                    entries.insert(at, e);
+                }
+                if !clipboard.is_empty() {
+                    entries.push(MenuEntry::Separator);
+                    entries.extend(clipboard);
+                }
             }
-            entries.push(MenuEntry::Separator);
-            if !many {
-                entries.push(MenuEntry::item("Rename\u{2026}", call(Self::files_begin_rename)));
-            }
-            entries.push(MenuEntry::item(
-                &if many { format!("Move {} Items to Trash", paths.len()) } else { "Move to Trash".to_string() },
-                call(Self::files_trash),
-            ));
             self.files_append_folder_items(&mut entries, &ctx, true);
             popup(entries, None, x, y);
         }
@@ -11541,17 +11603,197 @@ mod daemon_ui {
                 edit("Paste", sel!(paste:)),
             ];
             if let Some(p) = path {
+                // The shared rule-2 core, so a path right-clicked in the
+                // terminal reads like Files: Open / Reveal / Rename… /
+                // Compress / Move to Trash / Copy / Open in Notes. There is
+                // no row to edit over here, so Rename… prompts in a sheet.
                 e.push(MenuEntry::Separator);
-                if !std::path::Path::new(&p).is_dir() {
-                    e.push(file_action_open_in_notes(&p, &weak));
-                }
-                e.push(file_action_copy_path(&p));
-                e.push(file_action_copy_file(&p));
-                e.push(file_action_reveal(&p));
+                e.extend(crate::views::files::file_context_menu(
+                    &p,
+                    self.popup_file_actions(&p, None),
+                ));
                 e.push(MenuEntry::Separator);
             }
             e.push(edit("Select All", sel!(selectAll:)));
             crate::ui::menu_kit::popup_at(e, x, y);
+        }
+
+        // -- shared popup file actions ----------------------------------------
+        //
+        // The row popups without a FileBrowser/inline editor behind them —
+        // the terminal's selected path and the "Find Recent Files" shelf —
+        // run the same `file_context_menu` core against these: Finder-style
+        // ops through the Files view's own backends (rename commits via
+        // `rename_into`, so `record_rename` lands on the UndoStack; trash is
+        // the undo-aware `FileOps::trash`, never `fs::remove`; compress runs
+        // off the main thread like `files_compress`) with its toast wording,
+        // and the recents rows are repainted so a trashed path leaves no
+        // ghost.
+
+        /// The rule-2 actions [`crate::views::files::file_context_menu`]
+        /// needs for a standalone row popup showing `path`. `sheet` hosts
+        /// the Rename… prompt (the caller's panel; `None` → the shared
+        /// window).
+        fn popup_file_actions(
+            &self,
+            path: &str,
+            sheet: Option<Retained<objc2_app_kit::NSWindow>>,
+        ) -> crate::views::files::FileMenuActions {
+            let w = objc2::rc::Weak::from_retained(&self.retain());
+            let (po, pr, pre) = (path.to_string(), path.to_string(), path.to_string());
+            let (pc, pt, pcf) = (path.to_string(), path.to_string(), path.to_string());
+            let (pcp, pn) = (path.to_string(), path.to_string());
+            let (wr, wc, wt, wn) = (w.clone(), w.clone(), w.clone(), w.clone());
+            crate::views::files::FileMenuActions {
+                open: Some(Box::new(move || open_path(&po))),
+                reveal: Some(Box::new(move || reveal_in_files(&[pr]))),
+                rename: Some(Box::new(move || {
+                    if let Some(ui) = wr.load() {
+                        ui.popup_prompt_rename(pre, sheet);
+                    }
+                })),
+                compress: Some(Box::new(move || {
+                    if let Some(ui) = wc.load() {
+                        ui.popup_compress(&pc);
+                    }
+                })),
+                trash: Some(Box::new(move || {
+                    if let Some(ui) = wt.load() {
+                        ui.popup_trash(&pt);
+                    }
+                })),
+                copy_file: Some(Box::new(move || {
+                    copy_files_toast(&[pcf]);
+                })),
+                copy_path: Some(Box::new(move || copy_text_to_pasteboard(&pcp))),
+                open_in_notes: Some(Box::new(move || {
+                    if let Some(ui) = wn.load() {
+                        ui.open_in_notes(&pn);
+                    }
+                })),
+            }
+        }
+
+        /// Finder-style "Rename…" for surfaces with no row to edit over:
+        /// the same `form_sheet` prompt the notes tree's Rename… flow uses
+        /// when its rail hides the row, and the same commit semantics
+        /// ([`Self::popup_rename_commit`]).
+        fn popup_prompt_rename(
+            &self,
+            path: String,
+            sheet: Option<Retained<objc2_app_kit::NSWindow>>,
+        ) {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.is_empty() {
+                return;
+            }
+            let Some(window) = sheet.or_else(|| {
+                self.ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .map(|st| Retained::into_super(st.window.clone()))
+            }) else {
+                return;
+            };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            crate::ui::sheet::form_sheet(
+                &window,
+                "Rename",
+                &tilde_path(&path),
+                vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
+                "Rename",
+                move |answer| {
+                    let Some(text) = answer.and_then(|v| v.into_iter().next()) else { return };
+                    if let Some(ui) = weak.load() {
+                        let _ = ui.popup_rename_commit(&path, &text);
+                    }
+                },
+            );
+        }
+
+        /// `notes_rename_commit`'s pattern on [`crate::views::files::rename_into`]:
+        /// the "Renamed to …" toast on success, the warning on failure, and
+        /// the recents rows repainted either way the shelf changed. The
+        /// destination comes back to the caller so a preview can follow the
+        /// renamed file.
+        fn popup_rename_commit(
+            &self,
+            path: &str,
+            name: &str,
+        ) -> Result<Option<String>, String> {
+            let r = crate::views::files::rename_into(path, name);
+            match &r {
+                Err(msg) => crate::ui::toast::show(msg, "exclamationmark.triangle.fill"),
+                Ok(Some(dst)) => {
+                    let n = std::path::Path::new(dst)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    crate::ui::toast::show(&format!("Renamed to {n}"), "pencil");
+                    self.refresh_paths_recents();
+                }
+                Ok(None) => {}
+            }
+            r
+        }
+
+        /// Zip `path` beside itself like `files_compress`: off the main
+        /// thread, "Compressing …" then "Created …", and the recents rows
+        /// repainted so the archive shows up.
+        fn popup_compress(&self, path: &str) {
+            let paths = vec![path.to_string()];
+            crate::ui::toast::show(
+                &format!("Compressing {}\u{2026}", copied_what(&paths)),
+                "doc.zipper",
+            );
+            std::thread::spawn(move || {
+                let res = crate::views::files::compress_paths(&paths);
+                on_ui(move |ui| match res {
+                    Ok(zip) => {
+                        let name = std::path::Path::new(&zip)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        crate::ui::toast::show(&format!("Created {name}"), "checkmark.circle.fill");
+                        ui.refresh_paths_recents();
+                    }
+                    Err(msg) => crate::ui::toast::show(&msg, "exclamationmark.triangle.fill"),
+                });
+            });
+        }
+
+        /// "Move to Trash" the way `files_trash` does — the undo-aware
+        /// `FileOps::trash` and its toast wording — then repaint the
+        /// recents rows (`PathShelf::entries` drops gone paths, so the
+        /// trashed row is no longer a ghost).
+        fn popup_trash(&self, path: &str) {
+            use crate::engines::file_ops::FileOps;
+            let paths = vec![path.to_string()];
+            let o = FileOps::trash(&paths, FileOps::shared());
+            match o.failed {
+                Some(msg) => crate::ui::toast::show(&msg, "exclamationmark.triangle.fill"),
+                None => {
+                    crate::ui::toast::show(
+                        &format!("Moved {} item(s) to the Trash \u{b7} \u{2318}Z undoes", paths.len()),
+                        "checkmark.circle.fill",
+                    );
+                    self.refresh_paths_recents();
+                }
+            }
+        }
+
+        /// Repaint a live "Find Recent Files" popup from the shelf model
+        /// (fed by the recent-files engine): re-read the entries, keeping
+        /// the selection where the row survives.
+        fn refresh_paths_recents(&self) {
+            self.paths_surface(|w| {
+                w.set_items(shelf_entries());
+                w.reload(true);
+            });
         }
 
         /// `openNoteFile(_:)` from a file browser: show notes on `path`.
@@ -12739,6 +12981,29 @@ mod daemon_ui {
         let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
         if let Some(ui) = ui {
             ui.open_in_files(paths);
+        }
+    }
+
+    /// [`DaemonUi::popup_file_actions`] for a popup that lives outside the
+    /// daemon's surfaces (the preview panel builds its own menu): the UI is
+    /// looked up through [`UI_WEAK`] like [`reveal_in_files`]. Before the UI
+    /// is up nothing is wired, and the caller shows no menu.
+    pub(crate) fn popup_file_menu_actions(
+        path: &str,
+        sheet: Option<Retained<objc2_app_kit::NSWindow>>,
+    ) -> crate::views::files::FileMenuActions {
+        match UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) {
+            Some(ui) => ui.popup_file_actions(path, sheet),
+            None => crate::views::files::FileMenuActions::default(),
+        }
+    }
+
+    /// [`DaemonUi::popup_rename_commit`] for the same outside-`daemon_ui`
+    /// callers; the destination comes back so a preview can re-target it.
+    pub(crate) fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, String> {
+        match UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) {
+            Some(ui) => ui.popup_rename_commit(path, name),
+            None => crate::views::files::rename_into(path, name),
         }
     }
 
