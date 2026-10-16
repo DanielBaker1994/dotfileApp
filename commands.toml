@@ -223,8 +223,7 @@ sidebar-width = 174.1
 sidebar-min-width = 140
 sidebar-max-width = 480
 
-paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt, ~/.dotfiles/doc/Markdown_Examples.md, ~/notes/helloworld.md, ~/.config/kitchen-sink/samples/graphviz-showcase.md"
-
+paths = "~/notes"
 width = 768
 height = 585
 max-height = 730
@@ -301,7 +300,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 273.9
+sidebar-width = 140
 sidebar-min-width = 140
 sidebar-max-width = 480
 
