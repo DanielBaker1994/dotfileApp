@@ -539,7 +539,7 @@ pub struct JiraList {
     pub rules: Option<StyleRules>,
     pub catalog: Vec<(String, String, String)>,
     pub boards: Vec<(String, String)>,
-    /// `pinnedBoardViews` (`board|sprint|mode` specs), the sidebar "Pinned" rows.
+    /// `pinnedBoardViews` (`board|sprint|mode` specs), the sidebar "Starred" rows.
     pub pinned_views: Vec<String>,
     /// `boardSprint`: board id -> the picked sprint (`current`, `all` or an id).
     pub board_sprint: HashMap<String, String>,
@@ -640,7 +640,7 @@ impl JiraList {
             return match ep.get("type").and_then(Value::as_str) {
                 Some("releases") => "Releases".into(),
                 Some("favorites") => "Starred issues".into(),
-                _ if name == "all" => "All projects".into(),
+                _ if name == "all" => "All issues".into(),
                 _ => name.to_string(),
             };
         }
@@ -970,6 +970,21 @@ impl JiraList {
                         return false;
                     }
                 },
+                Err(err) if err.contains("is not starred") => {
+                    // A board clicked from "All boards" that has no sync job
+                    // yet: `--board-view` can only shape an already-starred
+                    // board, so star it first (queues `--pin-board add`,
+                    // which fetches the board's filter off-main; a failed
+                    // write toasts "Stars not saved: <reason>") and open it
+                    // empty. The reload watcher lands the rows once the
+                    // poller publishes board-<id>.json — no more dead end.
+                    self.pin_board(id);
+                    let text = format!("Board {id}: starred — syncing; rows arrive on the next poll");
+                    self.status_line = Some((text.clone(), PopupTone::Info));
+                    #[cfg(target_os = "macos")]
+                    crate::ui::toast::show(&text, "arrow.clockwise.circle");
+                    cached
+                }
                 Err(err) => {
                     self.board_error(id, &err);
                     return false;
@@ -990,13 +1005,19 @@ impl JiraList {
         true
     }
 
+    /// Surface a failure reason to the user: the sidebar's status line (which
+    /// persists where the 1.4 s toast pill fades and truncates mid-string) plus
+    /// a macOS toast, always pointing at where the Jira logs live.
+    fn surface_error(&mut self, text: &str) {
+        self.status_line = Some((format!("{text} · logs: ~/.cache/jira"), PopupTone::Warning));
+        #[cfg(target_os = "macos")]
+        crate::ui::toast::show(text, "exclamationmark.triangle");
+    }
+
     /// Surface an on-demand board open failure instead of the old silent
     /// `false`: the Jira sidebar's status line (always), plus a toast on macOS.
     fn board_error(&mut self, id: &str, msg: &str) {
-        let text = format!("Board {id}: {msg}");
-        self.status_line = Some((text.clone(), PopupTone::Warning));
-        #[cfg(target_os = "macos")]
-        crate::ui::toast::show(&text, "exclamationmark.triangle");
+        self.surface_error(&format!("Board {id}: {msg}"));
     }
 
     /// One Esc in the list (`onEscape`): clear the query, else go back from
@@ -1202,7 +1223,7 @@ impl JiraList {
         true
     }
 
-    /// `list-star` — pin/unpin a board (the sidebar "Boards" rows).
+    /// `list-star` — star/unstar a board (it appears in the sidebar "Boards").
     pub fn toggle_pin_board(&mut self, id: &str) -> bool {
         if let Some(i) = self.boards.iter().position(|(bid, _)| bid == id) {
             self.boards.remove(i);
@@ -1210,7 +1231,7 @@ impl JiraList {
             self.boards.push((id.to_string(), self.board_name(id)));
         }
         let on = self.boards.iter().any(|(bid, _)| bid == id);
-        self.queue_write(&["--pin-board", if on { "add" } else { "remove" }, id], None, "Board pin not saved");
+        self.queue_write(&["--pin-board", if on { "add" } else { "remove" }, id], None, "Stars not saved");
         self.pins_dirty = true;
         true
     }
@@ -1220,7 +1241,7 @@ impl JiraList {
     pub fn pin_board(&mut self, id: &str) {
         if !self.boards.iter().any(|(bid, _)| bid == id) {
             self.boards.push((id.to_string(), self.board_name(id)));
-            self.queue_write(&["--pin-board", "add", id], None, "Board pin not saved");
+            self.queue_write(&["--pin-board", "add", id], None, "Stars not saved");
             self.pins_dirty = true;
         }
     }
@@ -1233,7 +1254,7 @@ impl JiraList {
             self.pinned_views.push(spec.to_string());
         }
         let on = self.pinned_views.iter().any(|v| v == spec);
-        self.queue_write(&["--pin-view", if on { "add" } else { "remove" }, spec], None, "View pin not saved");
+        self.queue_write(&["--pin-view", if on { "add" } else { "remove" }, spec], None, "Stars not saved");
         self.pins_dirty = true;
         true
     }
@@ -1294,13 +1315,19 @@ impl JiraList {
         let mut args = vec!["--favorite", if on { "add" } else { "remove" }];
         args.extend(keys.iter().map(String::as_str));
         let stdin = on.then(|| Value::Array(rows).to_string());
-        self.queue_write(&args, stdin, "Favorites not saved");
+        self.queue_write(&args, stdin, "Stars not saved");
     }
 
-    /// The row's ☆: a release row stars the release, an issue row the issue.
+    /// The row's ☆ = star: a board row stars/unstars the board (the sidebar's
+    /// "Boards" rows — favourites hold issue keys only), a release row stars
+    /// the release, an issue row the issue.
     pub fn toggle_star(&mut self, row: usize) {
         let Some(r) = self.row(row).cloned() else { return };
         let Some(k) = r.get("key").filter(|k| !k.is_empty()).cloned() else { return };
+        if let Some(id) = k.strip_prefix(BOARD_PREFIX) {
+            self.toggle_pin_board(id);
+            return;
+        }
         if is_release_row(&r) {
             let on = !self.favorite_releases().contains(&k);
             self.set_release_favorite(&[k], on);
@@ -1318,7 +1345,7 @@ impl JiraList {
         self.config_list_edit("favoriteReleases", keys, on);
         let mut args = vec!["--favorite-release", if on { "add" } else { "remove" }];
         args.extend(keys.iter().map(String::as_str));
-        self.queue_write(&args, None, "Release star not saved");
+        self.queue_write(&args, None, "Stars not saved");
     }
 
     /// `setBlacklisted` — hide / restore releases (`--blacklist-release`).
@@ -1349,7 +1376,7 @@ impl JiraList {
         self.config["pinnedLabels"] = Value::Array(cur.into_iter().map(Value::String).collect());
         let mut args = vec!["--pin-label", if on { "add" } else { "remove" }];
         args.extend(names.iter().map(String::as_str));
-        self.queue_write(&args, None, "Label pin not saved");
+        self.queue_write(&args, None, "Stars not saved");
     }
 
     pub fn pinned_labels(&self) -> Vec<String> {
@@ -1612,6 +1639,7 @@ impl JiraList {
             selection,
             checked: self.checked.clone(),
             favs: self.favs.clone(),
+            pinned_boards: self.boards.iter().map(|(id, _)| id.clone()).collect(),
             sort: None,
             filter_active,
             compact: false,
@@ -1629,15 +1657,16 @@ impl JiraList {
 
     /// `showReleasePin` — `--release-view KEY` writes one file per release
     /// from the issue cache (local, no request); show the pinned release's.
+    /// Err strings carry no "release" prefix: the callers add the item context.
     pub fn open_release(&mut self, key: &str) -> Result<(), String> {
         let out = crate::views::jira::run_jira_poll(&["--release-view", key], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("release: no dir")?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
         let file = out
             .get("releases")
             .and_then(Value::as_array)
             .and_then(|a| a.iter().find(|r| r.get("key").and_then(Value::as_str) == Some(key)))
             .and_then(|r| r.get("file").and_then(Value::as_str))
-            .ok_or_else(|| format!("release {key}: not in the synced releases"))?;
+            .ok_or("not in the synced releases")?;
         let cols = self.default_columns();
         self.show_pin_file(key, &format!("{dir}/{file}"), cols);
         Ok(())
@@ -1646,8 +1675,8 @@ impl JiraList {
     /// `showLabelPin` — `--label-view NAME` -> the issues carrying the label.
     pub fn open_label(&mut self, name: &str) -> Result<(), String> {
         let out = crate::views::jira::run_jira_poll(&["--label-view", name], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("label: no dir")?;
-        let file = out.get("file").and_then(Value::as_str).ok_or("label: no file")?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
+        let file = out.get("file").and_then(Value::as_str).ok_or("no file in output")?;
         let cols = self.default_columns();
         self.show_pin_file(&format!("{LABEL_PREFIX}{name}"), &format!("{dir}/{file}"), cols);
         Ok(())
@@ -1656,10 +1685,10 @@ impl JiraList {
     /// `showMyWorkPin` — `jira_poll.py --my-work` → `<dir>/<id>.json`.
     pub fn open_my_work(&mut self, id: &str) -> Result<(), String> {
         let out = crate::views::jira::run_jira_poll(&["--my-work"], None)?;
-        let dir = out.get("dir").and_then(Value::as_str).ok_or("my work: no dir")?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("no dir in output")?;
         let path = format!("{dir}/{id}.json");
         if !Path::new(&path).exists() {
-            return Err(format!("my work: {id} not synced yet"));
+            return Err("not synced yet".into());
         }
         let cols = self.default_columns();
         self.show_pin_file(&format!("{MY_WORK_PREFIX}{id}"), &path, cols);
@@ -2198,7 +2227,7 @@ impl JiraList {
                 key: format!("{VIEW_PREFIX}{v}"),
                 label,
                 icon: if v.ends_with("|table") { "tablecells" } else { "rectangle.split.3x1.fill" }.into(),
-                section: "Pinned".into(),
+                section: "Starred".into(),
                 meta: "Board".into(),
                 ..Default::default()
             });
@@ -2212,7 +2241,7 @@ impl JiraList {
                 key: r.clone(),
                 label,
                 icon: "shippingbox".into(),
-                section: "Pinned".into(),
+                section: "Starred".into(),
                 meta: "Release".into(),
                 tip: format!("Show every issue in {r} here"),
             });
@@ -2222,7 +2251,7 @@ impl JiraList {
                 key: format!("{LABEL_PREFIX}{l}"),
                 label: l.clone(),
                 icon: "tag".into(),
-                section: "Pinned".into(),
+                section: "Starred".into(),
                 meta: "Label".into(),
                 tip: format!("Show every issue labelled {l} here"),
             });
@@ -2234,7 +2263,7 @@ impl JiraList {
                 icon: "square.grid.2x2".into(),
                 section: "Boards".into(),
                 meta: if self.catalog.is_empty() { String::new() } else { self.catalog.len().to_string() },
-                tip: "Every board in the projects in scope — ☆ one to pin it here".into(),
+                tip: "Every board in the projects in scope — ☆ one to keep it here".into(),
             });
         }
         for (id, name) in &self.boards {
@@ -2520,6 +2549,9 @@ pub struct JiraSnapshot {
     pub selection: usize,
     pub checked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
+    /// Pinned board ids (`boards`): the "All boards" ☆ shows these, not
+    /// favourites (a board key could never resolve as a favourite).
+    pub pinned_boards: BTreeSet<String>,
     pub sort: Option<(usize, bool)>,
     /// Columns with a filter set (`tableFilterActive`): their chevron tints.
     pub filter_active: BTreeSet<usize>,
@@ -2566,6 +2598,7 @@ impl JiraList {
             selection: self.selection,
             checked: self.checked.clone(),
             favs: self.favs.iter().cloned().chain(self.favorite_releases()).collect(),
+            pinned_boards: self.boards.iter().map(|(id, _)| id.clone()).collect(),
             sort,
             filter_active: self
                 .columns
@@ -2671,18 +2704,28 @@ impl JiraList {
             JiraEvent::OpenKey(_) => {}
             JiraEvent::Sidebar(SidebarEvent::Select(i)) => self.select_tab(i),
             JiraEvent::Sidebar(SidebarEvent::Pinned(key)) => {
+                // A pin that cannot open says why (status line + toast) —
+                // none of these may fail silently.
                 if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
-                    let _ = self.open_my_work(id);
+                    if let Err(e) = self.open_my_work(id) {
+                        self.surface_error(&format!("My work {id}: {e}"));
+                    }
                 } else if key == BOARD_LIST_KEY {
                     self.show_board_list();
                 } else if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
+                    // `open_board` surfaces its own reason / pins + opens a
+                    // never-pinned board.
                     let _ = self.open_board(id);
                 } else if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
-                    let _ = self.open_view(spec);
+                    if !self.open_view(spec) {
+                        self.surface_error(&format!("Board view {spec}: not synced yet"));
+                    }
                 } else if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
-                    let _ = self.open_label(name);
-                } else {
-                    let _ = self.open_release(&key);
+                    if let Err(e) = self.open_label(name) {
+                        self.surface_error(&format!("Label {name}: {e}"));
+                    }
+                } else if let Err(e) = self.open_release(&key) {
+                    self.surface_error(&format!("Release {key}: {e}"));
                 }
             }
             JiraEvent::Sidebar(_) => {}
@@ -2997,7 +3040,12 @@ mod appkit {
                 }
                 let key = r.get("key").cloned().unwrap_or_default();
                 draw_check(check_rect(band), snap.checked.contains(&key), &c);
-                draw_star(star_rect(band), snap.favs.contains(&key), &c);
+                // A board row's ☆ is its sidebar pin, not a favourite.
+                let star_on = key
+                    .strip_prefix(BOARD_PREFIX)
+                    .map(|id| snap.pinned_boards.contains(id))
+                    .unwrap_or_else(|| snap.favs.contains(&key));
+                draw_star(star_rect(band), star_on, &c);
                 let cells: Vec<(String, Option<CellStyle>)> = snap
                     .columns
                     .iter()
@@ -3765,7 +3813,7 @@ mod appkit {
 
             let pin = unsafe {
                 NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str("Pin to Sidebar"),
+                    &NSString::from_str("☆ Star"),
                     None,
                     None,
                     mtm,
@@ -3810,9 +3858,9 @@ mod appkit {
             iv.summary.setTextColor(Some(&colors.dim.to_nscolor()));
             iv.pin.setTitle(&NSString::from_str(m.pin_title()));
             iv.pin.setToolTip(Some(&NSString::from_str(if m.pinned {
-                "Unpin this view from the sidebar"
+                "Unstar this view (it leaves the sidebar)"
             } else {
-                "Keep this exact view (board + sprint) as a row in the sidebar"
+                "Star this exact view (board + sprint) to keep a row in the sidebar"
             })));
             // Rebuild the sprint menu: one entry per choice, headers become a
             // separator (or a disabled item when they carry a title).
@@ -3859,9 +3907,13 @@ mod appkit {
             // Natural widths from AppKit's own metrics (accurate for the font).
             iv.title.sizeToFit();
             iv.pin.sizeToFit();
+            // The ☆ leads, exactly like a row's star sits left of its title;
+            // then the board name, sprint, mode and summary trail it.
             let title_w = iv.title.frame().size.width.min((w * 0.4).max(60.0));
-            let pin_w = iv.pin.frame().size.width.max(80.0);
+            let pin_w = iv.pin.frame().size.width.max(56.0);
             let mut x = 16.0;
+            iv.pin.setFrame(ns(Rect::new(x, (h - 22.0) / 2.0, pin_w, 22.0)));
+            x += pin_w + 8.0;
             let th = iv.title.frame().size.height;
             iv.title
                 .setFrame(NSRect::new(NSPoint::new(x, (h - th) / 2.0), NSSize::new(title_w, th)));
@@ -3873,10 +3925,8 @@ mod appkit {
             }
             iv.mode.setFrame(ns(Rect::new(x, (h - 24.0) / 2.0, 150.0, 24.0)));
             x += 158.0;
-            let pin_x = (w - pin_w - 14.0).max(x);
-            iv.pin.setFrame(ns(Rect::new(pin_x, (h - 22.0) / 2.0, pin_w, 22.0)));
             let sum_x = x;
-            let sum_w = (pin_x - 10.0 - sum_x).max(0.0);
+            let sum_w = (w - 14.0 - sum_x).max(0.0);
             let (_, sh) = style::text_size("Ag", &style::system_font(11.5, Weight::Regular));
             iv.summary.setFrame(ns(Rect::new(sum_x, (h - sh) / 2.0, sum_w, sh)));
         }
@@ -4757,6 +4807,23 @@ mod tests {
         assert_eq!(l.pending_writes.pop().unwrap().args, vec!["--pin-label", "add", "ui"]);
         l.toggle_pin_board("9");
         assert_eq!(l.pending_writes.pop().unwrap().args, vec!["--pin-board", "add", "9"]);
+    }
+
+    #[test]
+    fn board_list_star_pins_not_favourites() {
+        let mut l = JiraList::default();
+        l.catalog = vec![("42".into(), "Demo board".into(), "DEMO".into())];
+        l.show_board_list();
+        // The ☆ on a board row pins the board (sidebar "Boards"); it never
+        // writes the `board:` key into the favourites list.
+        l.toggle_star(0);
+        assert!(l.boards.iter().any(|(b, _)| b == "42"), "the ☆ stars the board");
+        assert!(l.favs.is_empty(), "no bogus favourite");
+        assert_eq!(l.pending_writes.last().unwrap().args, vec!["--pin-board".to_string(), "add".into(), "42".into()]);
+        assert!(l.snapshot().pinned_boards.contains("42"), "the row ☆ reflects the star");
+        l.toggle_star(0);
+        assert!(l.boards.iter().all(|(b, _)| b != "42"), "the ☆ unstars");
+        assert_eq!(l.pending_writes.last().unwrap().args, vec!["--pin-board".to_string(), "remove".into(), "42".into()]);
     }
 
     #[test]

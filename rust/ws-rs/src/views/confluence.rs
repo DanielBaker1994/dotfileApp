@@ -630,7 +630,7 @@ impl ConfluenceModel {
     pub fn where_text(&self) -> String {
         let q = self.query.trim();
         if self.showing_favorites {
-            "Favorites".to_string()
+            "Starred".to_string()
         } else if q.is_empty() {
             "Search".to_string()
         } else {
@@ -663,14 +663,14 @@ impl ConfluenceModel {
             String::new()
         } else {
             format!(
-                "Type to search {}, then Return.\n\u{2605} Favorites keeps the pages you open often.",
+                "Type to search {}, then Return.\n★ Star the pages you open often to keep them here.",
                 if self.site.is_empty() { "Confluence" } else { self.site.as_str() }
             )
         };
         ConfSnapshot {
             sidebar: SidebarModel {
                 section_title: "Confluence".into(),
-                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Favorites", "star")],
+                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Starred", "star")],
                 selected: Some(if self.scope == Scope::Favorites { 1 } else { 0 }),
                 ..Default::default()
             },
@@ -917,11 +917,11 @@ impl ConfluenceModel {
     pub fn favorites_empty_hint(&self) -> String {
         if !self.favorites.is_empty() {
             format!(
-                "No favorites match \u{201c}{}\u{201d}.\nThe Search button looks inside their text.",
+                "No starred pages match \u{201c}{}\u{201d}.\nThe Search button looks inside their text.",
                 self.query
             )
         } else {
-            "No favorites yet.\nStar a search result (\u{2606} or Cmd+D) to pin it here for one-click opening."
+            "Nothing starred yet.\nStar a search result (\u{2606} or Cmd+D) to keep it here for one-click opening."
                 .to_string()
         }
     }
@@ -972,13 +972,13 @@ impl ConfluenceModel {
             self.selection = 0;
         }
         if self.rows.is_empty() {
-            let within = if self.scope == Scope::Favorites { " in favorites" } else { "" };
+            let within = if self.scope == Scope::Favorites { " (starred only)" } else { "" };
             self.set_status(
                 format!("No matches{within} \u{2014} try Any word, fewer filters, or prefix*"),
                 StatusTone::Dim,
             );
         } else {
-            let within = if self.scope == Scope::Favorites { " in favorites" } else { "" };
+            let within = if self.scope == Scope::Favorites { " (starred only)" } else { "" };
             let el = j
                 .get("elapsed")
                 .and_then(Value::as_f64)
@@ -2081,7 +2081,7 @@ pub mod macos {
         sidebar.addSubview(&side_title);
         let scopes = [
             ("Search", model.scope == Scope::Search),
-            ("Favorites", model.scope == Scope::Favorites),
+            ("Starred", model.scope == Scope::Favorites),
         ];
         for (i, (name, active)) in scopes.iter().enumerate() {
             let color = if *active { colors.text } else { colors.dim };
@@ -2697,7 +2697,7 @@ mod tests {
         assert_eq!(m.where_text(), "\u{201c}deploy\u{201d}");
         assert!(m.has_criteria());
         m.showing_favorites = true;
-        assert_eq!(m.where_text(), "Favorites");
+        assert_eq!(m.where_text(), "Starred");
 
         m.query.clear();
         m.showing_favorites = false;
@@ -2723,7 +2723,7 @@ mod tests {
         assert_eq!(m.rows[0].id, "1");
         assert_eq!(m.terms, vec![json!({"text": "deploy", "phrase": false, "prefix": true})]);
         assert!(m.status.starts_with("\u{2605} 1 of 2 favorite"));
-        assert_eq!(m.favorites_empty_hint(), "No favorites match \u{201c}deploy\u{201d}.\nThe Search button looks inside their text.");
+        assert_eq!(m.favorites_empty_hint(), "No starred pages match \u{201c}deploy\u{201d}.\nThe Search button looks inside their text.");
 
         m.query.clear();
         m.show_favorites(false, 1000.0);
@@ -2731,7 +2731,7 @@ mod tests {
         assert!(m.status.starts_with("\u{2605} 2 favorite"));
 
         let empty = ConfluenceModel::default();
-        assert!(empty.favorites_empty_hint().starts_with("No favorites yet."));
+        assert!(empty.favorites_empty_hint().starts_with("Nothing starred yet."));
     }
 
     #[test]

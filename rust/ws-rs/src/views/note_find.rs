@@ -645,7 +645,7 @@ impl SidebarJumpUi {
         let tone = match it.section.as_str() {
             "My work" | "My Work" | "MY WORK" => PopupTone::Accent,
             "Boards" | "BOARDS" => PopupTone::Info,
-            "Pinned" | "PINNED" => PopupTone::Warning,
+            "Pinned" | "PINNED" | "Starred" | "STARRED" => PopupTone::Warning,
             _ => PopupTone::Accent2,
         };
         let col = c.tone(tone);

@@ -300,7 +300,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 140
+sidebar-width = 274.2
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -553,7 +553,7 @@ kitchen-sink = "*:app"
 "confluence: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the results"
 "confluence: Cmd+Return" = "open in the browser"
 "confluence: Cmd+C / Cmd+Shift+C" = "copy the link / title + link"
-"confluence: Cmd+D" = "favorite (☆)"
+"confluence: Cmd+D" = "star / unstar the page (☆)"
 "confluence: Cmd+G / Cmd+Shift+G" = "next / previous match in the page"
 "confluence: Cmd+L / Cmd+F" = "focus the search box"
 "confluence: Cmd+R" = "search again"

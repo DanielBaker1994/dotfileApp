@@ -11,7 +11,7 @@ use crate::ui::popup::KeyAction;
 use crate::ui::sidebar::SidebarEvent;
 use crate::ui::theme::PopupColors;
 use crate::views::jira_view::{
-    cell_style, display_cell, tone_of, JiraEvent, JiraList, JiraSnapshot, HEADER_H, ROW_H,
+    cell_style, display_cell, tone_of, JiraEvent, JiraList, JiraSnapshot, BOARD_PREFIX, HEADER_H, ROW_H,
 };
 
 use egui_extras::{Column, TableBuilder};
@@ -215,7 +215,11 @@ impl JiraPane {
                                 events.push(JiraEvent::Check(i));
                                 lead_consumed = true;
                             }
-                            let on = snap.favs.contains(&key);
+                            // Board rows: the ☆ is the sidebar pin, not a favourite.
+                            let on = key
+                                .strip_prefix(BOARD_PREFIX)
+                                .map(|id| snap.pinned_boards.contains(id))
+                                .unwrap_or_else(|| snap.favs.contains(&key));
                             let star = if on { "★" } else { "☆" };
                             if ui.selectable_label(on, star).clicked() {
                                 events.push(JiraEvent::Star(i));

@@ -421,7 +421,7 @@ mod appkit {
                     C_SETUP => Some("Site, email, token and the spaces to search".into()),
                     C_POPEN => Some("Open the page in your browser (Return)".into()),
                     C_PCOPY => Some("Copy the page link (Cmd+C)".into()),
-                    C_PSTAR => Some("Favorite (Cmd+D)".into()),
+                    C_PSTAR => Some("Star (Cmd+D)".into()),
                     _ => None,
                 });
                 let cur: Option<String> = self.toolTip().map(|t| t.to_string());

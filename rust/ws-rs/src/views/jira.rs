@@ -2423,11 +2423,13 @@ impl JiraBoardBarModel {
         self.summary = summary.to_string();
     }
 
+    /// The bar's ☆ button title: the same glyph the row lead-ins use, so the
+    /// star language is one thing everywhere ("star = keep this handy").
     pub fn pin_title(&self) -> &'static str {
         if self.pinned {
-            "Pinned ✓"
+            "★ Starred"
         } else {
-            "Pin to Sidebar"
+            "☆ Star"
         }
     }
 }
@@ -2623,23 +2625,40 @@ pub fn find_python3() -> Option<String> {
     None
 }
 
+/// The readable reason for a non-zero `jira_poll.py` exit: the
+/// `{ok:false, problems|error}` JSON it prints on stdout first, else the
+/// last non-empty stderr line. An argv dump + full traceback only arrives
+/// middle-truncated in a 1.4 s toast pill; callers add the item context and
+/// log the long form.
+fn poll_failure(code: i32, out: &str, err: &str) -> String {
+    let json = serde_json::from_str::<serde_json::Value>(out.trim()).ok().and_then(|v| {
+        v.get("problems")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| v.get("error").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+    });
+    let last = err.lines().rev().map(str::trim).find(|l| !l.is_empty());
+    // The poller speaks "pinned" (`pinnedBoards`); the user only ever sees
+    // ☆ = star, so translate the one board phrase that reaches a toast.
+    json.or_else(|| last.map(str::to_string))
+        .map(|r| r.replace("is not pinned", "is not starred"))
+        .unwrap_or_else(|| format!("jira_poll.py exited {code}"))
+}
+
 /// Run `jira_poll.py ARGS…` and parse one JSON object off stdout.
 pub fn run_jira_poll(args: &[&str], stdin: Option<&[u8]>) -> Result<Value, String> {
     let python = find_python3().ok_or("jira: python 3.11+ not found")?;
     let mut argv = vec![jira_script()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let out = crate::app::process_run::run_process(&python, &argv, stdin, None, false)
-        .map_err(|e| format!("jira_poll.py {:?}: {e}", args))?;
+        .map_err(|e| format!("could not run python: {e}"))?;
     if out.code != 0 {
-        return Err(format!(
-            "jira_poll.py {:?} exited {}: {}",
-            args,
-            out.code,
-            out.err.trim()
-        ));
+        return Err(poll_failure(out.code, &out.out, &out.err));
     }
     serde_json::from_str(out.out.trim())
-        .map_err(|e| format!("jira_poll.py {:?}: bad JSON: {e}", args))
+        .map_err(|_| format!("unexpected output: {}", out.out.trim().chars().take(160).collect::<String>()))
 }
 
 // ===========================================================================
@@ -4701,6 +4720,22 @@ mod tests {
         }
         assert_eq!(JiraSection::from_tag(9), None);
         assert_eq!(JiraSection::default(), JiraSection::Search);
+    }
+
+    #[test]
+    fn poll_failure_prefers_problems_then_stderr() {
+        // The `{ok:false, problems:[…]}` stdout the edit commands print is
+        // the reason; no argv dumps, no tracebacks in the user-facing string.
+        let e = poll_failure(
+            1,
+            r#"{"ok": false, "problems": ["board 42 is not pinned"]}"#,
+            "",
+        );
+        assert_eq!(e, "board 42 is not starred");
+        let e = poll_failure(2, "not json", "noise\njira-poll: boom\n");
+        assert_eq!(e, "jira-poll: boom");
+        let e = poll_failure(3, "", "");
+        assert_eq!(e, "jira_poll.py exited 3");
     }
 
     #[test]

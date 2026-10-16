@@ -193,7 +193,7 @@ impl ConfluencePane {
                             };
                             if ui
                                 .selectable_label(false, egui::RichText::new(star).color(star_color))
-                                .on_hover_text("Favorite")
+                                .on_hover_text(if r.favorite { "Unstar" } else { "Star" })
                                 .clicked()
                             {
                                 events.push(ConfEvent::Star(i));
@@ -264,7 +264,7 @@ impl ConfluencePane {
         ui.horizontal(|ui| {
             ui.heading(if row.title.is_empty() { "(untitled)".to_string() } else { row.title.clone() });
             let star = if row.favorite { "★" } else { "☆" };
-            if ui.selectable_label(row.favorite, star).on_hover_text("Favorite").clicked() {
+            if ui.selectable_label(row.favorite, star).on_hover_text(if row.favorite { "Unstar" } else { "Star" }).clicked() {
                 events.push(ConfEvent::PreviewStar);
             }
         });

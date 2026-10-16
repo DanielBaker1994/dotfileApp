@@ -221,7 +221,7 @@ impl FilesPane {
                 events.push(FilesEvent::Parent);
             }
             if snap.can_pin {
-                let pin = if snap.pinned_on { "★ Pinned" } else { "☆ Pin" };
+                let pin = if snap.pinned_on { "Pinned" } else { "Pin" };
                 if ui.button(pin).clicked() {
                     events.push(FilesEvent::TogglePin);
                 }

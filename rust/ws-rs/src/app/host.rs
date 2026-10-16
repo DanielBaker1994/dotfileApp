@@ -8224,7 +8224,7 @@ mod daemon_ui {
                         cs.model.show_favorites(true, now_secs());
                     }
                     cs.model.set_status(
-                        if add { "★ Added to favorites" } else { "Removed from favorites" },
+                        if add { "★ Starred — kept in your Starred list" } else { "Unstarred" },
                         if add { StatusTone::Success } else { StatusTone::Dim },
                     );
                 });
@@ -8624,7 +8624,7 @@ mod daemon_ui {
                         MenuEntry::item("Copy Title + Link", copy(both, "title + link")),
                         MenuEntry::item("Copy as Markdown Link", copy(md, "markdown link")),
                         MenuEntry::Separator,
-                        MenuEntry::item(if r.favorite { "Remove from Favorites" } else { "Add to Favorites" }, move || {
+                        MenuEntry::item(if r.favorite { "Unstar" } else { "Star" }, move || {
                             if let Some(ui) = w.load() {
                                 ui.conf_toggle_favorite(row);
                             }
@@ -8795,7 +8795,13 @@ mod daemon_ui {
                         if l.open_board(&id) {
                             Ok(())
                         } else {
-                            Err(format!("board {id}: no cached board-{id}.json"))
+                            // The reason `board_error` surfaced (status line)
+                            // is the answer for the socket caller too.
+                            Err(l
+                                .status_line
+                                .clone()
+                                .map(|(t, _)| t)
+                                .unwrap_or_else(|| format!("board {id}: not opened")))
                         }
                     }
                     B::ListStar(id) => {
@@ -8994,18 +9000,18 @@ mod daemon_ui {
             if labels {
                 let (w, m3) = (weak.clone(), model.clone());
                 extras.push((
-                    "Pin to Sidebar".to_string(),
+                    "Star to Sidebar".to_string(),
                     Rc::new(move || {
                         let picked: Vec<String> = m3.borrow().selected.iter().filter(|v| *v != EMPTY_VALUE).cloned().collect();
                         if picked.is_empty() {
-                            crate::ui::toast::show("Tick the labels to pin first", "tag");
+                            crate::ui::toast::show("Tick the labels to star first", "tag");
                             return;
                         }
                         if let Some(ui) = w.load() {
                             ui.jira_surface(|l| l.set_pinned_labels(&picked, true));
                         }
                         let s = if picked.len() == 1 { picked[0].clone() } else { format!("{} labels", picked.len()) };
-                        crate::ui::toast::show(&format!("Pinned {s} to the sidebar"), "tag.fill");
+                        crate::ui::toast::show(&format!("Starred {s}"), "tag.fill");
                         appkit::close_open();
                     }),
                 ));
@@ -9712,7 +9718,7 @@ mod daemon_ui {
                     }
                 }));
                 let w2 = objc2::rc::Weak::from_retained(&self.retain());
-                out.push(MenuEntry::item("Import My Saved Pages as Favorites", move || {
+                out.push(MenuEntry::item("Star My Saved Pages", move || {
                     if let Some(ui) = w2.load() {
                         ui.conf_import_saved();
                     }
@@ -9779,12 +9785,28 @@ mod daemon_ui {
                         let r = l.row(row)?.clone();
                         let k = r.get("key").filter(|k| !k.is_empty())?.clone();
                         l.toggle_star(row);
-                        let on = l.favs.contains(&k) || l.favorite_releases().contains(&k);
-                        Some(match (crate::views::jira_view::is_release_row(&r), on) {
-                            (false, true) => (format!("Pinned {k} to favorites"), "star.fill"),
-                            (false, false) => (format!("Unpinned {k}"), "star"),
-                            (true, true) => (format!("Starred {k}"), "star.fill"),
-                            (true, false) => (format!("Unstarred {k}"), "star"),
+                        // One verb for the user: ☆ = star. Issues star into
+                        // the Starred issues list, boards into the Boards
+                        // sidebar row, releases star as before.
+                        Some(match k.strip_prefix(BOARD_PREFIX) {
+                            Some(id) => {
+                                let on = l.boards.iter().any(|(b, _)| b == id);
+                                (
+                                    format!("{} {}", if on { "Starred" } else { "Unstarred" }, l.board_name(id)),
+                                    if on { "star.fill" } else { "star" },
+                                )
+                            }
+                            None => {
+                                let on = if crate::views::jira_view::is_release_row(&r) {
+                                    l.favorite_releases().contains(&k)
+                                } else {
+                                    l.favs.contains(&k)
+                                };
+                                (
+                                    format!("{} {k}", if on { "Starred" } else { "Unstarred" }),
+                                    if on { "star.fill" } else { "star" },
+                                )
+                            }
                         })
                     });
                     if let Some(Some((t, sym))) = msg {
@@ -9845,9 +9867,22 @@ mod daemon_ui {
                     match target.flatten() {
                         Some(Ok(url)) => open_url(&url),
                         Some(Err(board)) => {
-                            let ok = self.jira_surface(|l| l.open_board(&board)).unwrap_or(false);
+                            // `open_board` already toasts / sets the status
+                            // line; log the full reason to the daemon log.
+                            let (ok, why) = self
+                                .jira_surface(|l| {
+                                    let ok = l.open_board(&board);
+                                    (
+                                        ok,
+                                        l.status_line
+                                            .clone()
+                                            .map(|(t, _)| t)
+                                            .unwrap_or_else(|| format!("board {board} not opened")),
+                                    )
+                                })
+                                .unwrap_or((false, format!("board {board} not opened")));
                             if !ok {
-                                self.ivars().controller.log(&format!("jira: board {board} not synced yet"));
+                                self.ivars().controller.log(&format!("jira: {why}"));
                             }
                         }
                         None => {}
@@ -9941,6 +9976,7 @@ mod daemon_ui {
                 E::Sidebar(SidebarEvent::Pinned(key)) => {
                     if let Some(e) = self.jira_open_pin_key(&key) {
                         self.ivars().controller.log(&format!("jira: {e}"));
+                        crate::ui::toast::show(&e, "exclamationmark.triangle");
                     }
                 }
                 E::Sidebar(SidebarEvent::MenuPinned(key, x, y)) => {
@@ -9963,29 +9999,35 @@ mod daemon_ui {
         fn jira_open_pin_key(&self, key: &str) -> Option<String> {
             use crate::views::jira_view::{BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
             self.jira_surface(|l| -> Option<String> {
+                // Reasons carry the item context (`open_*` returns the bare
+                // poller reason); the caller toasts / logs this whole line.
                 if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
-                    return l.open_my_work(id).err();
+                    return l.open_my_work(id).err().map(|e| format!("My work {id}: {e}"));
                 }
                 if key == BOARD_LIST_KEY {
                     l.show_board_list();
                     return None;
                 }
                 if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
-                    return (!l.open_board(id)).then(|| format!("board {id} not synced yet"));
+                    // `open_board` surfaces its own reason (status line +
+                    // toast, and a never-pinned board now pins + opens); a
+                    // second message here would double-toast.
+                    let _ = l.open_board(id);
+                    return None;
                 }
                 if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
-                    return (!l.open_view(spec)).then(|| format!("board view {spec} not synced yet"));
+                    return (!l.open_view(spec)).then(|| format!("Board view {spec}: not synced yet"));
                 }
                 if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
-                    return l.open_label(name).err();
+                    return l.open_label(name).err().map(|e| format!("Label {name}: {e}"));
                 }
-                l.open_release(key).err()
+                l.open_release(key).err().map(|e| format!("Release {key}: {e}"))
             })
             .flatten()
         }
 
         /// Right-click on a Jira sidebar pin: "Open" (the same dispatch a plain
-        /// click runs) plus "Unpin" for a pinned board view.
+        /// click runs) plus "Unstar" for a starred board view.
         fn jira_sidebar_menu(&self, key: &str, x: f64, y: f64) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::views::jira_view::VIEW_PREFIX;
@@ -9999,6 +10041,7 @@ mod daemon_ui {
                 if let Some(ui) = weak.load() {
                     if let Some(e) = ui.jira_open_pin_key(&k) {
                         ui.ivars().controller.log(&format!("jira: {e}"));
+                        crate::ui::toast::show(&e, "exclamationmark.triangle");
                     }
                 }
             })];
@@ -10006,7 +10049,7 @@ mod daemon_ui {
                 if let Some(s) = spec {
                     let w = objc2::rc::Weak::from_retained(&self.retain());
                     entries.push(MenuEntry::Separator);
-                    entries.push(MenuEntry::item("Unpin", move || {
+                    entries.push(MenuEntry::item("Unstar", move || {
                         if let Some(ui) = w.load() {
                             ui.jira_surface(|l| l.toggle_pin_view(&s));
                         }
@@ -10480,13 +10523,13 @@ mod daemon_ui {
             if !issues.is_empty() {
                 let k = if issues.len() == 1 { issue_keys[0].clone() } else { format!("{} issues", issues.len()) };
                 items.push(if all_fav {
-                    ("Remove from favorites".into(), format!("unpin {k}"))
+                    ("Unstar".into(), format!("remove the star from {k}"))
                 } else {
-                    ("Add to favorites".into(), format!("pin {k} · re-polled every run"))
+                    ("Star".into(), format!("keep {k} in the Starred issues list · re-polled every run"))
                 });
                 if !new_labels.is_empty() {
                     let more = if new_labels.len() > 4 { format!(" +{}", new_labels.len() - 4) } else { String::new() };
-                    items.push(("Pin labels to sidebar".into(), format!("{}{more}", new_labels.iter().take(4).cloned().collect::<Vec<_>>().join(", "))));
+                    items.push(("Star labels".into(), format!("{}{more}", new_labels.iter().take(4).cloned().collect::<Vec<_>>().join(", "))));
                 }
             }
             if releases.len() == 1 {
@@ -10496,9 +10539,9 @@ mod daemon_ui {
             if !releases.is_empty() {
                 let k = if releases.len() == 1 { title(&releases[0]) } else { format!("{} releases", releases.len()) };
                 items.push(if all_starred {
-                    ("Unfavorite release".into(), format!("remove {k} from the sidebar"))
+                    ("Unstar release".into(), format!("remove {k} from the sidebar"))
                 } else {
-                    ("Favorite release".into(), format!("pin {k} in the sidebar · a click lists its issues"))
+                    ("Star release".into(), format!("keep {k} in the sidebar · a click lists its issues"))
                 });
                 items.push(if cx.blacklist_tab {
                     ("Restore release".into(), format!("show {k} in the releases tab again"))
@@ -10544,19 +10587,19 @@ mod daemon_ui {
                             copy_text_to_pasteboard(&lines.join("\n"));
                             crate::ui::toast::show(&format!("Copied {what}"), "doc.on.clipboard");
                         }
-                        Some(t @ ("Add to favorites" | "Remove from favorites")) => {
-                            let on = t == "Add to favorites";
+                        Some(t @ ("Star" | "Unstar")) => {
+                            let on = t == "Star";
                             ui.jira_surface(|l| l.set_favorite(&issue_keys, on));
                             let k = if issue_keys.len() == 1 { issue_keys[0].clone() } else { format!("{} issues", issue_keys.len()) };
                             crate::ui::toast::show(
-                                &if on { format!("Pinned {k} to favorites") } else { format!("Unpinned {k}") },
+                                &if on { format!("Starred {k}") } else { format!("Unstarred {k}") },
                                 if on { "star.fill" } else { "star" },
                             );
                         }
-                        Some("Pin labels to sidebar") => {
+                        Some("Star labels") => {
                             ui.jira_surface(|l| l.set_pinned_labels(&new_labels, true));
                             let k = if new_labels.len() == 1 { new_labels[0].clone() } else { format!("{} labels", new_labels.len()) };
-                            crate::ui::toast::show(&format!("Pinned {k} to the sidebar"), "tag.fill");
+                            crate::ui::toast::show(&format!("Starred {k}"), "tag.fill");
                         }
                         Some("Show release issues") => {
                             let k = release_keys[0].clone();
@@ -10565,8 +10608,8 @@ mod daemon_ui {
                                 crate::ui::toast::show(&format!("No issues found for {k}"), "exclamationmark.triangle");
                             }
                         }
-                        Some(t @ ("Favorite release" | "Unfavorite release")) => {
-                            let on = t == "Favorite release";
+                        Some(t @ ("Star release" | "Unstar release")) => {
+                            let on = t == "Star release";
                             ui.jira_surface(|l| l.set_release_favorite(&release_keys, on));
                             crate::ui::toast::show(&if on { format!("Starred {rs}") } else { format!("Unstarred {rs}") }, if on { "star.fill" } else { "star" });
                         }
@@ -12362,14 +12405,14 @@ mod daemon_ui {
             String::new()
         } else {
             format!(
-                "Type to search {}, then Return.\n★ Favorites keeps the pages you open often.",
+                "Type to search {}, then Return.\n★ Star the pages you open often to keep them here.",
                 if m.site.is_empty() { "Confluence" } else { m.site.as_str() }
             )
         };
         ConfSnapshot {
             sidebar: SidebarModel {
                 section_title: "Confluence".into(),
-                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Favorites", "star")],
+                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Starred", "star")],
                 selected: Some(if m.scope == Scope::Favorites { 1 } else { 0 }),
                 ..Default::default()
             },
