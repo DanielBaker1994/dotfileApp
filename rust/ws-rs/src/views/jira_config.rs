@@ -544,19 +544,19 @@ pub use appkit::JiraConfigBodyView;
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
+    use crate::ui::chrome;
     use crate::ui::jira_setup::{JiraSetupFormView, SetupOutcome};
+    use crate::ui::outline_button::{OutlineButton, Tone};
+    use crate::ui::style::{self, Weight};
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSButtonType, NSControlSize,
-        NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName,
-        NSForegroundColorAttributeName, NSLineBreakMode, NSScrollView, NSTextAlignment, NSTextField,
-        NSView,
+        NSAutoresizingMaskOptions, NSEvent, NSFont, NSLineBreakMode, NSScrollView, NSTextAlignment,
+        NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
     };
     use objc2_foundation::{
-        NSAttributedString, NSAttributedStringKey, NSDictionary, NSInteger, NSMutableAttributedString,
         NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
     };
     use std::cell::{Cell, RefCell};
@@ -587,25 +587,6 @@ mod appkit {
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
-    }
-
-    /// One attributed run for a job row's title (font + foreground colour).
-    fn title_run(text: &str, col: Rgba, font: &Retained<NSFont>) -> Retained<NSAttributedString> {
-        let keys: Vec<&NSAttributedStringKey> =
-            unsafe { vec![NSFontAttributeName, NSForegroundColorAttributeName] };
-        let objs: Vec<Retained<AnyObject>> = vec![
-            unsafe { Retained::cast_unchecked(font.clone()) },
-            unsafe { Retained::cast_unchecked(col.to_nscolor()) },
-        ];
-        let refs: Vec<&AnyObject> = objs.iter().map(|o| &**o).collect();
-        let attrs = NSDictionary::from_slices(&keys, &refs);
-        unsafe {
-            NSAttributedString::initWithString_attributes(
-                NSAttributedString::alloc(),
-                &NSString::from_str(text),
-                Some(&attrs),
-            )
-        }
     }
 
     fn as_any<T: objc2::Message + ?Sized>(o: &T) -> &AnyObject {
@@ -692,6 +673,229 @@ mod appkit {
         }
     }
 
+    /// One row of the jobs list: bullet + name + cadence/last-run meta +
+    /// status, in the traffic-light language of the sidebar's sync dot.
+    #[derive(Clone)]
+    pub struct JobRowItem {
+        pub name: String,
+        pub meta: String,
+        pub status: String,
+        pub tone: Rgba,
+        pub off: bool,
+    }
+
+    pub struct JobListIvars {
+        rows: RefCell<Vec<JobRowItem>>,
+        selected: Cell<Option<usize>>,
+        hover: Cell<Option<usize>>,
+        pressed: Cell<Option<usize>>,
+        colors: Cell<PopupColors>,
+        on_select: RefCell<Option<Rc<dyn Fn(usize)>>>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    }
+
+    // The themed jobs list — one exactly-one-of row per poll job. Replaces
+    // the per-row `NSButton` `PushOnPushOff` bezels (system chrome the
+    // `[theme]` cannot reach; see `pill_selector.rs` for the same ban).
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJobRowList"]
+        #[ivars = JobListIvars]
+        pub struct JobRowListView;
+
+        impl JobRowListView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _r: NSRect) {
+                let iv = self.ivars();
+                let c = iv.colors.get();
+                let b = self.bounds();
+                let rows = iv.rows.borrow();
+                let f = style::system_font(11.5, Weight::Regular);
+                for (idx, row) in rows.iter().enumerate() {
+                    let band =
+                        chrome::Rect::new(0.0, idx as f64 * (ROW_H + 2.0), b.size.width, ROW_H);
+                    let pill = band.inset_by(4.0, 1.0);
+                    let sel = iv.selected.get() == Some(idx);
+                    let hov = iv.pressed.get() == Some(idx) || (!sel && iv.hover.get() == Some(idx));
+                    if sel {
+                        style::fill_rounded(pill, 4.0, c.highlight);
+                        style::fill_rect(
+                            chrome::Rect::new(pill.x, pill.y + 3.0, 3.0, pill.height - 6.0),
+                            c.accent_on(),
+                        );
+                    } else if hov {
+                        style::fill_rounded(
+                            pill,
+                            4.0,
+                            style::button_fill(style::ButtonState::Hover, &c),
+                        );
+                    }
+                    let mut x = pill.x + 6.0;
+                    x += style::draw_text_left(
+                        "\u{25cf}",
+                        chrome::Rect::new(x, band.y, 12.0, band.height),
+                        &f,
+                        row.tone,
+                    ) + 6.0;
+                    let (sw, _) = style::text_size(&row.status, &f);
+                    let (ow, _) = style::text_size(if row.off { " (off)" } else { "" }, &f);
+                    let avail = (pill.max_x() - 6.0 - x - sw - ow).max(60.0);
+                    x += style::draw_text_left(
+                        &format!("{}  ·  {}  ·  ", row.name, row.meta),
+                        chrome::Rect::new(x, band.y, avail, band.height),
+                        &f,
+                        c.text,
+                    );
+                    x += style::draw_text_left(
+                        &row.status,
+                        chrome::Rect::new(x, band.y, (pill.max_x() - 6.0 - x).max(0.0), band.height),
+                        &f,
+                        row.tone,
+                    );
+                    if row.off {
+                        style::draw_text_left(
+                            " (off)",
+                            chrome::Rect::new(x, band.y, (pill.max_x() - 6.0 - x).max(0.0), band.height),
+                            &f,
+                            c.dim,
+                        );
+                    }
+                }
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                self.ivars().pressed.set(self.row_at(p));
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let was = self.ivars().pressed.replace(None);
+                self.setNeedsDisplay(true);
+                if was.is_some() && was == self.row_at(p) {
+                    if let Some(cb) = self.ivars().on_select.borrow().as_ref() {
+                        cb(was.unwrap());
+                    }
+                }
+            }
+
+            #[unsafe(method(mouseEntered:))]
+            fn mouse_entered(&self, e: &NSEvent) {
+                self.track(e);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                self.track(e);
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _e: &NSEvent) {
+                if self.ivars().hover.get().is_some() {
+                    self.ivars().hover.set(None);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.reset_tracking();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JobRowListView {}
+    );
+
+    impl JobRowListView {
+        fn row_at(&self, p: NSPoint) -> Option<usize> {
+            let iv = self.ivars();
+            let rows = iv.rows.borrow();
+            if rows.is_empty() || p.y < 0.0 {
+                return None;
+            }
+            let i = (p.y / (ROW_H + 2.0)).floor() as usize;
+            (i < rows.len()).then_some(i)
+        }
+
+        fn track(&self, e: &NSEvent) {
+            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let on = self.row_at(p);
+            if self.ivars().hover.get() != on {
+                self.ivars().hover.set(on);
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        fn reset_tracking(&self) {
+            if let Some(old) = self.ivars().tracking.borrow_mut().take() {
+                self.removeTrackingArea(&old);
+            }
+            let opts = NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect;
+            let ta = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    self.bounds(),
+                    opts,
+                    Some(as_any(self)),
+                    None,
+                )
+            };
+            self.addTrackingArea(&ta);
+            *self.ivars().tracking.borrow_mut() = Some(ta);
+        }
+
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(JobListIvars {
+                rows: RefCell::new(Vec::new()),
+                selected: Cell::new(None),
+                hover: Cell::new(None),
+                pressed: Cell::new(None),
+                colors: Cell::new(colors),
+                on_select: RefCell::new(None),
+                tracking: RefCell::new(None),
+            });
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            v.reset_tracking();
+            v
+        }
+
+        /// The list's natural height for `n` rows (row pitch + gutters).
+        pub fn height_for(n: usize) -> f64 {
+            n as f64 * (ROW_H + 2.0)
+        }
+
+        pub fn set_colors(&self, c: PopupColors) {
+            self.ivars().colors.set(c);
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn set_on_select(&self, cb: impl Fn(usize) + 'static) {
+            *self.ivars().on_select.borrow_mut() = Some(Rc::new(cb));
+        }
+
+        pub fn set_data(&self, rows: Vec<JobRowItem>, selected: Option<usize>) {
+            let iv = self.ivars();
+            *iv.rows.borrow_mut() = rows;
+            iv.selected.set(selected);
+            iv.hover.set(None);
+            iv.pressed.set(None);
+            self.setNeedsDisplay(true);
+        }
+    }
+
     pub struct BodyIvars {
         scroll: Retained<NSScrollView>,
         doc: Retained<FlippedView>,
@@ -719,7 +923,11 @@ mod appkit {
         d_args_lbl: Retained<NSTextField>,
         d_cols_lbl: Retained<NSTextField>,
         d_window: Retained<NSTextField>,
-        d_enabled: Retained<NSButton>,
+        d_enabled: Retained<OutlineButton>,
+        /// The themed jobs list (persistent across `render`; the row NSButtons
+        /// it replaces rebuilt their bezels — and the system-blue selection —
+        /// on every auto-refresh tick).
+        job_list: Retained<JobRowListView>,
         d_jql: Retained<NSTextField>,
         d_args: Retained<NSTextField>,
         d_columns: Retained<NSTextField>,
@@ -779,20 +987,6 @@ mod appkit {
             #[unsafe(method(refreshClicked:))]
             fn refresh_clicked(&self, _s: Option<&AnyObject>) {
                 self.emit(JiraConfigAction::Refresh);
-            }
-
-            /// A left-list row: select its job and repopulate the detail pane.
-            #[unsafe(method(jobClicked:))]
-            fn job_clicked(&self, sender: Option<&AnyObject>) {
-                let tag: NSInteger = sender
-                    .map(|s| unsafe { msg_send![as_any(s), tag] })
-                    .unwrap_or(-1);
-                let name = self.ivars().d_names.borrow().get(tag.max(0) as usize).cloned();
-                if let Some(name) = name {
-                    select_job(&name);
-                    self.ivars().d_shown_for.borrow_mut().clear();
-                    self.render();
-                }
             }
 
             /// Save: `--upsert-endpoint` (schedule / enabled / JQL / args).
@@ -878,11 +1072,19 @@ mod appkit {
             let jql = field(&settings.job_jql_placeholder);
             let args = field(&settings.job_args_placeholder);
             let columns = field(&settings.job_columns_placeholder);
-            let enabled = NSButton::new(mtm);
-            enabled.setButtonType(NSButtonType::Switch);
-            enabled.setTitle(&NSString::from_str(&settings.job_enabled_label));
-            enabled.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-            enabled.setControlSize(NSControlSize::Small);
+            // Themed single-chip toggle (was a native `Switch` checkbox).
+            let enabled = OutlineButton::new(mtm, colors, &settings.job_enabled_label);
+            enabled.set_tone(Tone::Neutral);
+            {
+                let w = objc2::rc::Weak::from_retained(&enabled);
+                enabled.set_on_click(move || {
+                    if let Some(b) = w.load() {
+                        let on = !b.is_on();
+                        b.set_on(on);
+                    }
+                });
+            }
+            let job_list = JobRowListView::new(mtm, colors);
             let result = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
             result.setFont(Some(&NSFont::systemFontOfSize(11.0)));
             result.setTextColor(Some(&dim));
@@ -920,6 +1122,7 @@ mod appkit {
                 d_cols_lbl: cols_lbl,
                 d_window: window,
                 d_enabled: enabled,
+                job_list: job_list.clone(),
                 d_jql: jql,
                 d_args: args,
                 d_columns: columns,
@@ -956,6 +1159,12 @@ mod appkit {
                     b.set_target_action(target, s);
                 }
             }
+            let weak_jobs = objc2::rc::Weak::from_retained(&v);
+            v.ivars().job_list.set_on_select(move |idx| {
+                if let Some(b) = weak_jobs.load() {
+                    b.select_row(idx);
+                }
+            });
             LIVE_BODY.with(|l| *l.borrow_mut() = Some(objc2::rc::Weak::from_retained(&v)));
             // The timer holds only a Weak: the view owns the timer, so a strong
             // capture would keep it alive forever.
@@ -1015,6 +1224,18 @@ mod appkit {
 
         // -- rendering -----------------------------------------------------
 
+        /// A jobs-list row pick: select its job and repopulate the detail
+        /// pane (`JobRowListView`'s callback; was `jobClicked:` + sender tags
+        /// on per-row NSButtons).
+        fn select_row(&self, idx: usize) {
+            let name = self.ivars().d_names.borrow().get(idx).cloned();
+            if let Some(name) = name {
+                select_job(&name);
+                self.ivars().d_shown_for.borrow_mut().clear();
+                self.render();
+            }
+        }
+
         fn color(&self, tone: &str) -> Rgba {
             let c = self.ivars().colors.get();
             match tone {
@@ -1033,6 +1254,7 @@ mod appkit {
             let keep = [
                 as_any(&*self.ivars().form) as *const AnyObject,
                 as_any(&*self.ivars().detail) as *const AnyObject,
+                as_any(&*self.ivars().job_list) as *const AnyObject,
             ];
             for v in doc.subviews().iter() {
                 let p = as_any(&*v) as *const AnyObject;
@@ -1229,51 +1451,31 @@ mod appkit {
                 l.setFrame(rect(PAD, list_top, list_w, LINE_H));
                 self.add(&l);
             } else {
-                let target: &AnyObject = as_any(self);
-                for (i, r) in rows.iter().enumerate() {
-                    let b = NSButton::new(mtm);
-                    b.setButtonType(NSButtonType::PushOnPushOff);
-                    b.setBezelStyle(NSBezelStyle::Push);
-                    b.setControlSize(NSControlSize::Small);
-                    let font = NSFont::systemFontOfSize(11.5);
-                    b.setFont(Some(&font));
-                    b.setAlignment(NSTextAlignment::Left);
-                    b.setToolTip(Some(&NSString::from_str(&format!(
-                        "{} — next run {}, last {}",
-                        r.name, r.next_run, r.last_run
-                    ))));
-                    // The status tone colours the bullet and the status word
-                    // (green ok / red error / amber running / dim off) —
-                    // the traffic-light language of the sidebar's sync dot.
-                    let tone = self.color(job_row_tone(&r.status, r.enabled));
-                    // Relative times like the header line; the raw
-                    // `TIME_FMT` value is only the fallback for odd inputs.
-                    let last_rel = fmt_poll_time(&r.last_run, now_epoch()).unwrap_or_else(|| r.last_run.clone());
-                    let attr = NSMutableAttributedString::new();
-                    for (text, col) in [
-                        ("\u{25cf} ", tone),
-                        (&format!("{}  ·  every {}  ·  last {}  ·  ", r.name, r.interval, last_rel), colors.text),
-                        (&r.status, tone),
-                        (if r.enabled { "" } else { " (off)" }, colors.dim),
-                    ] {
-                        if !text.is_empty() {
-                            attr.appendAttributedString(&title_run(text, col, &font));
+                // One themed row list instead of a pile of system-bezel
+                // NSButtons (exactly-one-of selection, hover + press).
+                let items: Vec<JobRowItem> = rows
+                    .iter()
+                    .map(|r| {
+                        // Relative times like the header line; the raw
+                        // `TIME_FMT` value is only the fallback for odd inputs.
+                        let last_rel = fmt_poll_time(&r.last_run, now_epoch())
+                            .unwrap_or_else(|| r.last_run.clone());
+                        JobRowItem {
+                            name: r.name.clone(),
+                            meta: format!("every {}  ·  last {}", r.interval, last_rel),
+                            status: r.status.clone(),
+                            tone: self.color(job_row_tone(&r.status, r.enabled)),
+                            off: !r.enabled,
                         }
-                    }
-                    b.setAttributedTitle(&attr.into_super());
-                    b.setTag(i as NSInteger);
-                    b.setFrame(rect(PAD, list_top + i as f64 * (ROW_H + 2.0), list_w, ROW_H));
-                    b.setState(if selected.as_deref() == Some(r.name.as_str()) {
-                        NSControlStateValueOn
-                    } else {
-                        NSControlStateValueOff
-                    });
-                    unsafe {
-                        b.setTarget(Some(target));
-                        b.setAction(Some(sel!(jobClicked:)));
-                    }
-                    self.add(&b);
-                }
+                    })
+                    .collect();
+                let sel_idx =
+                    rows.iter().position(|r| selected.as_deref() == Some(r.name.as_str()));
+                let list = self.ivars().job_list.clone();
+                list.set_colors(colors);
+                list.set_data(items, sel_idx);
+                list.setFrame(rect(PAD, list_top, list_w, JobRowListView::height_for(rows.len())));
+                self.add(&list);
             }
 
             pane_y + DETAIL_H + 10.0
@@ -1322,7 +1524,7 @@ mod appkit {
                 *i.d_last_detail.borrow_mut() = None;
                 i.d_heading.setStringValue(&NSString::from_str(&s.job_detail_title));
                 self.set_detail_result(&s.job_select_hint, None);
-                i.d_enabled.setState(NSControlStateValueOff);
+                i.d_enabled.set_on(false);
                 for f in [&i.d_window, &i.d_jql, &i.d_args, &i.d_columns] {
                     f.setStringValue(&NSString::from_str(""));
                     f.setEnabled(false);
@@ -1354,11 +1556,7 @@ mod appkit {
             let detail = job_detail(job);
             i.d_heading.setStringValue(&NSString::from_str(&name));
             i.d_window.setStringValue(&NSString::from_str(&detail.window));
-            i.d_enabled.setState(if detail.enabled {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+            i.d_enabled.set_on(detail.enabled);
             i.d_jql.setStringValue(&NSString::from_str(&detail.jql));
             i.d_args.setStringValue(&NSString::from_str(&detail.args));
             i.d_columns.setStringValue(&NSString::from_str(&detail.columns));
@@ -1442,7 +1640,7 @@ mod appkit {
             let detail = JobDetail {
                 name: name.clone(),
                 window: self.ivars().d_window.stringValue().to_string(),
-                enabled: self.ivars().d_enabled.state() == NSControlStateValueOn,
+                enabled: self.ivars().d_enabled.is_on(),
                 jql: self.ivars().d_jql.stringValue().to_string(),
                 args: self.ivars().d_args.stringValue().to_string(),
                 columns: self.ivars().d_columns.stringValue().to_string(),

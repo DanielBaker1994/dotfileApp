@@ -12499,7 +12499,7 @@ mod daemon_ui {
                                 })
                                 .content_view()
                         } else {
-                            content_for(mtm, v)
+                            placeholder(mtm, v)
                         };
                         view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), bounds.size));
                         view.setAutoresizingMask(mask_fill());
@@ -13248,21 +13248,6 @@ mod daemon_ui {
         parent.beginSheet_completionHandler(&sheet, None);
     }
 
-    /// The content surface for a view. View modules expose `build_content`
-    /// as their AppKit trees land; views without one get the themed
-    /// placeholder.
-    fn content_for(mtm: MainThreadMarker, v: SlotView) -> Retained<NSView> {
-        let built = match v {
-            SlotView::Notes => crate::views::notes::build_content(mtm),
-            SlotView::Files => crate::views::files::build_content(mtm),
-            SlotView::Jira => crate::views::jira::build_content(mtm),
-            SlotView::Compare | SlotView::CompareText => crate::views::compare::build_content(mtm),
-            SlotView::Confluence => crate::views::confluence::build_content(mtm),
-            SlotView::Ai => crate::views::ai::build_content(mtm),
-            _ => None,
-        };
-        built.unwrap_or_else(|| placeholder(mtm, v))
-    }
 
     fn placeholder(mtm: MainThreadMarker, v: SlotView) -> Retained<NSView> {
         let colors = PopupColors::default();

@@ -6,7 +6,7 @@
 //! (`compare.*` / `folder.*`); the Swift files (and this port) are thin
 //! mirrors over those handles. The AppKit drawing layer (`ComparePaneView`,
 //! `CompareThumbnail`, `CompareEditor`, `FolderTreeView`) is real over the
-//! ported models — see `macos` and [`build_content`].
+//! ported models — see the `macos` drawers.
 //!
 //! A [`HelperBackend`] seam lets the handle wrappers be unit-tested with a
 //! stubbed worker; [`PythonBackend`] is the real `PythonHelper`.
@@ -4989,18 +4989,6 @@ pub fn editor_edit_action(
 // The embeddable AppKit content view (`CompareWindow`'s pane build)
 // ---------------------------------------------------------------------------
 
-/// The embeddable content view for the shared host window.
-///
-/// Returns a [`macos::ComparePaneView`] rooted tree showing an empty two-pane
-/// compare with its header, built from model values only (no helper calls).
-#[cfg(target_os = "macos")]
-pub fn build_content(
-    mtm: objc2::MainThreadMarker,
-) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
-    let view = macos::ComparePaneView::create(mtm);
-    view.set_model(PaneModel::empty());
-    Some(view.into_super())
-}
 
 /// The live compare surface for the shared window: the text pane and the
 /// folder tree, repainted from the [`CompareWindowModel`] whenever its

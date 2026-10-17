@@ -2022,9 +2022,6 @@ impl std::fmt::Debug for FileBrowser {
     }
 }
 
-/// Build a default browser view rooted at `$HOME` (the real `reload()`
-/// listing), for the host to drop into a window.
-#[cfg(target_os = "macos")]
 // ------------------------------------------------------------ recent files
 
 #[cfg(target_os = "macos")]
@@ -2101,14 +2098,6 @@ pub fn recent_snapshot(arrived: bool) -> Vec<crate::engines::recent_files::Entry
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn build_content(mtm: objc2::MainThreadMarker) -> Option<Retained<NSView>> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let mut browser = FileBrowser::new(&home);
-    browser.reload();
-    browser.build(mtm);
-    browser.content_view()
-}
 
 /// The last path component (Swift `(path as NSString).lastPathComponent`).
 fn basename(path: &str) -> String {

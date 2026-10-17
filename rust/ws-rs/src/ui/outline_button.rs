@@ -55,6 +55,9 @@ mod appkit {
         title: RefCell<String>,
         tone: Cell<Tone>,
         enabled: Cell<bool>,
+        /// The filled "on" look for toggle commands (the checkbox role);
+        /// selection groups belong to a pill, this is the single-chip state.
+        on: Cell<bool>,
         hover: Cell<bool>,
         pressed: Cell<bool>,
         sink: RefCell<Option<Rc<dyn Fn()>>>,
@@ -88,6 +91,20 @@ mod appkit {
                 let f = style::system_font(12.5, Weight::Semibold);
                 let (enabled, hov, pres) = (iv.enabled.get(), iv.hover.get(), iv.pressed.get());
                 let on = hov || pres;
+                if iv.on.get() {
+                    // Toggle ON: the selected-chip fill (press darkens it),
+                    // same language as `capsule_chip` pills.
+                    style::capsule_track(r, &c);
+                    style::capsule_chip(
+                        r.inset_by(3.0, 3.0),
+                        &c,
+                        true,
+                        enabled && pres,
+                    );
+                    let fg = if enabled { c.text } else { c.dim.with_alpha(0.6) };
+                    style::draw_text_centered(&iv.title.borrow(), r, &f, fg);
+                    return;
+                }
                 let fg = match iv.tone.get() {
                     Tone::Accent => {
                         style::capsule_outline(r, &c, on && enabled);
@@ -226,6 +243,7 @@ mod appkit {
                 title: RefCell::new(title.to_string()),
                 tone: Cell::new(Tone::Accent),
                 enabled: Cell::new(true),
+                on: Cell::new(false),
                 hover: Cell::new(false),
                 pressed: Cell::new(false),
                 sink: RefCell::new(None),
@@ -281,6 +299,18 @@ mod appkit {
 
         pub fn enabled(&self) -> bool {
             self.ivars().enabled.get()
+        }
+
+        /// The toggle state (the checkbox role): `on` draws the filled chip.
+        pub fn set_on(&self, on: bool) {
+            if self.ivars().on.get() != on {
+                self.ivars().on.set(on);
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        pub fn is_on(&self) -> bool {
+            self.ivars().on.get()
         }
 
         /// NSControl-style association id for sender-less routing (the

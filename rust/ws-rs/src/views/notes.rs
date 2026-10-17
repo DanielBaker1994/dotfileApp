@@ -5,7 +5,7 @@
 //!
 //! The AppKit surfaces are mostly real: the floating `ProseWindow` panel
 //! (`WKWebView` over the `ProseRender` HTML), the `prose` child-process launch,
-//! and the embeddable notes surface ([`build_content`] / [`NotesSurface`]:
+//! and the embeddable notes surface ([`NotesSurface`]:
 //! sidebar + `NSTextView` editor plus hidden terminal/browser drawers). The
 //! `FilePopupPanel` / inline `NSTextField` surfaces
 //! are not built here. Helper calls go through the
@@ -2041,25 +2041,9 @@ fn now_secs() -> f64 {
 #[cfg(target_os = "macos")]
 pub use macos::NotesSurface;
 
-/// The embeddable content view for the shared host window.
-///
-/// A flipped root with the NOTES sidebar (one row per open tab: title, folder
-/// and last-write) on the left and an `NSTextView` editor for the selected note
-/// on the right. The tab list comes from `[notes] paths`; a file that no longer
-/// exists is skipped and the editor stays empty. `None` off the main thread.
-///
-/// Delegates to [`NotesSurface::build`]; a caller that keeps only the returned
-/// view gets a surface whose drawers are never toggled.
-#[cfg(target_os = "macos")]
-pub fn build_content(
-    mtm: objc2::MainThreadMarker,
-) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
-    NotesSurface::build(mtm).map(|surface| surface.content_view())
-}
 
 /// The AppKit surfaces of the notes family: the floating [`ProseWindow`]'s
-/// `WKWebView` panel, the `prose` child-process launch, and the embeddable
-/// [`build_content`] tree.
+/// `WKWebView` panel and the `prose` child-process launch.
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
