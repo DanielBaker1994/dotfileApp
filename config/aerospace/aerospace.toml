@@ -35,6 +35,12 @@ key-mapping.preset = 'qwerty'
 
 on-window-detected = [
 
+  # Prose pop-outs (`kitchen-sink` children titled `<note>.md`) float: they
+  # keep their own frame and screen, so dragging one across displays sticks
+  # (PLAN-prose-popout Step D). The shared window's title is a view name and
+  # never `*.md`, so the tiling rule below still owns it.
+  { if = "test %{app-bundle-id} = dev.danielbaker.kitchen-sink && test %{window-title} ~= '[.]md$'", run = ['layout floating'] },
+
   { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 2'] },
 
   { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },

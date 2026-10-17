@@ -352,7 +352,11 @@ JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `toggle-terminal`, `term`, `switcher`, `reset-size`, `pane:h|j|k|l`,
 `pane:focus:<id>`, `key:<spec>`, `header-style:<style>`,
 `esc-hides:<view>:on|off`, `tool:<name>` / `tool-close:<name>`, `screenshot:*`,
-`compare:*`, `paths:*`. Replies > 8 KB are fine (accepted sockets are blocking).
+`compare:*`, `paths:*`, `sidebar-width:<view>[:px]`,
+`inspector-width:jira[:px]`, `jira-inspector:show|hide|toggle` (the Jira ticket
+panel), `rail:<view>[:on|off|toggle]` (the sidebar rail — Ctrl+B B on the
+socket; notes, files, jira, confluence, ai, compare). Replies > 8 KB are fine
+(accepted sockets are blocking).
 
 **Hotkey fast path.** Messages in `hotkey::HOTKEY_MODES` (`window`, `notes`,
 `voice`, `jira`, `files`, `confluence`, `ai`, `compare`) run `hotkey_prep`
@@ -376,7 +380,9 @@ The daemon UI installs one local `keyDown` monitor → `route_key_event`
 switcher, tool panels — Esc streak per `escCloseCount`/`esc-close` (0 =
 never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
 Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher, T =
-terminal/prose, B = sidebar rail. `PaneNav` moves the focus ring between panes;
+terminal/prose, B = sidebar rail (every `SidebarView` pane: notes, files,
+jira, confluence, ai, compare; persisted per view as `sidebarRail.<view>`).
+`PaneNav` moves the focus ring between panes;
 `VimKeys` gives the focused pane normal/insert/search modes. Tool panels are
 non-activating `NSPanel`s that take key once 0.25 s after opening
 (`reclaimToolKey`).

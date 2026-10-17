@@ -1498,7 +1498,8 @@ mod appkit {
                 fld.setFrame(rect(fx, y, fw, D_FIELD_H));
                 y += D_ROW;
             }
-            i.d_enabled.setFrame(rect(fx, y + 2.0, (w - fx).max(60.0), 20.0));
+            let ew = crate::ui::outline_button::OutlineButton::width_for(&i.settings.job_enabled_label);
+            i.d_enabled.setFrame(rect(fx, y + 1.0, ew, 22.0));
             y += D_ROW;
             let bw = ((w - 6.0) / 4.0 - 6.0).max(60.0);
             for (n, b) in i.d_buttons.iter().enumerate() {

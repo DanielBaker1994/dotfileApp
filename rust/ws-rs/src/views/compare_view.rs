@@ -474,6 +474,17 @@ mod appkit {
             self.layout_all();
         }
 
+        /// Set the collapse-to-rail state from the host (Ctrl+B B /
+        /// `do:rail:compare`): flip the sidebar (which persists it), then
+        /// re-lay-out exactly as the in-view `SidebarEvent::Rail` does.
+        pub fn set_rail(&self, on: bool) {
+            let sb = self.ivars().sidebar.clone();
+            if sb.collapsed() != on {
+                sb.set_collapsed(on);
+            }
+            self.layout_all();
+        }
+
         pub fn apply(&self, s: CompareSnap) {
             let iv = self.ivars();
             iv.sidebar.set_model(s.sidebar.clone());

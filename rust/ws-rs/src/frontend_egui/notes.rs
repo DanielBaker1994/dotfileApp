@@ -19,6 +19,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use super::app::Pane;
 use super::terminal::TerminalView;
 use super::theme::c;
+use super::widgets;
 
 pub struct NotesPane {
     pub model: NotesView,
@@ -44,6 +45,9 @@ pub struct NotesPane {
     nvim_bin: String,
     /// The asset dir the pure notes-vim arg builder needs (`…/vim/init.lua`).
     asset_dir: String,
+    /// The sidebar collapse-to-rail state (`SidebarView`'s rail; persisted
+    /// as `sidebarRail.notes`, toggled by Ctrl+B B / `do:rail:notes`).
+    rail: bool,
 }
 
 impl NotesPane {
@@ -103,6 +107,7 @@ impl NotesPane {
             nvim_available,
             nvim_bin: vim_bin,
             asset_dir,
+            rail: crate::ui::sidebar::rail_default("notes"),
         }
     }
 
@@ -114,11 +119,28 @@ impl NotesPane {
 
         // --- pinned-folder tree | (tabs + editor) split (`notes.rs` `build_surface`) ---
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(220.0, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.tree_sidebar(ui, &snap, colors, &mut events),
-            );
+            if self.rail {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.set_rail(false);
+                        }
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(220.0, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.tree_sidebar(ui, &snap, colors, &mut events);
+                        if widgets::rail_button(ui, false, colors) {
+                            self.set_rail(true);
+                        }
+                    },
+                );
+            }
             ui.separator();
             ui.vertical(|ui| {
                 self.toolbar(ui, &snap, colors, &mut events);
@@ -394,6 +416,21 @@ fn vim_command_for(
 impl Pane for NotesPane {
     fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         NotesPane::ui(self, ui, colors);
+    }
+
+    fn has_rail(&self) -> bool {
+        true
+    }
+
+    fn rail(&self) -> bool {
+        self.rail
+    }
+
+    /// Flip the sidebar rail; the pane owns its `sidebarRail.notes`
+    /// persistence, like the AppKit `SidebarView`.
+    fn set_rail(&mut self, on: bool) {
+        self.rail = on;
+        crate::ui::sidebar::set_rail_default("notes", on);
     }
 }
 

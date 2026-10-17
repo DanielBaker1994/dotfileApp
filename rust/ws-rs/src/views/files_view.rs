@@ -5,7 +5,7 @@
 //! clicks / typing back as [`FilesEvent`]s.
 //!
 //! Layout (Swift `layoutPanes`): the PLACES sidebar on the left; a 24 pt
-//! toolbar row at y = 4 — parent ↑, the segmented Pin | Sort ⌄ | Asc/Desc,
+//! toolbar row at y = 4 — the Pin | Sort ⌄ | Asc/Desc capsule buttons,
 //! the filter field; the list (56 %) | 6 pt gutter | preview (text, image,
 //! folder listing or hint); an 18 pt status line at the bottom.
 
@@ -81,6 +81,9 @@ pub const TB_ORDER: i32 = 4;
 
 pub const TOOLBAR_Y: f64 = 4.0;
 pub const TOOLBAR_H: f64 = 24.0;
+/// The gap between the independent toolbar capsules (joined segments are
+/// banned — these are separate commands, not an exclusive group).
+pub const TB_GAP: f64 = 6.0;
 pub const STATUS_H: f64 = 18.0;
 pub const SPLIT_W: f64 = 6.0;
 pub const SIDEBAR_W: f64 = 240.0;
@@ -944,6 +947,18 @@ mod appkit {
             self.ivars().sidebar.clone()
         }
 
+        /// Set the collapse-to-rail state from the host (Ctrl+B B /
+        /// `do:rail:files`): flip the sidebar (which persists it), then
+        /// re-lay-out exactly as the in-view `SidebarEvent::Rail` does.
+        pub fn set_rail(&self, on: bool) {
+            let sb = self.ivars().sidebar.clone();
+            if sb.collapsed() != on {
+                sb.set_collapsed(on);
+            }
+            self.layout_panes();
+            self.setNeedsDisplay(true);
+        }
+
         /// Push a fresh model snapshot.
         pub fn apply(&self, s: FilesSnapshot) {
             let iv = self.ivars();
@@ -1071,37 +1086,32 @@ mod appkit {
             }
         }
 
-        /// Toolbar button rects (`layoutPanes`): parent, then the segmented
-        /// Pin | Sort | Order group.
+        /// Toolbar button rects (`layoutPanes`): the independent Pin | Sort
+        /// | Order capsules, `TB_GAP` apart (they are commands, not an
+        /// exclusive group — so three capsules, never a joined segment).
         pub fn toolbar_rects(&self) -> Vec<(i32, Rect)> {
-            let snap = self.ivars().snap.borrow();
             let left = {
                 let w = self.sidebar_w();
                 if w > 0.0 { w + 4.0 } else { 0.0 }
             };
             let x0 = 8.0 + left;
             let f = style::button_font(10.5, ButtonState::On);
-            let fit = |t: &str, sym: bool, chev: bool| -> f64 {
-                let mut w = if t.is_empty() { 0.0 } else { style::text_size(t, &f).0 };
-                if sym {
-                    w += 12.0 + if t.is_empty() { 0.0 } else { 4.0 };
-                }
-                if chev {
-                    w += 12.0;
-                }
-                (w + 18.0).ceil()
+            // Canonical capsule widths (OutlineButton metrics): measured at
+            // the widest label each button can show so clicks never fight a
+            // moving target.
+            let cw = |t: &str, sym: bool, chev: bool| -> f64 {
+                crate::ui::outline_button::capsule_width(&f, t, sym, chev)
             };
             // No toolbar "up" button: the list's `..` row does that job.
-            let pin_w = fit("Pin", true, false).max(fit("Pinned", true, false));
+            let pin_w = cw("Pin", true, false).max(cw("Pinned", true, false));
             let pin = Rect::new(x0, TOOLBAR_Y, pin_w, TOOLBAR_H);
             let sort_w = super::super::files::SortKey::ALL
                 .iter()
-                .map(|k| fit(k.short(), true, true))
+                .map(|k| cw(k.short(), true, true))
                 .fold(0.0, f64::max);
-            let sort = Rect::new(pin.max_x(), TOOLBAR_Y, sort_w, TOOLBAR_H);
-            let order_w = fit("Asc", true, false).max(fit("Desc", true, false));
-            let order = Rect::new(sort.max_x(), TOOLBAR_Y, order_w, TOOLBAR_H);
-            let _ = &snap;
+            let sort = Rect::new(pin.max_x() + TB_GAP, TOOLBAR_Y, sort_w, TOOLBAR_H);
+            let order_w = cw("Asc", true, false).max(cw("Desc", true, false));
+            let order = Rect::new(sort.max_x() + TB_GAP, TOOLBAR_Y, order_w, TOOLBAR_H);
             vec![(TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)]
         }
 
@@ -1116,29 +1126,27 @@ mod appkit {
             let pressed = self.ivars().pressed.get();
             let rects = self.toolbar_rects();
             for (id, r) in &rects {
-                let is_on = *id == TB_PIN && snap.pinned_on;
-                let st = if pressed == Some(*id) {
-                    ButtonState::Pressed
-                } else {
-                    ButtonState::from_flags(is_on, hover == Some(*id), false)
-                };
-                let (title, sym, chev, seg) = match *id {
-                    TB_PARENT => (String::new(), "arrow.up".to_string(), false, 0),
+                let (title, sym, chev, toggled) = match *id {
                     TB_PIN => (
                         if snap.pinned_on { "Pinned" } else { "Pin" }.to_string(),
                         if snap.pinned_on { "star.fill" } else { "star" }.to_string(),
                         false,
-                        1,
+                        snap.pinned_on,
                     ),
-                    TB_SORT => (snap.sort_short.clone(), "line.3.horizontal.decrease".to_string(), true, 2),
+                    TB_SORT => (
+                        snap.sort_short.clone(),
+                        "line.3.horizontal.decrease".to_string(),
+                        true,
+                        false,
+                    ),
                     _ => (
                         if snap.descending { "Desc" } else { "Asc" }.to_string(),
                         if snap.descending { "arrow.down" } else { "arrow.up" }.to_string(),
                         false,
-                        3,
+                        false,
                     ),
                 };
-                draw_theme_button(*r, st, &c, &title, &sym, chev, seg);
+                draw_toolbar_button(*r, &c, toggled, hover == Some(*id), pressed == Some(*id), &title, &sym, chev);
             }
         }
 
@@ -1152,36 +1160,23 @@ mod appkit {
         }
     }
 
-    /// `ThemeButton.draw` — alone (seg 0) or a segment of a joined group
-    /// (1 first, 2 middle, 3 last).
-    pub fn draw_theme_button(r: Rect, st: ButtonState, c: &PopupColors, title: &str, sym: &str, chev: bool, seg: u8) {
-        if seg == 0 {
-            style::draw_button(r, st, c, 4.0, false);
-        } else {
-            let rad = 8.0;
-            let first = seg == 1;
-            let last = seg == 3;
-            let ext = Rect::new(
-                if first { r.x } else { r.x - rad },
-                r.y + 0.5,
-                r.width + if first { 0.0 } else { rad } + if last { 0.0 } else { rad },
-                r.height - 1.0,
-            );
-            NSGraphicsContext::saveGraphicsState_class();
-            NSBezierPath::clipRect(ns(r));
-            style::fill_rounded(ext, rad, style::button_fill(st, c));
-            NSGraphicsContext::restoreGraphicsState_class();
-            if !first {
-                style::fill_rect(Rect::new(r.x, r.y + 5.0, 1.0, r.height - 10.0), c.text.with_alpha(0.14));
-            }
-        }
-        let color = style::button_text(st, c);
+    /// One toolbar capsule: the shared [`crate::ui::outline_button`] chrome
+    /// (Neutral tone; `toggled` "Pinned" rides the selected-chip language)
+    /// + the title · symbol · chevron content centred inside it.
+    pub fn draw_toolbar_button(
+        r: Rect,
+        c: &PopupColors,
+        toggled: bool,
+        hover: bool,
+        pressed: bool,
+        title: &str,
+        sym: &str,
+        chev: bool,
+    ) {
+        use crate::ui::outline_button::{draw_chrome, Tone};
+        let fg = draw_chrome(r, c, Tone::Neutral, toggled, true, hover, pressed);
         let size = 10.5;
-        if title.is_empty() && !chev {
-            style::draw_symbol(sym, r, color, size + 0.5);
-            return;
-        }
-        let f = style::button_font(size, st);
+        let f = style::button_font(size, if toggled { ButtonState::On } else { ButtonState::Hover });
         let tw = if title.is_empty() { 0.0 } else { style::text_size(title, &f).0 };
         let mut content = tw;
         if !sym.is_empty() {
@@ -1192,16 +1187,16 @@ mod appkit {
         }
         let mut x = (r.mid_x() - content / 2.0).round();
         if !sym.is_empty() {
-            style::draw_symbol(sym, Rect::new(x, r.y, 12.0, r.height), color, size);
+            style::draw_symbol(sym, Rect::new(x, r.y, 12.0, r.height), fg, size);
             x += 12.0 + if title.is_empty() { 0.0 } else { 4.0 };
         }
         if !title.is_empty() {
             let (_, th) = style::text_size(title, &f);
-            style::draw_text(title, x, r.mid_y() - th / 2.0, &f, color);
+            style::draw_text(title, x, r.mid_y() - th / 2.0, &f, fg);
             x += tw;
         }
         if chev {
-            style::chevron(Rect::new(x + 3.0, r.mid_y() - 4.0, 8.0, 8.0), color);
+            style::chevron(Rect::new(x + 3.0, r.mid_y() - 4.0, 8.0, 8.0), fg);
         }
     }
 

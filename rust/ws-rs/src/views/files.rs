@@ -739,13 +739,15 @@ pub fn compress_target(paths: &[String], exists: &dyn Fn(&str) -> bool) -> Optio
     }
 }
 
-/// Zip `paths` into [`compress_target`] like Finder: one item through
-/// `ditto -c -k --sequesterRsrc --keepParent`, several through `zip -r -y`
-/// run in their folder (relative names, symlinks kept). Blocking — call it
-/// off the main thread. `Ok(archive path)` or `Err(message)`.
+/// Zip `paths` into [`compress_target`] like Finder: on macOS one item
+/// through `ditto -c -k --sequesterRsrc --keepParent`, several through
+/// `zip -r -y` run in their folder (relative names, symlinks kept). `ditto`
+/// does not exist off macOS, so single-item zips take the same relative-
+/// name `zip` route there. Blocking — call it off the main thread.
+/// `Ok(archive path)` or `Err(message)`.
 pub fn compress_paths(paths: &[String]) -> Result<String, String> {
     let dst = compress_target(paths, &|p| Path::new(p).exists()).ok_or("nothing selected")?;
-    let out = if paths.len() == 1 {
+    let out = if paths.len() == 1 && cfg!(target_os = "macos") {
         std::process::Command::new("/usr/bin/ditto")
             .args(["-c", "-k", "--sequesterRsrc", "--keepParent", &paths[0], &dst])
             .output()

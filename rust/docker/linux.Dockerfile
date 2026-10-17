@@ -10,7 +10,7 @@ FROM rust:1.92-bookworm
 # Wayland portal); they are harmless to install now.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-pip \
+      python3 python3-pip zip unzip \
       libxkbcommon-dev libgtk-3-dev libxcb1-dev libwayland-dev \
       libdbus-1-dev pkg-config \
  && rm -rf /var/lib/apt/lists/*

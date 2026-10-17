@@ -219,7 +219,7 @@ image-rows = 10
 
 start-drawer = "none"
 font-size = 22
-sidebar-width = 174.1
+sidebar-width = 248.8
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -309,7 +309,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 274.2
+sidebar-width = 310.1
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -322,7 +322,11 @@ status-waiting-words = "hold, wait, pending, paused"
 status-new-words = "backlog, open, to do, todo, new, selected, triage, funnel"
 priority-urgent-words = "highest, blocker, critical, urgent, p0, p1"
 
-inspector-width = 264
+# The ticket panel (Jira's right pane): the drag range and the width the
+# divider persists (`do:inspector-width:jira`). Mirror of the sidebar keys.
+inspector-min-width = 180
+inspector-max-width = 560
+inspector-width = 273.8
 table-sort = "project:desc"
 
 [confluence]

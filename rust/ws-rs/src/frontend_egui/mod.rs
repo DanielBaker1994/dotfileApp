@@ -14,6 +14,7 @@ mod files;
 mod keys;
 mod terminal;
 mod theme;
+mod widgets;
 
 // Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`
 // (files/notes/jira/confluence/ai/compare) or as floating tool windows in

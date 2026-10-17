@@ -433,16 +433,33 @@ mod appkit {
 
     /// Export `note` to PDF off the main thread, copy the PDF's absolute path
     /// and toast it. Shared by Cmd+P and the right-click "Copy PDF Path".
+    ///
+    /// The `EXPORTING` latch is reset on every path that armed it: a worker
+    /// panic is caught and reported like a failed export, so one bad render
+    /// cannot wedge every later attempt in this process (PLAN-prose-popout H3).
     pub fn export_pdf_and_copy(note: String, cfg: NotesConfig, colors: PopupColors, copy_toast: &str) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static EXPORTING: AtomicBool = AtomicBool::new(false);
         if note.is_empty() || EXPORTING.swap(true, Ordering::SeqCst) {
+            crate::app::logging::ws_log(&format!("prose pdf: skip (note empty or already exporting): {note}"));
             return;
         }
         let fmt = if copy_toast.is_empty() { "Copied {} to clipboard".to_string() } else { copy_toast.to_string() };
+        crate::app::logging::ws_log(&format!("prose pdf: start {note}"));
         crate::ui::toast::show("Generating PDF…", "doc.richtext");
         std::thread::spawn(move || {
-            let r = ProseRender::export_pdf(&note, &cfg, &colors);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ProseRender::export_pdf(&note, &cfg, &colors)
+            }))
+            .unwrap_or_else(|_| crate::views::notes::PdfExport {
+                ok: false,
+                out: None,
+                error: Some("pdf export panicked".to_string()),
+            });
+            crate::app::logging::ws_log(&format!(
+                "prose pdf: result ok={} out={:?} err={:?}",
+                r.ok, r.out, r.error
+            ));
             crate::platform::run_on_main(move || {
                 EXPORTING.store(false, Ordering::SeqCst);
                 match (r.ok, r.out) {
@@ -481,12 +498,23 @@ mod appkit {
         if note.is_empty() {
             return;
         }
+        // Breadcrumb for the pop-out child (PLAN-prose-popout Step B):
+        // `popup_context` needs the right-click as `currentEvent`; a nil one
+        // means the menu would open nothing at all.
+        if let Some(mtm) = MainThreadMarker::new() {
+            let event = objc2_app_kit::NSApplication::sharedApplication(mtm).currentEvent();
+            crate::app::logging::ws_log(&format!(
+                "prose menu: {note} (currentEvent {})",
+                if event.is_some() { "ok" } else { "nil" }
+            ));
+        }
         let entries: Vec<MenuEntry> = prose_menu_rows()
             .into_iter()
             .map(|row| match row {
                 NoteMenuRow::CopyAbsolutePath => {
                     let n = note.to_string();
                     MenuEntry::item(row.label(), move || {
+                        crate::app::logging::ws_log("prose menu: picked copy path");
                         let _ = crate::platform::set_text(&n);
                         crate::ui::toast::show(&format!("Copied {}", tilde(&n)), "doc.on.clipboard");
                     })
@@ -494,6 +522,7 @@ mod appkit {
                 NoteMenuRow::CopyPdfPath => {
                     let n = note.to_string();
                     MenuEntry::item(row.label(), move || {
+                        crate::app::logging::ws_log("prose menu: picked copy pdf path");
                         export_pdf_and_copy(n, NotesConfig::load(), colors, "");
                     })
                 }

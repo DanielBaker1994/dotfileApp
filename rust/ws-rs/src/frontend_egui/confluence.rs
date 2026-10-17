@@ -24,11 +24,15 @@ use crate::views::confluence_view::{ConfEvent, ConfSnapshot, MODES};
 
 use super::app::Pane;
 use super::theme::c;
+use super::widgets;
 
 pub struct ConfluencePane {
     pub model: ConfluenceModel,
     /// The search field's editable buffer (`ConfIvars.search` NSTextField).
     query: String,
+    /// The sidebar collapse-to-rail state (`SidebarView`'s rail; persisted
+    /// as `sidebarRail.confluence`, toggled by Ctrl+B B / `do:rail:confluence`).
+    rail: bool,
 }
 
 impl ConfluencePane {
@@ -40,7 +44,7 @@ impl ConfluencePane {
         let entries = crate::views::tools::section_vars(&text, "confluence");
         let mut model = ConfluenceModel::new(ConfluenceConfig::from_entries(entries));
         model.show_search_empty();
-        ConfluencePane { model, query: String::new() }
+        ConfluencePane { model, query: String::new(), rail: crate::ui::sidebar::rail_default("confluence") }
     }
 
     /// Draw one frame and apply the events it generated. `colors` are the
@@ -51,11 +55,28 @@ impl ConfluencePane {
 
         // --- sidebar | strip/list/preview split (`confluence_view.rs` `layout_all`) ---
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.sidebar(ui, &snap, colors, &mut events),
-            );
+            if self.rail {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.set_rail(false);
+                        }
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::SIDEBAR_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.sidebar(ui, &snap, colors, &mut events);
+                        if widgets::rail_button(ui, false, colors) {
+                            self.set_rail(true);
+                        }
+                    },
+                );
+            }
             ui.separator();
             ui.vertical(|ui| {
                 self.search_strip(ui, &snap, colors, &mut events);
@@ -83,11 +104,7 @@ impl ConfluencePane {
         let m = &snap.sidebar;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if !m.section_title.is_empty() {
-                ui.label(
-                    egui::RichText::new(m.section_title.to_uppercase())
-                        .color(c(colors.dim))
-                        .small(),
-                );
+                widgets::section_label(ui, &m.section_title, colors);
             }
             for (i, row) in m.rows.iter().enumerate() {
                 let label = egui::RichText::new(row.title.as_str()).color(c(colors.text));
@@ -140,7 +157,7 @@ impl ConfluencePane {
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 events.push(ConfEvent::Enter);
             }
-            if ui.button("Search").clicked() {
+            if widgets::capsule(ui, "Search", colors).clicked() {
                 events.push(ConfEvent::Search);
             }
         });
@@ -154,7 +171,7 @@ impl ConfluencePane {
                 (4, snap.sort_label.as_str()),
             ];
             for (which, text) in chips {
-                if ui.button(text).clicked() {
+                if widgets::capsule(ui, text, colors).clicked() {
                     events.push(ConfEvent::Chip { which, x: 0.0, y: 0.0 });
                 }
             }
@@ -256,7 +273,7 @@ impl ConfluencePane {
         if !p.hint.is_empty() {
             ui.label(egui::RichText::new(p.hint.as_str()).color(c(colors.dim)));
         }
-        if p.setup && ui.button("Set Up Confluence…").clicked() {
+        if p.setup && widgets::capsule_accent(ui, "Set Up Confluence…", colors).clicked() {
             events.push(ConfEvent::Setup);
         }
         let Some(row) = row else { return };
@@ -278,10 +295,10 @@ impl ConfluencePane {
         });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Open in browser").clicked() {
+            if widgets::capsule(ui, "Open in browser", colors).clicked() {
                 self.open_in_browser(row);
             }
-            if ui.add_enabled(!row.url.is_empty(), egui::Button::new("Copy Link")).clicked() {
+            if widgets::capsule_e(ui, "Copy Link", colors, !row.url.is_empty()).clicked() {
                 events.push(ConfEvent::CopyLink);
             }
         });
@@ -303,13 +320,13 @@ impl ConfluencePane {
                     .small(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(snap.has_curl, egui::Button::new("Copy curl")).clicked() {
+                if widgets::capsule_e(ui, "Copy curl", colors, snap.has_curl).clicked() {
                     events.push(ConfEvent::CopyCurl);
                 }
-                if ui.add_enabled(snap.has_cql, egui::Button::new("Copy CQL")).clicked() {
+                if widgets::capsule_e(ui, "Copy CQL", colors, snap.has_cql).clicked() {
                     events.push(ConfEvent::CopyCql);
                 }
-                if ui.add_enabled(snap.can_more, egui::Button::new("Load more")).clicked() {
+                if widgets::capsule_e(ui, "Load more", colors, snap.can_more).clicked() {
                     events.push(ConfEvent::LoadMore);
                 }
             });
@@ -399,6 +416,21 @@ fn escape_html(s: &str) -> String {
 impl Pane for ConfluencePane {
     fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         ConfluencePane::ui(self, ui, colors);
+    }
+
+    fn has_rail(&self) -> bool {
+        true
+    }
+
+    fn rail(&self) -> bool {
+        self.rail
+    }
+
+    /// Flip the sidebar rail; the pane owns its `sidebarRail.<view>`
+    /// persistence, like the AppKit `SidebarView`.
+    fn set_rail(&mut self, on: bool) {
+        self.rail = on;
+        crate::ui::sidebar::set_rail_default("confluence", on);
     }
 
     /// The key actions the Confluence model consumes (the same ones

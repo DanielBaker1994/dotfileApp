@@ -7,6 +7,7 @@
 //! contract the AppKit surface reports. Each section below is commented with the
 //! `jira_view.rs` region it mirrors. `files.rs` is the reference shape.
 
+use crate::app::host::UiCommand;
 use crate::ui::popup::KeyAction;
 use crate::ui::sidebar::SidebarEvent;
 use crate::ui::theme::PopupColors;
@@ -18,6 +19,7 @@ use egui_extras::{Column, TableBuilder};
 
 use super::app::Pane;
 use super::theme::c;
+use super::widgets;
 
 /// The lead gutter width (check + star), mirroring `jira_view.rs` `LEAD`'s
 /// checkbox/star lead-in.
@@ -27,6 +29,11 @@ pub struct JiraPane {
     pub model: JiraList,
     /// The search field's editable buffer (`JiraView.search` NSTextField).
     filter: String,
+    /// The sidebar collapse-to-rail state (`SidebarView`'s rail; persisted
+    /// as `sidebarRail.jira`, toggled by Ctrl+B B / `do:rail:jira`).
+    rail: bool,
+    /// The ticket panel's width (`inspector-width`; `do:inspector-width`).
+    inspector_w: f32,
 }
 
 /// The header cell label (`PopupTableHeaderView.draw`): the column title
@@ -53,7 +60,20 @@ impl JiraPane {
         };
         let mut model = JiraList::new(section, paths);
         model.start(None);
-        JiraPane { model, filter: String::new() }
+        // `build_jira`'s restore: the rail state persists, don't re-write.
+        model.inspector = !crate::platform::get_bool("jira.inspectorRail");
+        let inspector_w = model
+            .section
+            .get("inspector-width")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(widgets::INSPECTOR_W)
+            .clamp(widgets::RAIL_W, 640.0);
+        JiraPane {
+            model,
+            filter: String::new(),
+            rail: crate::ui::sidebar::rail_default("jira"),
+            inspector_w,
+        }
     }
 
     /// Draw one frame and apply the events it generated. `colors` are the
@@ -64,11 +84,30 @@ impl JiraPane {
 
         // --- sidebar | list | inspector split (`JiraView.layoutPanes`) ---
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.sidebar(ui, &snap, colors, &mut events),
-            );
+            if self.rail {
+                // The collapsed rail (`SidebarView` icons): egui has no SF
+                // Symbols, so it's the expand strip — same state, same key.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.set_rail(false);
+                        }
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::SIDEBAR_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.sidebar(ui, &snap, colors, &mut events);
+                        if widgets::rail_button(ui, false, colors) {
+                            self.set_rail(true);
+                        }
+                    },
+                );
+            }
             ui.separator();
             ui.vertical(|ui| {
                 // --- search box (`search_box` + `controlTextDidChange:`) ---
@@ -77,12 +116,26 @@ impl JiraPane {
                 // --- issue table (header + `JiraTableView`) ---
                 self.table(ui, &snap, colors, &mut events);
             });
+            // The ticket panel, or — collapsed (⌘I / its toggle) — the thin
+            // rail strip with the expand button (`INSPECTOR_RAIL_W` mirror).
             if snap.show_inspector {
                 ui.separator();
+                let w = self.inspector_w;
                 ui.allocate_ui_with_layout(
-                    egui::vec2(300.0, ui.available_height()),
+                    egui::vec2(w, ui.available_height()),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| self.inspector(ui, &snap, colors, &mut events),
+                );
+            } else {
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.model.set_inspector_shown(Some(true));
+                        }
+                    },
                 );
             }
         });
@@ -106,7 +159,7 @@ impl JiraPane {
             let mut last_section = "";
             for pin in &m.pinned {
                 if pin.section != last_section {
-                    ui.label(egui::RichText::new(pin.section.to_uppercase()).color(c(colors.dim)).small());
+                    widgets::section_label(ui, &pin.section, colors);
                     last_section = pin.section.as_str();
                 }
                 let sel = m.pinned_selected.as_deref() == Some(pin.key.as_str());
@@ -131,7 +184,7 @@ impl JiraPane {
                 });
             }
             if !m.section_title.is_empty() {
-                ui.label(egui::RichText::new(m.section_title.to_uppercase()).color(c(colors.dim)).small());
+                widgets::section_label(ui, &m.section_title, colors);
             }
             for (i, row) in m.rows.iter().enumerate() {
                 let label = egui::RichText::new(row.title.as_str()).color(c(colors.text));
@@ -302,7 +355,7 @@ impl JiraPane {
     /// The right inspector (`JiraInspectorView.draw`): key, title, chips,
     /// body, fields, then the "Open full detail" button.
     fn inspector(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         snap: &JiraSnapshot,
         colors: &PopupColors,
@@ -319,13 +372,7 @@ impl JiraPane {
             if !ic.chips.is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     for (text, tone) in &ic.chips {
-                        let col = colors.tone(*tone);
-                        ui.label(
-                            egui::RichText::new(text.as_str())
-                                .color(c(col))
-                                .background_color(c(col.with_alpha(0.18)))
-                                .small(),
-                        );
+                        widgets::badge(ui, text, colors.tone(*tone));
                     }
                 });
             }
@@ -346,10 +393,15 @@ impl JiraPane {
                     ui.label(egui::RichText::new(value.as_str()).color(c(colors.text)));
                 });
             }
-            if ui.button("Open full detail ⏎").clicked() {
+            if widgets::capsule_accent(ui, "Open full detail ⏎", colors).clicked() {
                 events.push(JiraEvent::OpenDetail);
             }
-            ui.label(egui::RichText::new("⌘I hides this panel").color(c(colors.dim)).small());
+            // The rail collapse (AppKit's rail button at the panel's foot;
+            // the strip in `ui()` reopens it). The egui pane is its own
+            // "host", so it lands on the model seam directly.
+            if widgets::rail_button(ui, false, colors) {
+                self.model.set_inspector_shown(Some(false));
+            }
         });
     }
 }
@@ -357,6 +409,31 @@ impl JiraPane {
 impl Pane for JiraPane {
     fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         JiraPane::ui(self, ui, colors);
+    }
+
+    fn has_rail(&self) -> bool {
+        true
+    }
+
+    fn rail(&self) -> bool {
+        self.rail
+    }
+
+    /// Flip the sidebar rail (the `SidebarView` collapse mirror). The pane
+    /// owns its `sidebarRail.<view>` persistence, like the AppKit sidebar.
+    fn set_rail(&mut self, on: bool) {
+        self.rail = on;
+        crate::ui::sidebar::set_rail_default("jira", on);
+    }
+
+    fn apply_command(&mut self, cmd: &UiCommand) {
+        match cmd {
+            UiCommand::JiraInspector(on) => self.model.set_inspector_shown(*on),
+            UiCommand::InspectorWidth(w) => {
+                self.inspector_w = (*w as f32).clamp(widgets::RAIL_W, 640.0)
+            }
+            _ => {}
+        }
     }
 
     /// The resolved key actions the Jira model consumes (the same three the

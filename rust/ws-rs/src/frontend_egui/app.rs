@@ -56,6 +56,20 @@ pub(super) trait Pane {
     fn on_enter(&mut self) {}
     /// Route a resolved key action into the pane's model; default ignores it.
     fn handle_key(&mut self, _action: KeyAction) {}
+    /// Whether this pane's left column collapses to a rail (the mirror of
+    /// the AppKit `SidebarView` collapse). Default: no rail.
+    fn has_rail(&self) -> bool {
+        false
+    }
+    /// The current rail (collapsed-to-icons) state.
+    fn rail(&self) -> bool {
+        false
+    }
+    /// Set the rail state (the caller persists `sidebarRail.<key>`).
+    fn set_rail(&mut self, _on: bool) {}
+    /// A drained `UiCommand` aimed at this pane (Jira's inspector toggle /
+    /// width). Default: ignore.
+    fn apply_command(&mut self, _cmd: &UiCommand) {}
 }
 
 /// A stand-in for views with no egui port yet (the sub-views: Detail, Releases,
@@ -153,6 +167,19 @@ impl KsApp {
         }
     }
 
+    /// Ctrl+B B / the ToggleSidebarRail key: flip the current pane's rail
+    /// (the mirror of `DaemonUi::route_rail_toggle`). The pane persists
+    /// `sidebarRail.<view>` in its own `set_rail` (like `SidebarView`).
+    fn toggle_rail(&mut self) {
+        let view = self.current;
+        if let Some(p) = self.panes.get_mut(&view) {
+            if p.has_rail() {
+                let next = !p.rail();
+                p.set_rail(next);
+            }
+        }
+    }
+
     /// Build a view's pane lazily, like `daemon_ui::content_for`.
     fn ensure_panes(&mut self) {
         if self.panes.contains_key(&self.current) {
@@ -172,6 +199,8 @@ impl KsApp {
             | SlotView::Output
             | SlotView::CompareText => Box::new(Placeholder::new(self.current)),
         };
+        // No rail seed here: each pane's `build()` reads
+        // `sidebarRail.<view>` itself, like the AppKit `set_collapse_key`.
         self.panes.insert(self.current, pane);
     }
 
@@ -246,6 +275,26 @@ impl KsApp {
                 DEFAULT_WINDOW_SIZE.into(),
             )),
             UiCommand::Toast(text, _icon) => self.toasts.push((text, Instant::now())),
+            // Collapse the left pane to its rail (`do:rail:<view>` / Ctrl+B
+            // B). The `do:` verb already persisted `sidebarRail.<view>`;
+            // the key path persists in `toggle_rail`.
+            UiCommand::SidebarRail(v, on) => {
+                if let Some(p) = self.panes.get_mut(&v) {
+                    p.set_rail(on);
+                }
+            }
+            // The ticket panel (`do:jira-inspector:*`, ⌘I): the model owns
+            // the state + its persistence (`JiraList::set_inspector_shown`).
+            UiCommand::JiraInspector(on) => {
+                if let Some(p) = self.panes.get_mut(&SlotView::Jira) {
+                    p.apply_command(&UiCommand::JiraInspector(on));
+                }
+            }
+            UiCommand::InspectorWidth(w) => {
+                if let Some(p) = self.panes.get_mut(&SlotView::Jira) {
+                    p.apply_command(&UiCommand::InspectorWidth(w));
+                }
+            }
             other => self.log_unhandled(other),
         }
     }
@@ -446,6 +495,9 @@ impl KsApp {
             UiCommand::Board(_) => "Board",
             UiCommand::JiraTab(_) => "JiraTab",
             UiCommand::SidebarWidth(_, _) => "SidebarWidth",
+            UiCommand::InspectorWidth(_) => "InspectorWidth",
+            UiCommand::JiraInspector(_) => "JiraInspector",
+            UiCommand::SidebarRail(..) => "SidebarRail",
         };
         self.log_once(name);
     }
@@ -530,7 +582,7 @@ impl KsApp {
             }
             KeyAction::CycleTabs(_) => self.log_once("CycleTabs"),
             KeyAction::FileBrowser(_) => self.log_once("FileBrowser"),
-            KeyAction::ToggleSidebarRail => self.log_once("ToggleSidebarRail"),
+            KeyAction::ToggleSidebarRail => self.toggle_rail(),
             KeyAction::Vim(_) => self.log_once("Vim"),
             KeyAction::Edit(_) | KeyAction::SheetEdit(_) | KeyAction::Terminal(_) => {
                 self.log_once("Edit")
@@ -571,7 +623,7 @@ impl KsApp {
                 }
             }
             't' => self.toggle_terminal(),
-            'b' => self.log_once("sidebar rail"),
+            'b' => self.toggle_rail(),
             _ => {}
         }
     }

@@ -15,6 +15,7 @@ use crate::views::files_view::{FilesEvent, FilesSnapshot, Preview};
 
 use super::app::Pane;
 use super::theme::c;
+use super::widgets;
 
 /// The actions a row's right-click menu offers (UX rule 2: copy the file, copy
 /// the absolute path, open the file in Notes, reveal it in the app's own Files
@@ -111,6 +112,9 @@ pub struct FilesPane {
     pub model: FileBrowser,
     /// The filter field's editable buffer (`files_view.rs` `search` NSTextField).
     filter: String,
+    /// The sidebar collapse-to-rail state (`SidebarView`'s rail; persisted
+    /// as `sidebarRail.files`, toggled by Ctrl+B B / `do:rail:files`).
+    rail: bool,
 }
 
 impl FilesPane {
@@ -134,7 +138,7 @@ impl FilesPane {
         } else {
             model.reload();
         }
-        FilesPane { model, filter: String::new() }
+        FilesPane { model, filter: String::new(), rail: crate::ui::sidebar::rail_default("files") }
     }
 
     /// Draw one frame and apply the events it generated. `colors` are the
@@ -148,11 +152,28 @@ impl FilesPane {
 
         // --- places sidebar | main split (`files_view.rs` `layoutPanes`) ---
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.places_sidebar(ui, &snap, colors, &mut events),
-            );
+            if self.rail {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.set_rail(false);
+                        }
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::SIDEBAR_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.places_sidebar(ui, &snap, colors, &mut events);
+                        if widgets::rail_button(ui, false, colors) {
+                            self.set_rail(true);
+                        }
+                    },
+                );
+            }
             ui.separator();
             ui.vertical(|ui| {
                 self.toolbar(ui, &snap, colors, &mut events);
@@ -193,11 +214,7 @@ impl FilesPane {
                 ui.separator();
             }
             if !m.section_title.is_empty() {
-                ui.label(
-                    egui::RichText::new(m.section_title.to_uppercase())
-                        .color(c(colors.dim))
-                        .small(),
-                );
+                widgets::section_label(ui, &m.section_title, colors);
             }
             for (i, row) in m.rows.iter().enumerate() {
                 let label = egui::RichText::new(row.title.as_str()).color(c(colors.text));
@@ -208,21 +225,23 @@ impl FilesPane {
         });
     }
 
-    /// The toolbar row (`files_view.rs` `draw_toolbar` / `toolbar_rects`).
+    /// The toolbar row (`files_view.rs` `draw_toolbar` / `toolbar_rects`):
+    /// the same capsule buttons (OutlineButton Neutral) + the "Pinned"
+    /// on-state chip.
     fn toolbar(
         &mut self,
         ui: &mut egui::Ui,
         snap: &FilesSnapshot,
-        _colors: &PopupColors,
+        colors: &PopupColors,
         events: &mut Vec<FilesEvent>,
     ) {
         ui.horizontal(|ui| {
-            if ui.button("↑").on_hover_text("Up").clicked() {
+            if widgets::capsule(ui, "↑", colors).on_hover_text("Up").clicked() {
                 events.push(FilesEvent::Parent);
             }
             if snap.can_pin {
                 let pin = if snap.pinned_on { "Pinned" } else { "Pin" };
-                if ui.button(pin).clicked() {
+                if widgets::capsule_toggle(ui, pin, snap.pinned_on, colors).clicked() {
                     events.push(FilesEvent::TogglePin);
                 }
             }
@@ -230,7 +249,7 @@ impl FilesPane {
             // the skeleton renders the current key as a label.
             ui.label(snap.sort_short.clone());
             let order = if snap.descending { "Desc" } else { "Asc" };
-            if ui.button(order).clicked() {
+            if widgets::capsule(ui, order, colors).clicked() {
                 events.push(FilesEvent::ToggleOrder);
             }
 
@@ -330,6 +349,21 @@ impl FilesPane {
 impl Pane for FilesPane {
     fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         FilesPane::ui(self, ui, colors);
+    }
+
+    fn has_rail(&self) -> bool {
+        true
+    }
+
+    fn rail(&self) -> bool {
+        self.rail
+    }
+
+    /// Flip the sidebar rail; the pane owns its `sidebarRail.<view>`
+    /// persistence, like the AppKit `SidebarView`.
+    fn set_rail(&mut self, on: bool) {
+        self.rail = on;
+        crate::ui::sidebar::set_rail_default("files", on);
     }
 
     /// The resolved key actions the Files pane's model consumes (the same

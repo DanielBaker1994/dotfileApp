@@ -28,6 +28,9 @@ pub const HEADER_H: f64 = 26.0;
 pub const PADDING: f64 = 8.0;
 /// `rowLeadInset` with checkboxes + stars: padding + 10 + 22 + 20.
 pub const LEAD: f64 = PADDING + 10.0 + 22.0 + 20.0;
+/// The ticket inspector's collapsed strip — the right-pane mirror of the
+/// sidebar rail: just the expand button rides there (the divider hides).
+pub const INSPECTOR_RAIL_W: f64 = 40.0;
 
 /// One SYNCED tab.
 #[derive(Clone, Debug, PartialEq)]
@@ -1598,6 +1601,15 @@ impl JiraList {
         crate::platform::set_string("jira.boardsCollapsed", if self.boards_collapsed { "1" } else { "0" });
     }
 
+    /// Set / toggle the ticket inspector (`⌘I`, its rail strip, the
+    /// `E::InspectorToggle` event, `do:jira-inspector:*`). The collapsed
+    /// state persists (`jira.inspectorRail`) so a rebuild restores it —
+    /// both frontends route through here (`None` flips).
+    pub fn set_inspector_shown(&mut self, on: Option<bool>) {
+        self.inspector = on.unwrap_or(!self.inspector);
+        crate::platform::set_bool("jira.inspectorRail", !self.inspector);
+    }
+
     /// `boardBar.onPin` — pin/unpin the current `board|sprint|mode` view.
     pub fn toggle_pin_view(&mut self, spec: &str) -> bool {
         if let Some(i) = self.pinned_views.iter().position(|v| v == spec) {
@@ -3081,6 +3093,8 @@ pub enum JiraEvent {
     Config(crate::views::jira_config::JiraConfigAction),
     /// A kanban card was clicked (`open:KEY` from the board page).
     OpenKey(String),
+    /// The inspector's collapse / expand button (⌘I does the same).
+    InspectorToggle,
     Sidebar(crate::ui::sidebar::SidebarEvent),
 }
 
@@ -3226,7 +3240,10 @@ impl JiraList {
             | JiraEvent::FitColumns
             // The Tickets / Config pill and the Config controls are UI-only.
             | JiraEvent::Tab(_)
-            | JiraEvent::Config(_) => {}
+            | JiraEvent::Config(_)
+            // The ticket panel's toggle flips the model flag host-side
+            // (`jira_toggle_inspector`, which also persists the rail).
+            | JiraEvent::InspectorToggle => {}
             JiraEvent::ColumnsResized { pcts, .. } => self.set_column_widths(&pcts),
             JiraEvent::ColumnsReordered { from, to } => self.move_column(from, to),
             JiraEvent::Query(q) => {
@@ -4143,6 +4160,9 @@ mod appkit {
         colors: Cell<PopupColors>,
         hover: Cell<bool>,
         pressed: Cell<bool>,
+        /// Hover / press state of the collapse toggle (rail-mode button).
+        toggle_hover: Cell<bool>,
+        toggle_pressed: Cell<bool>,
         sink: RefCell<Option<Sink>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     }
@@ -4173,17 +4193,40 @@ mod appkit {
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
-                let on = self.button_rect().contains(p.x, p.y);
+                let full = self.ivars().snap.borrow().show_inspector;
+                let on = full && self.button_rect().contains(p.x, p.y);
                 if on != self.ivars().hover.get() {
                     self.ivars().hover.set(on);
                     self.setNeedsDisplay(true);
+                }
+                // The collapse toggle works in both modes (full panel and
+                // rail), and carries the tooltip like the sidebar's toggle.
+                let tog = self.toggle_rect().contains(p.x, p.y);
+                if tog != self.ivars().toggle_hover.get() {
+                    self.ivars().toggle_hover.set(tog);
+                    self.setNeedsDisplay(true);
+                }
+                let tip = tog.then(|| {
+                    if full { "Hide the ticket panel  ⌘I".to_string() } else { "Show the ticket panel  ⌘I".to_string() }
+                });
+                let cur: Option<String> = self.toolTip().map(|t| t.to_string());
+                if cur != tip {
+                    self.setToolTip(tip.as_deref().map(NSString::from_str).as_deref());
                 }
             }
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
-                if self.button_rect().contains(p.x, p.y) && self.ivars().snap.borrow().inspector.is_some() {
+                if self.toggle_rect().contains(p.x, p.y) {
+                    self.ivars().toggle_pressed.set(true);
+                    self.setNeedsDisplay(true);
+                    return;
+                }
+                if self.ivars().snap.borrow().show_inspector
+                    && self.button_rect().contains(p.x, p.y)
+                    && self.ivars().snap.borrow().inspector.is_some()
+                {
                     self.ivars().pressed.set(true);
                     self.setNeedsDisplay(true);
                 }
@@ -4191,9 +4234,17 @@ mod appkit {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
+                let pressed = self.ivars().toggle_pressed.replace(false);
                 let was = self.ivars().pressed.replace(false);
                 self.setNeedsDisplay(true);
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if pressed && self.toggle_rect().contains(p.x, p.y) {
+                    let s = self.ivars().sink.borrow().clone();
+                    if let Some(s) = s {
+                        s(JiraEvent::InspectorToggle);
+                    }
+                    return;
+                }
                 if was && self.button_rect().contains(p.x, p.y) {
                     let s = self.ivars().sink.borrow().clone();
                     if let Some(s) = s {
@@ -4218,10 +4269,39 @@ mod appkit {
                 colors: Cell::new(colors),
                 hover: Cell::new(false),
                 pressed: Cell::new(false),
+                toggle_hover: Cell::new(false),
+                toggle_pressed: Cell::new(false),
                 sink: RefCell::new(None),
                 tracking: RefCell::new(None),
             });
             unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        /// The collapse / expand toggle (mirror of the sidebar's rail toggle,
+        /// which sits bottom-left: this one sits bottom-right of the full
+        /// panel, centered in the collapsed rail).
+        fn toggle_rect(&self) -> Rect {
+            let b = self.bounds();
+            let sz = 24.0;
+            let x = if self.ivars().snap.borrow().show_inspector {
+                (b.size.width - 8.0 - sz).max(4.0)
+            } else {
+                ((b.size.width - sz) / 2.0).max(4.0)
+            };
+            Rect::new(x, (b.size.height - 8.0 - sz).max(8.0), sz, sz)
+        }
+
+        fn draw_toggle(&self, c: &PopupColors) {
+            let r = self.toggle_rect();
+            let hot = self.ivars().toggle_hover.get() || self.ivars().toggle_pressed.get();
+            let st = if hot { ButtonState::Hover } else { ButtonState::Idle };
+            style::draw_button(r, st, c, 6.0, true);
+            style::draw_symbol(
+                if self.ivars().snap.borrow().show_inspector { "sidebar.right" } else { "sidebar.left" },
+                r,
+                if hot { c.text } else { c.dim },
+                12.0,
+            );
         }
 
         fn button_rect(&self) -> Rect {
@@ -4237,6 +4317,12 @@ mod appkit {
             let (w, h) = (b.size.width, b.size.height);
             style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle().with_alpha(0.7));
             style::fill_rect(Rect::new(0.0, 0.0, 1.0, h), c.hairline());
+            if !self.ivars().snap.borrow().show_inspector {
+                // Collapsed (⌘I / the toggle): the thin rail strip — mantle,
+                // hairline and the expand button, nothing else.
+                self.draw_toggle(&c);
+                return;
+            }
             let snap = self.ivars().snap.borrow();
             let Some(ic) = &snap.inspector else {
                 let f = style::system_font(13.0, Weight::Regular);
@@ -4294,8 +4380,9 @@ mod appkit {
             let kc = Rect::new(br.max_x() - 30.0, br.mid_y() - 9.0, 20.0, 18.0);
             style::fill_rounded(kc, 4.0, c.accent_on().with_alpha(0.25));
             style::draw_text_centered("⏎", kc, &style::system_font(10.0, Weight::Semibold), c.readable(c.accent, 4.0));
-            let hf = style::system_font(11.0, Weight::Regular);
-            style::draw_text_centered("⌘I hides this panel", Rect::new(8.0, h - 70.0 + 42.0, w - 16.0, 16.0), &hf, c.dim);
+            // The hide button replaces the old static hint; its tooltip
+            // carries the ⌘I note (same affordance as the sidebar toggle).
+            self.draw_toggle(&c);
         }
     }
 
@@ -4570,6 +4657,8 @@ mod appkit {
         inspector_w: Cell<f64>,
         /// The draggable divider on the sidebar's right edge.
         divider: Retained<PaneDividerView>,
+        /// The draggable divider on the inspector's left edge (right pane).
+        insp_divider: Retained<PaneDividerView>,
         /// The Cmd+F live-search bar, attached above the list when open.
         search_bar: RefCell<Option<Retained<crate::views::jira_search_bar::JiraSearchBar>>>,
         /// The open board's top bar (`JiraBoardBar`).
@@ -4694,6 +4783,17 @@ mod appkit {
             self.ivars().sidebar.clone()
         }
 
+        /// Set the collapse-to-rail state from the host (Ctrl+B B /
+        /// `do:rail:jira`): flip the sidebar (which persists it), then
+        /// re-lay-out exactly as the in-view `SidebarEvent::Rail` does.
+        pub fn set_rail(&self, on: bool) {
+            let sb = self.ivars().sidebar.clone();
+            if sb.collapsed() != on {
+                sb.set_collapsed(on);
+            }
+            self.sidebar_collapsed_changed();
+        }
+
         /// The draggable divider on the sidebar's right edge.
         pub fn divider(&self) -> Retained<PaneDividerView> {
             self.ivars().divider.clone()
@@ -4708,6 +4808,24 @@ mod appkit {
         pub fn set_sidebar_width(&self, width: f64) {
             let w = self.ivars().divider.clamp(width);
             self.ivars().sidebar_w.set(w);
+            self.layout_panes();
+        }
+
+        /// The draggable divider on the inspector's left edge (right pane).
+        pub fn inspector_divider(&self) -> Retained<PaneDividerView> {
+            self.ivars().insp_divider.clone()
+        }
+
+        /// The expanded inspector width (`[jira] inspector-width`).
+        pub fn inspector_width(&self) -> f64 {
+            self.ivars().inspector_w.get()
+        }
+
+        /// Apply an inspector divider drag / `do:inspector-width:jira`: clamp
+        /// and re-lay-out.
+        pub fn set_inspector_width(&self, width: f64) {
+            let w = self.ivars().insp_divider.clamp(width);
+            self.ivars().inspector_w.set(w);
             self.layout_panes();
         }
 
@@ -4736,6 +4854,7 @@ mod appkit {
             sidebar_w: f64,
             sidebar_range: DividerRange,
             inspector_w: f64,
+            inspector_range: DividerRange,
         ) -> Retained<Self> {
             let snap = Rc::new(RefCell::new(JiraSnapshot::default()));
             let sidebar = SidebarView::new(mtm, colors);
@@ -4760,6 +4879,8 @@ mod appkit {
             let bar = JiraBoardBarView::new(mtm, colors);
             bar.setHidden(true);
             let divider = PaneDividerView::new(mtm, sidebar_range);
+            let insp_divider = PaneDividerView::new(mtm, inspector_range);
+            insp_divider.set_right_pane(true);
             let this = Self::alloc(mtm).set_ivars(JiraIvars {
                 snap,
                 colors: Cell::new(colors),
@@ -4777,6 +4898,7 @@ mod appkit {
                 sidebar_w: Cell::new(sidebar_w),
                 inspector_w: Cell::new(inspector_w),
                 divider: divider.clone(),
+                insp_divider: insp_divider.clone(),
                 search_bar: RefCell::new(None),
                 bar,
                 board_web: RefCell::new(None),
@@ -4830,6 +4952,7 @@ mod appkit {
             // The sidebar divider rides above every pane so it always takes
             // the drag (and never a row click) inside its few-point strip.
             v.addSubview(&divider);
+            v.addSubview(&insp_divider);
             unsafe { iv.search.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
             v
         }
@@ -5014,7 +5137,17 @@ mod appkit {
             // The Config surface likewise owns the list area.
             let config = iv.tab.get() == JiraSurface::Config;
             let show_insp = show_inspector && !kanban && !config;
-            let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
+            // Collapsed (the toggle / ⌘I), the inspector keeps a thin rail
+            // with its expand button — the mirror of the collapsed sidebar.
+            // Never starve the list past its 100 pt floor.
+            let avail = (w - sw - 4.0 - 100.0).max(0.0);
+            let insp = if show_insp {
+                iv.inspector_w.get().min(avail)
+            } else if !kanban && !config {
+                INSPECTOR_RAIL_W.min(avail)
+            } else {
+                0.0
+            };
             // The `Tickets | Config` pill heads the sidebar column (like the
             // Confluence scope chips): the surface switch belongs to the nav,
             // not the list's search strip. Fixed band at the top; the sidebar
@@ -5060,8 +5193,13 @@ mod appkit {
             // The Config surface replaces the list (header / rows / inspector).
             iv.header.setHidden(kanban || config);
             iv.scroll.setHidden(kanban || config);
-            iv.inspector.setHidden(!show_insp);
+            iv.inspector.setHidden(kanban || config);
             iv.inspector.setFrame(ns(Rect::new(w - insp, 0.0, insp, h)));
+            // The inspector divider rides the panel's left edge; like the
+            // sidebar's, it hides on the collapsed rail.
+            iv.insp_divider.place(ns(Rect::new(w - insp - 4.0, 0.0, 8.0, h)));
+            iv.insp_divider.set_width(insp);
+            iv.insp_divider.setHidden(!show_insp);
             iv.config.setHidden(!config);
             if config {
                 let list_top = top + 50.0;

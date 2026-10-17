@@ -15,7 +15,7 @@
 //! pill, not here.
 
 #[cfg(target_os = "macos")]
-pub use appkit::OutlineButton;
+pub use appkit::{capsule_width, draw_chrome, OutlineButton};
 
 /// The canonical one-shot capsule height (same 26 pt track as the pills).
 pub const HEIGHT: f64 = 26.0;
@@ -34,11 +34,11 @@ mod appkit {
     use super::{Tone, HEIGHT};
     use crate::ui::chrome::Rect;
     use crate::ui::style::{self, Weight};
-    use crate::ui::theme::PopupColors;
+    use crate::ui::theme::{PopupColors, Rgba};
     use objc2::rc::{Retained, Weak};
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
-    use objc2_app_kit::{NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView};
+    use objc2_app_kit::{NSEvent, NSFont, NSTrackingArea, NSTrackingAreaOptions, NSView};
     use objc2_foundation::NSObjectProtocol;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -49,6 +49,69 @@ mod appkit {
 
     /// Chip width allowance on top of the title text (7 pt/side + breathing).
     const SIDE_PAD: f64 = 14.0;
+
+    /// The canonical capsule chrome — the two one-shot dialects (accent /
+    /// neutral outline) plus the filled `toggled` chip — returning the text
+    /// colour that pairs with what it drew. Shared by [`OutlineButton`]'s
+    /// own drawing and by hand-drawn strips (the Files toolbar) so the
+    /// geometry and state language cannot drift per surface.
+    pub fn draw_chrome(
+        r: Rect,
+        c: &PopupColors,
+        tone: Tone,
+        toggled: bool,
+        enabled: bool,
+        hover: bool,
+        pressed: bool,
+    ) -> Rgba {
+        let hot = hover || pressed;
+        if toggled {
+            // Toggle ON: the selected-chip fill (press darkens it), same
+            // language as the `capsule_chip` pills.
+            style::capsule_track(r, c);
+            style::capsule_chip(r.inset_by(3.0, 3.0), c, true, enabled && pressed);
+            return if enabled { c.text } else { c.dim.with_alpha(0.6) };
+        }
+        match tone {
+            Tone::Accent => {
+                style::capsule_outline(r, c, hot && enabled);
+                if enabled {
+                    c.accent
+                } else {
+                    c.dim.with_alpha(0.6)
+                }
+            }
+            Tone::Neutral => {
+                style::stroke_rounded(
+                    r,
+                    r.height / 2.0,
+                    1.0,
+                    c.text.with_alpha(if enabled { 0.25 } else { 0.12 }),
+                );
+                if enabled && pressed {
+                    style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.14));
+                } else if enabled && hover {
+                    style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.08));
+                }
+                if enabled {
+                    c.text.with_alpha(0.85)
+                } else {
+                    c.dim.with_alpha(0.6)
+                }
+            }
+        }
+    }
+
+    /// Capsule width for content at font `f`: the title + [`SIDE_PAD`] per
+    /// side, plus the strip allowances for a leading SF symbol (12 pt + the
+    /// 4 pt gap) and a trailing chevron (12 pt). [`OutlineButton::width_for`]
+    /// is the title-only case of this.
+    pub fn capsule_width(f: &NSFont, title: &str, has_sym: bool, has_chev: bool) -> f64 {
+        let tw = if title.is_empty() { 0.0 } else { style::text_size(title, f).0.ceil() };
+        let sym = if has_sym { 12.0 + if title.is_empty() { 0.0 } else { 4.0 } } else { 0.0 };
+        let chev = if has_chev { 12.0 } else { 0.0 };
+        (tw + sym + chev + 2.0 * SIDE_PAD).ceil()
+    }
 
     pub struct OutlineButtonIvars {
         colors: Cell<PopupColors>,
@@ -90,44 +153,7 @@ mod appkit {
                 let r = Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height);
                 let f = style::system_font(12.5, Weight::Semibold);
                 let (enabled, hov, pres) = (iv.enabled.get(), iv.hover.get(), iv.pressed.get());
-                let on = hov || pres;
-                if iv.on.get() {
-                    // Toggle ON: the selected-chip fill (press darkens it),
-                    // same language as `capsule_chip` pills.
-                    style::capsule_track(r, &c);
-                    style::capsule_chip(
-                        r.inset_by(3.0, 3.0),
-                        &c,
-                        true,
-                        enabled && pres,
-                    );
-                    let fg = if enabled { c.text } else { c.dim.with_alpha(0.6) };
-                    style::draw_text_centered(&iv.title.borrow(), r, &f, fg);
-                    return;
-                }
-                let fg = match iv.tone.get() {
-                    Tone::Accent => {
-                        style::capsule_outline(r, &c, on && enabled);
-                        if enabled {
-                            c.accent
-                        } else {
-                            c.dim.with_alpha(0.6)
-                        }
-                    }
-                    Tone::Neutral => {
-                        style::stroke_rounded(r, r.height / 2.0, 1.0, c.text.with_alpha(if enabled { 0.25 } else { 0.12 }));
-                        if enabled && pres {
-                            style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.14));
-                        } else if enabled && hov {
-                            style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.08));
-                        }
-                        if enabled {
-                            c.text.with_alpha(0.85)
-                        } else {
-                            c.dim.with_alpha(0.6)
-                        }
-                    }
-                };
+                let fg = draw_chrome(r, &c, iv.tone.get(), iv.on.get(), enabled, hov, pres);
                 style::draw_text_centered(&iv.title.borrow(), r, &f, fg);
             }
 
@@ -262,7 +288,7 @@ mod appkit {
         /// pair this with [`HEIGHT`].
         pub fn width_for(title: &str) -> f64 {
             let f = style::system_font(12.5, Weight::Semibold);
-            style::text_size(title, &f).0.ceil() + 2.0 * SIDE_PAD
+            capsule_width(&f, title, false, false)
         }
 
         pub fn set_colors(&self, c: PopupColors) {

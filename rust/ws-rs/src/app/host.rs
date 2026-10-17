@@ -153,6 +153,15 @@ pub enum UiCommand {
     JiraTab(crate::views::jira_view::JiraSurface),
     /// `do:sidebar-width:<view>:<px>` — resize a view's left pane on main.
     SidebarWidth(SlotView, f64),
+    /// `do:inspector-width:jira:<px>` — resize the Jira ticket panel (the
+    /// only right pane) on main.
+    InspectorWidth(f64),
+    /// `do:jira-inspector:show|hide|toggle` — the ticket panel's shown /
+    /// rail state (`None` toggles).
+    JiraInspector(Option<bool>),
+    /// `do:rail:<view>:on|off` / Ctrl+B B — collapse / expand the view's
+    /// left sidebar rail (every `SidebarView`-backed pane).
+    SidebarRail(SlotView, bool),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -546,6 +555,26 @@ impl ControllerInner {
                 if let Some(obj) = entry.as_object_mut() {
                     obj.entry("sidebarWidth".to_string())
                         .or_insert_with(|| json!(pane_sidebar_width(v.raw())));
+                }
+            }
+            // Jira's right pane (the ticket inspector): its width and the
+            // collapsed-rail state, from config + persisted settings live.
+            if v.raw() == "jira" {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.entry("inspectorWidth".to_string())
+                        .or_insert_with(|| json!(pane_inspector_width()));
+                    obj.entry("inspectorRail".to_string())
+                        .or_insert_with(|| json!(crate::platform::get_bool("jira.inspectorRail")));
+                }
+            }
+            // The collapse-to-rail state of the left sidebar (`do:rail:*`,
+            // Ctrl+B B). The views persist through the same
+            // `sidebarRail.<view>` key their toggle button uses, so the
+            // persisted value always mirrors the live one.
+            if RAIL_VIEWS.contains(&v.raw()) {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.entry("rail".to_string())
+                        .or_insert_with(|| json!(crate::ui::sidebar::rail_default(v.raw())));
                 }
             }
             if let (Some(dst), Some(src)) = (entry.as_object_mut(), m.state.as_object()) {
@@ -1830,6 +1859,76 @@ impl SwitcherController {
                 "max": max,
             }));
         }
+        if let Some(rest) = action.strip_prefix("inspector-width:") {
+            // The right-pane mirror of `sidebar-width`: only Jira has one.
+            let (view, val) = match rest.split_once(':') {
+                Some((v, x)) => (v, Some(x)),
+                None => (rest, None),
+            };
+            if view != "jira" {
+                return Some(json!({ "error": format!("no resizable inspector on '{view}'") }));
+            }
+            let (min, max) = pane_inspector_bounds();
+            let width = match val {
+                None => pane_inspector_width(),
+                Some(x) => {
+                    let Ok(raw) = x.parse::<f64>() else {
+                        return Some(json!({ "error": format!("'{x}' is not a number") }));
+                    };
+                    let w = crate::ui::pane_divider::clamp_width(raw, min, max);
+                    crate::app::config::save_config_value(view, "inspector-width", &fmt_width(w));
+                    self.inner.lock().unwrap().ui_push(UiCommand::InspectorWidth(w));
+                    w
+                }
+            };
+            return Some(json!({
+                "view": view,
+                "inspectorWidth": width,
+                "min": min,
+                "max": max,
+            }));
+        }
+        if let Some(rest) = action.strip_prefix("jira-inspector:") {
+            // Show / hide / toggle the Jira ticket panel (same as ⌘I; the
+            // rail state persists like the sidebar's).
+            let on = match rest {
+                "show" => Some(true),
+                "hide" => Some(false),
+                "toggle" => None,
+                _ => return Some(json!({ "error": format!("jira-inspector: <show|hide|toggle>, got '{rest}'") })),
+            };
+            self.inner.lock().unwrap().ui_push(UiCommand::JiraInspector(on));
+            return None;
+        }
+        if let Some(rest) = action.strip_prefix("rail:") {
+            // `do:rail:<view>[:on|off|toggle]` — the Ctrl+B B command:
+            // collapse / expand the view's left sidebar. `rail` true =
+            // collapsed to the icon rail. Persisted through the same
+            // `sidebarRail.<view>` key the views restore from, so the
+            // state below reads back live without AppKit.
+            let (view, val) = match rest.split_once(':') {
+                Some((v, m)) => (v, Some(m)),
+                None => (rest, None),
+            };
+            if !RAIL_VIEWS.contains(&view) {
+                return Some(json!({ "error": format!("no sidebar rail on '{view}'") }));
+            }
+            let cur = crate::ui::sidebar::rail_default(view);
+            let Some(m) = val else {
+                return Some(json!({ "view": view, "rail": cur }));
+            };
+            let on = match m {
+                "on" => true,
+                "off" => false,
+                "toggle" => !cur,
+                m => return Some(json!({ "error": format!("rail: <on|off|toggle>, got '{m}'") })),
+            };
+            crate::ui::sidebar::set_rail_default(view, on);
+            if let Some(sv) = SlotView::from_raw(view) {
+                self.inner.lock().unwrap().ui_push(UiCommand::SidebarRail(sv, on));
+            }
+            return Some(json!({ "view": view, "rail": on }));
+        }
         if let Some(spec) = action.strip_prefix("key:") {
             if spec.is_empty() {
                 return Some(json!({ "error": "key:<spec>" }));
@@ -2533,6 +2632,11 @@ fn strip_comment(v: &str) -> &str {
 /// The four views whose left pane is resizable (`do:sidebar-width:*`).
 const SIDEBAR_VIEWS: [&str; 4] = ["notes", "jira", "confluence", "compare"];
 
+/// The views whose left column is a `SidebarView` with a collapse-to-rail
+/// toggle (`do:rail:*`, Ctrl+B B). Files and AI ride along: fixed-width
+/// sidebars, but the same rail.
+const RAIL_VIEWS: [&str; 6] = ["notes", "files", "jira", "confluence", "ai", "compare"];
+
 /// The `[view] sidebar-width` fallback when unset.
 fn pane_sidebar_default(view: &str) -> f64 {
     match view {
@@ -2557,6 +2661,56 @@ fn divider_range_from(
         .and_then(|v| v.parse().ok())
         .unwrap_or(max_default);
     crate::ui::pane_divider::DividerRange::new(min, max)
+}
+
+/// The Jira ticket panel's drag range (`[jira] inspector-min-width` /
+/// `inspector-max-width`), the right-pane mirror of `divider_range_from`.
+#[cfg(target_os = "macos")]
+fn inspector_range_from(vars: &HashMap<String, String>) -> crate::ui::pane_divider::DividerRange {
+    let min = vars
+        .get("inspector-min-width")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(INSPECTOR_MIN_DEFAULT);
+    let max = vars
+        .get("inspector-max-width")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(INSPECTOR_MAX_DEFAULT);
+    crate::ui::pane_divider::DividerRange::new(min, max)
+}
+
+/// `[jira] inspector-width` fallbacks: `inspector-min/max-width` defaults.
+const INSPECTOR_MIN_DEFAULT: f64 = 180.0;
+const INSPECTOR_MAX_DEFAULT: f64 = 560.0;
+const INSPECTOR_WIDTH_DEFAULT: f64 = 264.0;
+
+/// The `[jira] inspector-width` bounds, from config (`do:inspector-width:*`).
+fn pane_inspector_bounds() -> (f64, f64) {
+    let text = crate::app::config::read_config_text().unwrap_or_default();
+    let sections = parse_sections(&text);
+    let vars = sections.get("jira");
+    let min = vars
+        .and_then(|m| m.get("inspector-min-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(INSPECTOR_MIN_DEFAULT);
+    let max = vars
+        .and_then(|m| m.get("inspector-max-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(INSPECTOR_MAX_DEFAULT);
+    let r = crate::ui::pane_divider::DividerRange::new(min, max);
+    (r.min, r.max)
+}
+
+/// The `[jira] inspector-width` value, from config (clamped to its bounds).
+fn pane_inspector_width() -> f64 {
+    let text = crate::app::config::read_config_text().unwrap_or_default();
+    let sections = parse_sections(&text);
+    let w = sections
+        .get("jira")
+        .and_then(|m| m.get("inspector-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(INSPECTOR_WIDTH_DEFAULT);
+    let (min, max) = pane_inspector_bounds();
+    crate::ui::pane_divider::clamp_width(w, min, max)
 }
 
 /// The `[view] sidebar-min-width` / `-max-width` range, from config.
@@ -4124,6 +4278,13 @@ mod daemon_ui {
                             }
                         }
                         UiCommand::SidebarWidth(v, w) => self.apply_sidebar_width(v, w),
+                        UiCommand::InspectorWidth(w) => {
+                            if let Some(v) = self.jira_view() {
+                                v.set_inspector_width(w);
+                            }
+                        }
+                        UiCommand::JiraInspector(on) => self.jira_toggle_inspector(on),
+                        UiCommand::SidebarRail(v, on) => self.apply_rail(v, on),
                     }
                 }
             }
@@ -8872,6 +9033,13 @@ mod daemon_ui {
                 .and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone()))
         }
 
+        /// Toggle / set the ticket panel (⌘I, its collapse button, and
+        /// `do:jira-inspector:*`). `None` flips; the rail state persists so
+        /// a rebuild restores it, like the sidebar's collapse key.
+        fn jira_toggle_inspector(&self, on: Option<bool>) {
+            self.jira_surface(|l| l.set_inspector_shown(on));
+        }
+
         /// `UiCommand::JiraTab`: switch the live Jira view's surface and, on
         /// Config, read `jira_poll.py --describe`.
         fn apply_jira_tab(&self, tab: crate::views::jira_view::JiraSurface) {
@@ -9087,15 +9255,21 @@ mod daemon_ui {
             };
             let range = super::divider_range_from(&section, 140.0, 480.0);
             let sidebar_w = range.clamp(section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(168.0));
-            let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(264.0);
+            let insp_range = super::inspector_range_from(&section);
+            let insp_w = insp_range.clamp(
+                section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(264.0),
+            );
             let mut list = JiraList::new(section, paths);
             // `start()`'s "the last one shown": persist across rebuilds so
             // the window reopens where the user left it, not on whatever
             // JSON file sorts first.
             let last = crate::platform::get_string("jira.lastTab");
             list.start(last.as_deref().filter(|s| !s.is_empty()));
+            // The ticket panel's collapsed rail persists like the sidebar's
+            // (`jira_toggle_inspector` writes it).
+            list.inspector = !crate::platform::get_bool("jira.inspectorRail");
             let colors = crate::ui::theme::section_colors("jira");
-            let view = JiraView::new(mtm, colors, sidebar_w, range, insp_w);
+            let view = JiraView::new(mtm, colors, sidebar_w, range, insp_w, insp_range);
             view.apply(list.snapshot());
             // Restore the surface the controller last selected (`views.jira.tab`).
             let tab = self.ivars().controller.jira_tab();
@@ -10280,6 +10454,9 @@ mod daemon_ui {
                         }
                     });
                 }
+                E::InspectorToggle => {
+                    self.jira_toggle_inspector(None);
+                }
                 E::Sidebar(SidebarEvent::Rail(_)) => {
                     let st = self.ivars().state.borrow();
                     if let Some((_, v)) = st.as_ref().and_then(|s| s.jira.as_ref()) {
@@ -10638,10 +10815,7 @@ mod daemon_ui {
             let plain = !key.cmd && !key.ctrl && !key.opt;
             match key.key_code {
                 34 if key.cmd && !key.ctrl => {
-                    self.jira_surface(|l| l.inspector = !l.inspector);
-                    if let Some((_, v)) = self.ivars().state.borrow().as_ref().and_then(|s| s.jira.as_ref()) {
-                        v.layout_panes();
-                    }
+                    self.jira_toggle_inspector(None);
                     true
                 }
                 3 if key.cmd && !key.ctrl && !key.shift => {
@@ -12121,9 +12295,63 @@ mod daemon_ui {
 
         // -- notes rail / tabs / find / commit / open-path ---------------------
 
+        /// Ctrl+B B / the ToggleSidebarRail key: flip the CURRENT view's
+        /// left-pane rail. Every `SidebarView`-backed pane supports the
+        /// collapse (its own toggle button persists through the same key);
+        /// the old port only wired notes here.
         fn route_rail_toggle(&self) -> bool {
-            self.notes_surface(|s| s.toggle_rail()).is_some()
+            let Some(v) = self.ivars().controller.current() else {
+                return false;
+            };
+            if !super::RAIL_VIEWS.contains(&v.raw()) {
+                return false;
+            }
+            let on = !crate::ui::sidebar::rail_default(v.raw());
+            // Persist first: the live view re-reads the same key through
+            // `set_collapsed`, and a view that isn't built yet restores it
+            // lazily on next `content_for`.
+            crate::ui::sidebar::set_rail_default(v.raw(), on);
+            self.apply_rail(v, on);
+            true
         }
+
+        /// Apply a rail (collapse-to-icons) state to one view's sidebar:
+        /// mirror of each view's own `SidebarEvent::Rail` handling (the
+        /// sidebar flipped itself; the owner re-lays-out).
+        fn apply_rail(&self, v: SlotView, on: bool) {
+            match v {
+                SlotView::Notes => {
+                    self.notes_surface(|s| s.set_rail(on));
+                }
+                SlotView::Files => {
+                    self.files_surface(|b| {
+                        if let Some(view) = &b.view {
+                            view.set_rail(on);
+                        }
+                    });
+                }
+                SlotView::Jira => {
+                    if let Some(view) = self.jira_view() {
+                        view.set_rail(on);
+                    }
+                }
+                SlotView::Confluence => {
+                    self.conf_surface(|cs| cs.view.set_rail(on));
+                }
+                SlotView::Ai => {
+                    self.ai_surface(|a| a.view.set_rail(on));
+                }
+                SlotView::Compare => {
+                    let st = self.ivars().state.borrow();
+                    if let Some(s) = st.as_ref().and_then(|s| s.compare.as_ref()) {
+                        s.chrome().set_rail(on);
+                        s.invalidate();
+                    }
+                }
+                _ => {}
+            }
+        }
+
 
         fn route_cycle_tabs(&self, dir: i32) -> bool {
             self.notes_surface(|s| s.list_move_wrap(dir as i64)).is_some()
@@ -12239,6 +12467,8 @@ mod daemon_ui {
                         let mut v = list.view_state();
                         if let Some(o) = v.as_object_mut() {
                             o.insert("sidebarWidth".into(), json!(view.sidebar_width()));
+                            o.insert("inspectorWidth".into(), json!(view.inspector_width()));
+                            o.insert("inspectorRail".into(), json!(!list.inspector));
                         }
                         jira_state = Some(v);
                     }
@@ -12297,6 +12527,30 @@ mod daemon_ui {
                     ui.apply_sidebar_drag(view, drag);
                 }
             }));
+        }
+
+        /// Wire the Jira ticket panel's divider (the app's only right pane).
+        fn wire_inspector_divider(&self, view: &crate::views::jira_view::JiraView) {
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            view.inspector_divider().set_on_drag(Box::new(move |drag| {
+                if let Some(ui) = weak.load() {
+                    ui.apply_inspector_drag(drag);
+                }
+            }));
+        }
+
+        /// An inspector divider drag: re-lay-out live, persist on release.
+        fn apply_inspector_drag(&self, drag: crate::ui::pane_divider::DividerDrag) {
+            if let Some(v) = self.jira_view() {
+                v.set_inspector_width(drag.width);
+            }
+            if drag.done {
+                crate::app::config::save_config_value(
+                    "jira",
+                    "inspector-width",
+                    &super::fmt_width(drag.width),
+                );
+            }
         }
 
         /// A divider drag: re-lay-out live, persist on release.
@@ -12482,6 +12736,7 @@ mod daemon_ui {
                             let (list, view) = self.build_jira(mtm);
                             let root: Retained<NSView> = Retained::into_super(view.clone());
                             self.wire_sidebar_divider(SlotView::Jira, &view.divider());
+                            self.wire_inspector_divider(&view);
                             st.jira = Some((list, view));
                             root
                         } else if matches!(v, SlotView::Compare | SlotView::CompareText) {
@@ -13296,6 +13551,18 @@ mod tests {
         h.call_default("ping", json!({})).is_ok()
     }
 
+    /// `WS_COMMANDS_CONF` is process-global: the tests that point it at a
+    /// throwaway file (jira-poll, sidebar-width, inspector-width) must not
+    /// run concurrently, or each sees the other's config. Hold this lock for
+    /// the whole test body.
+    static CONF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take `CONF_ENV_LOCK`, surviving a poisoned mutex (a panicking test
+    /// leaves no inconsistent state — the lock guards nothing but ordering).
+    fn lock_conf_env() -> std::sync::MutexGuard<'static, ()> {
+        CONF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     const REQUIRED: [&str; 19] = [
         "view",
         "visible",
@@ -14083,6 +14350,7 @@ enabled = true
         // `jira-poll-off` persists `enabled = false`; a headless `jira-poll-on`
         // (no UI queue) must re-enable directly, so off-then-on round-trips.
         // Point the config at a throwaway file and keep launchd untouched.
+        let _lock = lock_conf_env();
         let dir = std::env::temp_dir().join(format!("ws-host-jira-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let conf = dir.join("commands.toml");
@@ -14125,6 +14393,7 @@ enabled = true
     fn sidebar_width_verb_reads_sets_and_clamps() {
         // `do:sidebar-width:<view>[:<px>]` reads / persists the left-pane
         // width. Point the config at a throwaway file.
+        let _lock = lock_conf_env();
         let dir = std::env::temp_dir().join(format!("ws-host-sidebar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let conf = dir.join("commands.toml");
@@ -14161,6 +14430,75 @@ enabled = true
             assert!(text.contains("sidebar-width = 140"), "persisted width: {text}");
             // The state field reports the persisted width (headless, from config).
             assert_eq!(c.state_json()["views"]["jira"]["sidebarWidth"], json!(140.0));
+        }
+
+        match old_conf {
+            Some(v) => std::env::set_var("WS_COMMANDS_CONF", v),
+            None => std::env::remove_var("WS_COMMANDS_CONF"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rail_verb_reads_and_errors() {
+        // `do:rail:<view>[:on|off|toggle]` — the Ctrl+B B command on the
+        // socket (the rail toggle was notes-only before; every view with a
+        // `SidebarView` now has one). Read + error paths only: a toggle
+        // writes the owner's real NSUserDefaults (`sidebarRail.<view>`),
+        // which tests stay out of (see settings.rs's ignored round-trip).
+        let c = controller();
+        for v in ["notes", "files", "jira", "confluence", "ai", "compare"] {
+            let r = c.do_action(&format!("rail:{v}")).unwrap();
+            assert_eq!(r["view"], json!(v));
+            assert!(r["rail"].is_boolean(), "read on '{v}': {r}");
+        }
+        // Views without a sidebar error; so do bad modes.
+        assert!(c.do_action("rail:detail").unwrap()["error"].is_string());
+        assert!(c.do_action("rail:jira:sideways").unwrap()["error"].is_string());
+    }
+
+    #[test]
+    fn inspector_width_verb_reads_sets_and_clamps() {
+        // `do:inspector-width:jira[:<px>]` reads / persists the ticket
+        // panel's width (the right-pane mirror of the sidebar verb).
+        let _lock = lock_conf_env();
+        let dir = std::env::temp_dir().join(format!("ws-host-inspector-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("commands.toml");
+        std::fs::write(
+            &conf,
+            "[jira]\ninspector-width = 264\ninspector-min-width = 180\ninspector-max-width = 560\n",
+        )
+        .unwrap();
+
+        let old_conf = std::env::var_os("WS_COMMANDS_CONF");
+        std::env::set_var("WS_COMMANDS_CONF", &conf);
+        let codec = helper_ready();
+
+        let c = controller();
+        // Read: the configured width plus its range.
+        let v = c.do_action("inspector-width:jira").unwrap();
+        assert_eq!(v["view"], json!("jira"));
+        assert_eq!(v["inspectorWidth"], json!(264.0));
+        assert_eq!(v["min"], json!(180.0));
+        assert_eq!(v["max"], json!(560.0));
+        // Set above the max: clamps (and persists when the codec is available).
+        let v = c.do_action("inspector-width:jira:9999").unwrap();
+        assert_eq!(v["inspectorWidth"], json!(560.0));
+        // Set below the min: clamps up.
+        let v = c.do_action("inspector-width:jira:10").unwrap();
+        assert_eq!(v["inspectorWidth"], json!(180.0));
+        // Only Jira has a right pane; non-numbers error.
+        assert!(c.do_action("inspector-width:notes").unwrap()["error"].is_string());
+        assert!(c.do_action("inspector-width:jira:abc").unwrap()["error"].is_string());
+        // `jira-inspector:show|hide|toggle` pushes the state change (no
+        // direct reply); a bad verb is an error.
+        assert!(c.do_action("jira-inspector:bogus").unwrap()["error"].is_string());
+        if codec {
+            let text = std::fs::read_to_string(&conf).unwrap();
+            assert!(text.contains("inspector-width = 180"), "persisted width: {text}");
+            // The state field reports the persisted width (headless, from config).
+            assert_eq!(c.state_json()["views"]["jira"]["inspectorWidth"], json!(180.0));
         }
 
         match old_conf {

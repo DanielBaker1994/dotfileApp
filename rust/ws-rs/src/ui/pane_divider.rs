@@ -1,5 +1,6 @@
-//! A thin draggable vertical divider between a left pane (sidebar / rail /
-//! tree) and the content to its right.
+//! A thin draggable vertical divider between two panes — most often the left
+//! pane (sidebar / rail / tree) and the content to its right, but also a right
+//! pane (Jira's ticket inspector) via [`PaneDividerView::set_right_pane`].
 //!
 //! The owner places one at the divider x (a few points wide, full height),
 //! gives it the pane's `[min, max]` width range and the current width, and
@@ -14,6 +15,17 @@ pub fn clamp_width(width: f64, min: f64, max: f64) -> f64 {
     let min = min.max(0.0);
     let max = max.max(min);
     width.max(min).min(max)
+}
+
+/// The pane width a drag wants: a left pane grows rightward with the pointer,
+/// a right pane (`right_pane`) grows leftward — the delta is mirrored.
+pub fn dragged_width(start_width: f64, pointer_x: f64, start_x: f64, right_pane: bool) -> f64 {
+    let dx = pointer_x - start_x;
+    if right_pane {
+        start_width - dx
+    } else {
+        start_width + dx
+    }
 }
 
 /// The drag bounds of one pane (`sidebar-min-width` / `sidebar-max-width`).
@@ -63,6 +75,8 @@ mod appkit {
         max: Cell<f64>,
         /// The pane width the owner last laid out (read at mouse-down).
         current: Cell<f64>,
+        /// `true` for a RIGHT pane: the drag mirrors (pointer left grows it).
+        right: Cell<bool>,
         /// The pointer x (window coords) and pane width at mouse-down.
         start_x: Cell<f64>,
         start_width: Cell<f64>,
@@ -112,7 +126,7 @@ mod appkit {
                     return;
                 }
                 let w = clamp_width(
-                    iv.start_width.get() + (e.locationInWindow().x - iv.start_x.get()),
+                    dragged_width(iv.start_width.get(), e.locationInWindow().x, iv.start_x.get(), iv.right.get()),
                     iv.min.get(),
                     iv.max.get(),
                 );
@@ -130,7 +144,7 @@ mod appkit {
                 iv.dragging.set(false);
                 NSCursor::arrowCursor().set();
                 let w = clamp_width(
-                    iv.start_width.get() + (e.locationInWindow().x - iv.start_x.get()),
+                    dragged_width(iv.start_width.get(), e.locationInWindow().x, iv.start_x.get(), iv.right.get()),
                     iv.min.get(),
                     iv.max.get(),
                 );
@@ -157,6 +171,7 @@ mod appkit {
                 min: Cell::new(range.min),
                 max: Cell::new(range.max),
                 current: Cell::new(range.min),
+                right: Cell::new(false),
                 start_x: Cell::new(0.0),
                 start_width: Cell::new(range.min),
                 dragging: Cell::new(false),
@@ -169,6 +184,12 @@ mod appkit {
         /// Install (or replace) the drag sink.
         pub fn set_on_drag(&self, cb: Box<dyn Fn(DividerDrag)>) {
             *self.ivars().sink.borrow_mut() = Some(Rc::from(cb));
+        }
+
+        /// Mark this divider as the edge of a RIGHT pane: dragging the pointer
+        /// LEFT grows the pane (the delta is mirrored vs. a left pane).
+        pub fn set_right_pane(&self, on: bool) {
+            self.ivars().right.set(on);
         }
 
         pub fn clamp(&self, width: f64) -> f64 {
@@ -211,6 +232,20 @@ mod tests {
         assert_eq!(clamp_width(200.0, 140.0, 480.0), 200.0);
         assert_eq!(clamp_width(10.0, 140.0, 480.0), 140.0);
         assert_eq!(clamp_width(900.0, 140.0, 480.0), 480.0);
+    }
+
+    #[test]
+    fn dragged_width_grows_with_the_pointer_for_left_panes() {
+        // Pointer moves right: the left pane gets wider by the same delta.
+        assert_eq!(dragged_width(300.0, 360.0, 300.0, false), 360.0);
+        assert_eq!(dragged_width(300.0, 240.0, 300.0, false), 240.0);
+    }
+
+    #[test]
+    fn dragged_width_mirrors_for_right_panes() {
+        // Pointer moves LEFT: the right pane (Jira's ticket panel) grows.
+        assert_eq!(dragged_width(300.0, 240.0, 300.0, true), 360.0);
+        assert_eq!(dragged_width(300.0, 360.0, 300.0, true), 240.0);
     }
 
     #[test]

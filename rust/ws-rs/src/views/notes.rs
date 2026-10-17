@@ -255,6 +255,9 @@ fn helper_call(method: &str, params: Value, timeout_secs: u64) -> Option<Value> 
             Duration::from_secs(timeout_secs),
             Duration::from_secs(5),
         )
+        // Don't drop the reason: helper failures surfaced as one opaque
+        // "python helper" error in the prose PDF path (PLAN-prose-popout H3).
+        .inspect_err(|e| crate::app::logging::ws_log(&format!("helper {method} failed: {e}")))
         .ok()
 }
 
@@ -1954,6 +1957,14 @@ impl ProseWindow {
             let _ = opts;
         }
     }
+
+    /// The floating window [`Self::show`] built, taken once — the `prose`
+    /// child scopes its will-close exit observer to exactly this window
+    /// (PLAN-prose-popout H1). `None` when nothing was shown.
+    #[cfg(target_os = "macos")]
+    pub fn take_close_notifier() -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        macos::take_close_notifier()
+    }
 }
 
 /// `ProseProcess.launch` — spawn `kitchen-sink prose …` (or fall back to the
@@ -2897,6 +2908,24 @@ mod macos {
         static LIVE_WINDOWS: RefCell<Vec<ProseLive>> = const { RefCell::new(Vec::new()) };
         static PROSE_CHILDREN: RefCell<HashMap<String, std::process::Child>>
             = RefCell::new(HashMap::new());
+        /// The window [`show`] last built: the `prose` child's exit observer
+        /// is scoped to exactly this window, so dismissing the context menu
+        /// or any auxiliary window cannot end the child (PLAN-prose-popout H1).
+        static CLOSE_TARGET: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    }
+
+    /// Taken once by the `prose` child entry (main.rs). `LIVE_WINDOWS` keeps
+    /// the window itself alive regardless.
+    pub fn take_close_notifier() -> Option<Retained<NSWindow>> {
+        CLOSE_TARGET
+            .with(|c| c.borrow_mut().take())
+            .or_else(|| {
+                LIVE_WINDOWS.with(|v| {
+                    v.borrow()
+                        .first()
+                        .map(|l| Retained::into_super(l.window.clone()))
+                })
+            })
     }
 
     pub struct ProseTitleStripIvars {}
@@ -3201,6 +3230,9 @@ mod macos {
             }
             false
         });
+        // Remember the window for the `prose` child's scoped exit observer
+        // before it moves into `LIVE_WINDOWS` (PLAN-prose-popout H1).
+        CLOSE_TARGET.with(|c| *c.borrow_mut() = Some(Retained::into_super(window.clone())));
         LIVE_WINDOWS.with(|v| {
             v.borrow_mut().push(ProseLive {
                 path: opts.path.clone(),
@@ -3211,9 +3243,23 @@ mod macos {
         });
     }
 
-    /// `ProseProcess.launch` — spawn `<current_exe> prose …` (stdin/out/err
-    /// null, `PYTHONDONTWRITEBYTECODE=1`), tracking the child per path; a spawn
-    /// failure falls back to the in-process [`ProseWindow::show`].
+    /// Today's `logs/YYYY_MM_DD/prose.log`, opened append for a pop-out
+    /// child's stderr (`None` on any failure — the child then keeps the old
+    /// `/dev/null` sink).
+    fn prose_child_stderr_log() -> Option<std::fs::File> {
+        let paths = crate::app::paths::Paths::from_env();
+        let _ = std::fs::create_dir_all(paths.logs_dir());
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths.log_path("prose"))
+            .ok()
+    }
+
+    /// `ProseProcess.launch` — spawn `<current_exe> prose …` (stdin/out
+    /// null, stderr on `prose.log`, `PYTHONDONTWRITEBYTECODE=1`), tracking
+    /// the child per path; a spawn failure falls back to the in-process
+    /// [`ProseWindow::show`].
     pub fn launch(path: &str) {
         let opts = ProseLaunchOptions::for_path(path);
         if child_running(path) {
@@ -3232,7 +3278,14 @@ mod macos {
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        // A child panic used to vanish into `/dev/null` (PLAN-prose-popout
+        // §0): stderr appends to `logs/YYYY_MM_DD/prose.log` beside the
+        // daemon log `ws_log` writes to, best effort.
+        cmd.stderr(
+            prose_child_stderr_log()
+                .map(std::process::Stdio::from)
+                .unwrap_or_else(std::process::Stdio::null),
+        );
         match cmd.spawn() {
             Ok(child) => {
                 PROSE_CHILDREN.with(|m| {
@@ -4573,10 +4626,16 @@ mod macos {
             self.selected_path().and_then(|p| std::fs::read_to_string(p).ok())
         }
 
-        /// `PopupTabsBar.toggleRail` — collapse / expand the notes sidebar.
-        pub fn toggle_rail(&mut self) {
-            self.model.sidebar.collapsed = !self.model.sidebar.collapsed;
-            self.sidebar.set_collapsed(self.model.sidebar.collapsed);
+        /// Set the rail (collapse-to-icons) state from the host
+        /// (`PopupTabsBar.toggleRail`'s destination form): Ctrl+B B and
+        /// `do:rail:notes` persist `sidebarRail.notes` first, then land
+        /// here, so the model and the view flip together.
+        pub fn set_rail(&mut self, on: bool) {
+            if self.model.sidebar.collapsed == on {
+                return;
+            }
+            self.model.sidebar.collapsed = on;
+            self.sidebar.set_collapsed(on);
             self.apply_sidebar_width();
         }
 

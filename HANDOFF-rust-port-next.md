@@ -6,6 +6,14 @@ is pushed. Read this section, then `AGENTS.md` / `rule.md`.
 `PARITY-shortcuts.md` has per-row tables, but its ❌/🟡 marks predate the last
 two sessions; this section wins.
 
+> **2026-10-17 — prose pop-out (PLAN-prose-popout.md):** the child's unscoped
+> will-close exit observer (H1), NSApp-after-window ordering (H2) and the
+> PDF-export latch/helper-error drops (H3) are fixed; pop-out children log
+> stderr to `logs/YYYY_MM_DD/prose.log` and leave `prose …` breadcrumbs in
+> `daemon.log`; a new `on-window-detected` rule floats `*.md`-titled
+> kitchen-sink windows (Step D). **Uncommitted on main** (owner's WIP files
+> untouched). Owner manual pass + cross-screen check are open — see PLAN §4.
+
 ## Working rules (owner feedback, keep them)
 
 - Run `bin/parity-audit.sh` first (about 30 s, writes `.build/parity-audit.md`).

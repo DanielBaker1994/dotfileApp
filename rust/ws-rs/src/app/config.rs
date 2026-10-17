@@ -1111,6 +1111,8 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("sidebar-min-width", 0.0, 600.0),
     ("sidebar-max-width", 0.0, 600.0),
     ("inspector-width", 0.0, 800.0),
+    ("inspector-min-width", 0.0, 800.0),
+    ("inspector-max-width", 0.0, 800.0),
     ("prose-font-size", 8.0, 48.0),
     ("prose-width", 300.0, 2000.0),
     ("font-size", 6.0, 96.0),

@@ -6,6 +6,22 @@ what a fix probably looks like.
 
 ---
 
+## Prose pop-out: owner verification pending (2026-10-17)
+
+The fixes from `PLAN-prose-popout.md` §4 (scoped will-close observer, NSApp
+ordering, export-latch hardening, `prose.log` stderr, Aerospace `*.md`
+floating rule) are landed but the interactive half could not run: the session
+was locked and "AX sees no windows while the session is locked". Repro the
+§4 "Owner manual pass" once unlocked: right-click rows in a pop-out, PDF
+under `[notes] pdf-path`, child survives menu dismissal, cross-screen drag
+sticks (`aerospace list-windows` → `layout floating`). If the PDF row still
+fails in the child, the `prose …` lines in `daemon.log` + `prose.log` pinpoint
+the stage — the fallback design is Step E: route export through the daemon via
+a new `do:prose-pdf:<path>` hook and have the child's menu row only send the
+socket line and toast locally.
+
+---
+
 ## UI test pass (2026-10-12) — open items
 
 Full write-up, repros and the fixed list: `UI-TEST-FINDINGS.md`.

@@ -6,12 +6,12 @@ Start here if you are a new agent picking up cross-platform work. Keep this file
 macOS is the product; AppKit stays and is untouched by both ports (rule: Unix/macOS bodies are
 never rewritten, other platforms get separate `#[cfg]` bodies).
 
-## Status at a glance (last updated 2026-10-12, after Windows compile-only phase)
+## Status at a glance (last updated 2026-10-17, after the egui mirror pass + Compress-on-Linux fix)
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Compiles | yes (AppKit, default) | **yes** (`bin/linux-check.sh check`, Docker arm64) | **yes** (`bin/windows-check.sh check`, `x86_64-pc-windows-gnu`, cross-check only) |
-| Rust tests | 753 pass / 4 ignored (796 with `--features egui`) | 789 pass / 5 ignored in Docker | **not run** (cannot run on the Mac) |
+| Rust tests | 868 pass / 4 ignored (909 with `--features egui`) | 901 pass / 5 ignored in Docker | **not run** (cannot run on the Mac) |
 | Daemon / socket API | yes | **runs headless in Docker** (`state`, `do:open:files` verified) | **compiles; never executed.** Windows IPC = named pipes via `interprocess`, lock via `fs4` |
 | GUI | AppKit (the real app) | **egui/eframe frontend written, never run on Linux** (see below) | egui frontend **compiles** for Windows (same code as Linux); never shown on a Windows desktop |
 | Real desktop run | daily-driven | **never** (no Linux box available) | **never** (no Windows machine available) |
@@ -22,6 +22,15 @@ never rewritten, other platforms get separate `#[cfg]` bodies).
 - Panes exist for: Files (reference impl), Jira, Confluence, AI, Compare, Notes, Paths, Tools+Setup,
   switcher/palette overlay, toasts, right-click row menus, embedded terminal
   (`alacritty_terminal` 0.26 — `egui_term` has no egui-0.32 release), Notes "edit in nvim" mode.
+- **Mirror pass (2026-10-17):** `frontend_egui/widgets.rs` is the shared style —
+  `section_label` / `badge` / `capsule(_e/_toggle)` / `capsule_accent` (the egui twin of
+  `ui::outline_button`) — and every pane draws its one-shot commands through it. The sidebar
+  collapse-to-rail is mirrored per pane (Notes/Files/Jira/Confluence/AI share the
+  `sidebarRail.<view>` setting; Ctrl+B B, `do:rail:<view>` and the `UiCommand::SidebarRail`
+  drain all route there; egui's rail is the compact expand strip — no SF Symbols). Jira's
+  ticket panel mirrors `inspector-width` + the collapsed rail strip via the shared
+  `JiraList::set_inspector_shown` seam (`jira.inspectorRail`). Still open from this list:
+  `do:sidebar-width` live-apply in egui (panes keep fixed widths; the command logs).
 - **Only verified by:** compiling in Docker, unit tests, and one live run of the egui window on the
   *owner's Mac* (`--features egui` + `WS_FRONTEND=egui`, view switching via the socket worked, no panics).
   **Nobody has seen it on X11/Wayland.** Expect rough edges; it is "functional-first", not pixel parity.

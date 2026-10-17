@@ -24,6 +24,7 @@ use crate::views::ai_view::{AIEvent, AISnapshot, OutRun, StepState};
 
 use super::app::Pane;
 use super::theme::c;
+use super::widgets;
 
 /// The AI pane. Holds the model plus the two pieces of view state `ai_view.rs`
 /// keeps in `AIIvars`/`AIState`: the editable "Your text" buffer and the
@@ -37,6 +38,9 @@ pub struct AiPane {
     /// `egui_commonmark`'s parse cache for the rendered answer (the AppKit
     /// `NSTextView`'s attributed string, kept across frames).
     md: egui_commonmark::CommonMarkCache,
+    /// The sidebar collapse-to-rail state (`SidebarView`'s rail; persisted
+    /// as `sidebarRail.ai`, toggled by Ctrl+B B / `do:rail:ai`).
+    rail: bool,
 }
 
 impl AiPane {
@@ -51,7 +55,7 @@ impl AiPane {
         model.reload_rules(&dir);
         model.render_answer();
         let input = model.input.clone();
-        AiPane { model, input, md: Default::default() }
+        AiPane { model, input, md: Default::default(), rail: crate::ui::sidebar::rail_default("ai") }
     }
 
     /// Draw one frame and apply the events it generated. `colors` are the
@@ -69,11 +73,28 @@ impl AiPane {
         // --- RULES sidebar | right column (`ai_view.rs` `layout_all` /
         // `AIWindow.navPanes`: sidebar, input, answer) ---
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| self.rules_sidebar(ui, &snap, colors, &mut events),
-            );
+            if self.rail {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::RAIL_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if widgets::rail_button(ui, true, colors) {
+                            self.set_rail(false);
+                        }
+                    },
+                );
+            } else {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(widgets::SIDEBAR_W, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.rules_sidebar(ui, &snap, colors, &mut events);
+                        if widgets::rail_button(ui, false, colors) {
+                            self.set_rail(true);
+                        }
+                    },
+                );
+            }
             ui.separator();
             ui.vertical(|ui| {
                 // --- AICommandLine (`ai_view.rs` `draw_command`) ---
@@ -116,11 +137,7 @@ impl AiPane {
         let m = &snap.sidebar;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if !m.section_title.is_empty() {
-                ui.label(
-                    egui::RichText::new(m.section_title.to_uppercase())
-                        .color(c(colors.dim))
-                        .small(),
-                );
+                widgets::section_label(ui, &m.section_title, colors);
             }
             for (i, row) in m.rows.iter().enumerate() {
                 let label = egui::RichText::new(row.title.as_str()).color(c(colors.text));
@@ -283,10 +300,10 @@ impl AiPane {
     ) {
         ui.horizontal(|ui| {
             let run = if snap.running { "Stop" } else { "Run" };
-            if ui.button(run).clicked() {
+            if widgets::capsule_accent(ui, run, colors).clicked() {
                 events.push(AIEvent::Run);
             }
-            if ui.button(snap.copy_title.as_str()).clicked() {
+            if widgets::capsule(ui, snap.copy_title.as_str(), colors).clicked() {
                 events.push(AIEvent::Copy);
             }
             ui.separator();
@@ -388,6 +405,21 @@ fn tone_color(colors: &PopupColors, tone: u8) -> Rgba {
 impl Pane for AiPane {
     fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         AiPane::ui(self, ui, colors);
+    }
+
+    fn has_rail(&self) -> bool {
+        true
+    }
+
+    fn rail(&self) -> bool {
+        self.rail
+    }
+
+    /// Flip the sidebar rail; the pane owns its `sidebarRail.<view>`
+    /// persistence, like the AppKit `SidebarView`.
+    fn set_rail(&mut self, on: bool) {
+        self.rail = on;
+        crate::ui::sidebar::set_rail_default("ai", on);
     }
 
     /// Esc while a run is in flight cancels it (`AIWindow.handleKey`'s `Stop`);
