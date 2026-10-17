@@ -61,6 +61,11 @@ pub struct JiraConfigSettings {
     pub refresh_label: String,
     /// The Config body's section headings + loading / empty lines.
     pub jobs_title: String,
+    /// The jobs table's column headers (`[jira-config] job-col-*`).
+    pub job_col_name_label: String,
+    pub job_col_frequency_label: String,
+    pub job_col_last_run_label: String,
+    pub job_col_status_label: String,
     pub files_title: String,
     pub loading: String,
     pub loading_jobs: String,
@@ -102,6 +107,10 @@ impl Default for JiraConfigSettings {
             stop_label: "Stop Poll".to_string(),
             refresh_label: "Refresh".to_string(),
             jobs_title: "Poll jobs".to_string(),
+            job_col_name_label: "Job name".to_string(),
+            job_col_frequency_label: "Frequency".to_string(),
+            job_col_last_run_label: "Last run".to_string(),
+            job_col_status_label: "Last status".to_string(),
             files_title: "Files".to_string(),
             loading: "Loading…".to_string(),
             loading_jobs: "Loading poll jobs…".to_string(),
@@ -167,6 +176,10 @@ impl JiraConfigSettings {
             stop_label: s("stop-poll-label", &d.stop_label),
             refresh_label: s("refresh-button-label", &d.refresh_label),
             jobs_title: s("poll-jobs-title", &d.jobs_title),
+            job_col_name_label: s("job-col-name-label", &d.job_col_name_label),
+            job_col_frequency_label: s("job-col-frequency-label", &d.job_col_frequency_label),
+            job_col_last_run_label: s("job-col-last-run-label", &d.job_col_last_run_label),
+            job_col_status_label: s("job-col-status-label", &d.job_col_status_label),
             files_title: s("files-title", &d.files_title),
             loading: s("loading", &d.loading),
             loading_jobs: s("loading-jobs", &d.loading_jobs),
@@ -253,6 +266,21 @@ fn job_row(j: &DescribeJob) -> JobRow {
         status: blank(&j.status, "never run"),
         enabled: j.enabled,
     }
+}
+
+/// The row's four table cells, in column order: job name, frequency, last
+/// run (relative to `now`, e.g. "6m ago"; the raw value passes through for
+/// non-timestamps like `never`), last status ("ok (off)" when disabled).
+/// The jobs list draws these as evenly spaced columns under a header row
+/// (`[jira-config] job-col-*-label`).
+pub fn job_row_cells(r: &JobRow, now: i64) -> [String; 4] {
+    let last = fmt_poll_time(&r.last_run, now).unwrap_or_else(|| r.last_run.clone());
+    let status = if r.enabled {
+        r.status.clone()
+    } else {
+        format!("{} (off)", r.status)
+    };
+    [r.name.clone(), format!("every {}", r.interval), last, status]
 }
 
 /// A row's status tone (the `●` bullet + the status word): the same
@@ -564,6 +592,9 @@ mod appkit {
 
     const PAD: f64 = 16.0;
     const ROW_H: f64 = 22.0;
+    /// The jobs table's header band (column names above the evenly spaced
+    /// columns); rows are laid out below it.
+    const HEADER_H: f64 = 18.0;
     const TITLE_H: f64 = 20.0;
     const LINE_H: f64 = 16.0;
     /// The per-job detail pane's row grid (the pane spans the document
@@ -673,19 +704,19 @@ mod appkit {
         }
     }
 
-    /// One row of the jobs list: bullet + name + cadence/last-run meta +
-    /// status, in the traffic-light language of the sidebar's sync dot.
+    /// One row of the jobs table: bullet + the four cells from
+    /// [`job_row_cells`] (name / frequency / last run / status) drawn in
+    /// evenly spaced columns under the header, in the traffic-light language
+    /// of the sidebar's sync dot.
     #[derive(Clone)]
     pub struct JobRowItem {
-        pub name: String,
-        pub meta: String,
-        pub status: String,
+        pub cells: [String; 4],
         pub tone: Rgba,
-        pub off: bool,
     }
 
     pub struct JobListIvars {
         rows: RefCell<Vec<JobRowItem>>,
+        headers: RefCell<[String; 4]>,
         selected: Cell<Option<usize>>,
         hover: Cell<Option<usize>>,
         pressed: Cell<Option<usize>>,
@@ -717,9 +748,36 @@ mod appkit {
                 let b = self.bounds();
                 let rows = iv.rows.borrow();
                 let f = style::system_font(11.5, Weight::Regular);
+                // The table grid: after the bullet, four evenly spaced
+                // columns spanning the row pill; header and rows share it.
+                let grid = chrome::Rect::new(0.0, 0.0, b.size.width, ROW_H).inset_by(4.0, 1.0);
+                let col_x = grid.x + 6.0 + 12.0 + 6.0;
+                let col_w = ((grid.max_x() - 6.0 - col_x) / 4.0).max(40.0);
+                // Header row: the column names (job-col-*), dim + a hairline.
+                let headers = iv.headers.borrow();
+                let hf = style::system_font(10.0, Weight::Semibold);
+                for (i, h) in headers.iter().enumerate() {
+                    if h.is_empty() {
+                        continue;
+                    }
+                    style::draw_text_left(
+                        &h.to_uppercase(),
+                        chrome::Rect::new(col_x + i as f64 * col_w, 0.0, col_w, HEADER_H),
+                        &hf,
+                        c.dim,
+                    );
+                }
+                style::fill_rect(
+                    chrome::Rect::new(col_x, HEADER_H - 1.0, (grid.max_x() - 6.0 - col_x).max(0.0), 1.0),
+                    c.dim.with_alpha(0.35),
+                );
                 for (idx, row) in rows.iter().enumerate() {
-                    let band =
-                        chrome::Rect::new(0.0, idx as f64 * (ROW_H + 2.0), b.size.width, ROW_H);
+                    let band = chrome::Rect::new(
+                        0.0,
+                        HEADER_H + idx as f64 * (ROW_H + 2.0),
+                        b.size.width,
+                        ROW_H,
+                    );
                     let pill = band.inset_by(4.0, 1.0);
                     let sel = iv.selected.get() == Some(idx);
                     let hov = iv.pressed.get() == Some(idx) || (!sel && iv.hover.get() == Some(idx));
@@ -736,34 +794,24 @@ mod appkit {
                             style::button_fill(style::ButtonState::Hover, &c),
                         );
                     }
-                    let mut x = pill.x + 6.0;
-                    x += style::draw_text_left(
+                    style::draw_text_left(
                         "\u{25cf}",
-                        chrome::Rect::new(x, band.y, 12.0, band.height),
-                        &f,
-                        row.tone,
-                    ) + 6.0;
-                    let (sw, _) = style::text_size(&row.status, &f);
-                    let (ow, _) = style::text_size(if row.off { " (off)" } else { "" }, &f);
-                    let avail = (pill.max_x() - 6.0 - x - sw - ow).max(60.0);
-                    x += style::draw_text_left(
-                        &format!("{}  ·  {}  ·  ", row.name, row.meta),
-                        chrome::Rect::new(x, band.y, avail, band.height),
-                        &f,
-                        c.text,
-                    );
-                    x += style::draw_text_left(
-                        &row.status,
-                        chrome::Rect::new(x, band.y, (pill.max_x() - 6.0 - x).max(0.0), band.height),
+                        chrome::Rect::new(pill.x + 6.0, band.y, 12.0, band.height),
                         &f,
                         row.tone,
                     );
-                    if row.off {
+                    for (i, cell) in row.cells.iter().enumerate() {
+                        let color = if i == 3 { row.tone } else { c.text };
                         style::draw_text_left(
-                            " (off)",
-                            chrome::Rect::new(x, band.y, (pill.max_x() - 6.0 - x).max(0.0), band.height),
+                            cell,
+                            chrome::Rect::new(
+                                col_x + i as f64 * col_w,
+                                band.y,
+                                col_w,
+                                band.height,
+                            ),
                             &f,
-                            c.dim,
+                            color,
                         );
                     }
                 }
@@ -820,10 +868,10 @@ mod appkit {
         fn row_at(&self, p: NSPoint) -> Option<usize> {
             let iv = self.ivars();
             let rows = iv.rows.borrow();
-            if rows.is_empty() || p.y < 0.0 {
+            if rows.is_empty() || p.y < HEADER_H {
                 return None;
             }
-            let i = (p.y / (ROW_H + 2.0)).floor() as usize;
+            let i = ((p.y - HEADER_H) / (ROW_H + 2.0)).floor() as usize;
             (i < rows.len()).then_some(i)
         }
 
@@ -860,6 +908,7 @@ mod appkit {
         pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(JobListIvars {
                 rows: RefCell::new(Vec::new()),
+                headers: RefCell::new(Default::default()),
                 selected: Cell::new(None),
                 hover: Cell::new(None),
                 pressed: Cell::new(None),
@@ -872,9 +921,9 @@ mod appkit {
             v
         }
 
-        /// The list's natural height for `n` rows (row pitch + gutters).
+        /// The list's natural height for `n` rows (header band + row pitch).
         pub fn height_for(n: usize) -> f64 {
-            n as f64 * (ROW_H + 2.0)
+            HEADER_H + n as f64 * (ROW_H + 2.0)
         }
 
         pub fn set_colors(&self, c: PopupColors) {
@@ -884,6 +933,12 @@ mod appkit {
 
         pub fn set_on_select(&self, cb: impl Fn(usize) + 'static) {
             *self.ivars().on_select.borrow_mut() = Some(Rc::new(cb));
+        }
+
+        /// The four column titles drawn above the evenly spaced columns.
+        pub fn set_headers(&self, headers: [String; 4]) {
+            *self.ivars().headers.borrow_mut() = headers;
+            self.setNeedsDisplay(true);
         }
 
         pub fn set_data(&self, rows: Vec<JobRowItem>, selected: Option<usize>) {
@@ -1419,7 +1474,7 @@ mod appkit {
             if rows.is_empty() {
                 ly += ROW_H + 2.0;
             } else {
-                ly += rows.len() as f64 * (ROW_H + 2.0);
+                ly += JobRowListView::height_for(rows.len());
             }
             ly += 10.0;
 
@@ -1451,28 +1506,27 @@ mod appkit {
                 l.setFrame(rect(PAD, list_top, list_w, LINE_H));
                 self.add(&l);
             } else {
-                // One themed row list instead of a pile of system-bezel
-                // NSButtons (exactly-one-of selection, hover + press).
+                // One themed row table instead of a pile of system-bezel
+                // NSButtons (exactly-one-of selection, hover + press): four
+                // evenly spaced columns under a header of column names.
+                let now = now_epoch();
                 let items: Vec<JobRowItem> = rows
                     .iter()
-                    .map(|r| {
-                        // Relative times like the header line; the raw
-                        // `TIME_FMT` value is only the fallback for odd inputs.
-                        let last_rel = fmt_poll_time(&r.last_run, now_epoch())
-                            .unwrap_or_else(|| r.last_run.clone());
-                        JobRowItem {
-                            name: r.name.clone(),
-                            meta: format!("every {}  ·  last {}", r.interval, last_rel),
-                            status: r.status.clone(),
-                            tone: self.color(job_row_tone(&r.status, r.enabled)),
-                            off: !r.enabled,
-                        }
+                    .map(|r| JobRowItem {
+                        cells: job_row_cells(r, now),
+                        tone: self.color(job_row_tone(&r.status, r.enabled)),
                     })
                     .collect();
                 let sel_idx =
                     rows.iter().position(|r| selected.as_deref() == Some(r.name.as_str()));
                 let list = self.ivars().job_list.clone();
                 list.set_colors(colors);
+                list.set_headers([
+                    s.job_col_name_label.clone(),
+                    s.job_col_frequency_label.clone(),
+                    s.job_col_last_run_label.clone(),
+                    s.job_col_status_label.clone(),
+                ]);
                 list.set_data(items, sel_idx);
                 list.setFrame(rect(PAD, list_top, list_w, JobRowListView::height_for(rows.len())));
                 self.add(&list);
@@ -1921,6 +1975,28 @@ enabled = true
     }
 
     #[test]
+    fn job_row_cells_are_four_even_columns() {
+        let d = describe(json!({
+            "endpoints": [
+                {"name": "all", "window": "10m", "enabled": true, "status": "ok",
+                 "lastRun": "2026-10-14 12:00:00"},
+                {"name": "dir", "window": "1w", "enabled": false, "status": "ok"},
+            ]
+        }));
+        let now = parse_poll_ts("2026-10-14 12:06:00").unwrap();
+        let rows = job_rows(&d);
+        assert_eq!(
+            job_row_cells(&rows[0], now),
+            ["all", "every 10m", "6m ago", "ok"],
+            "name / frequency / last run / status"
+        );
+        let off = job_row_cells(&rows[1], now);
+        assert_eq!(off[1], "every 1w");
+        assert_eq!(off[2], "never", "a non-timestamp last run passes through");
+        assert_eq!(off[3], "ok (off)", "a disabled job keeps the off marker");
+    }
+
+    #[test]
     fn job_row_tone_is_a_traffic_light() {
         assert_eq!(job_row_tone("ok", true), "ok");
         assert_eq!(job_row_tone("error", true), "err");
@@ -2001,13 +2077,17 @@ enabled = true
         m.insert("job-detail-title".to_string(), "Endpoint".to_string());
         m.insert("job-force-label".to_string(), "Run".to_string());
         m.insert("job-saved".to_string(), "done {name}".to_string());
+        m.insert("job-col-frequency-label".to_string(), "Cadence".to_string());
         let s = JiraConfigSettings::from_section(&m);
         assert_eq!(s.job_detail_title, "Endpoint");
         assert_eq!(s.job_force_label, "Run");
         assert_eq!(s.job_saved, "done {name}");
+        assert_eq!(s.job_col_frequency_label, "Cadence");
         // Untouched keys keep their defaults.
         assert_eq!(s.job_delete_label, d.job_delete_label);
         assert_eq!(s.job_polled, d.job_polled);
+        assert_eq!(s.job_col_name_label, d.job_col_name_label);
+        assert_eq!(s.job_col_status_label, d.job_col_status_label);
     }
 
     #[test]

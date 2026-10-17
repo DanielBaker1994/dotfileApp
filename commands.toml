@@ -338,7 +338,7 @@ width = 1400
 height = 900
 
 split = 0.42
-sidebar-width = 256.6
+sidebar-width = 140
 sidebar-min-width = 140
 sidebar-max-width = 480
 
@@ -646,6 +646,10 @@ force-poll-label = "Force Poll"
 stop-poll-label = "Stop Poll"
 refresh-button-label = "Refresh"
 poll-jobs-title = "Poll jobs"
+job-col-name-label = "Job name"
+job-col-frequency-label = "Frequency"
+job-col-last-run-label = "Last run"
+job-col-status-label = "Last status"
 files-title = "Files"
 loading = "Loading…"
 loading-jobs = "Loading poll jobs…"
