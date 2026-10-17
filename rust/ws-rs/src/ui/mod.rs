@@ -11,6 +11,8 @@ pub mod jira_setup;
 pub mod list_panel;
 pub mod menu_kit;
 pub mod multi_picker;
+#[cfg(target_os = "macos")]
+pub mod outline_button;
 pub mod pane_divider;
 pub mod pill_selector;
 #[cfg(target_os = "macos")]

@@ -348,7 +348,7 @@ mod appkit {
     use objc2::runtime::AnyObject;
     use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSControlSize, NSFont, NSSecureTextField,
+        NSAutoresizingMaskOptions, NSFont, NSSecureTextField,
         NSTextAlignment, NSTextField, NSView,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -404,7 +404,7 @@ mod appkit {
         notice: Retained<NSTextField>,
         result: Retained<NSTextField>,
         /// Test Connection / Copy curl / Save & Enable.
-        buttons: [Retained<NSButton>; 3],
+        buttons: [Retained<crate::ui::outline_button::OutlineButton>; 3],
         /// The `--detect-auth` answer (for Copy curl's `--auth`).
         detected: RefCell<Option<String>>,
         sink: RefCell<Option<Rc<dyn Fn(SetupOutcome)>>>,
@@ -520,11 +520,10 @@ mod appkit {
             result.setTextColor(Some(&colors.dim.to_nscolor()));
 
             let button = |title: &str| {
-                let b = NSButton::new(mtm);
-                b.setTitle(&NSString::from_str(title));
-                b.setBezelStyle(NSBezelStyle::Push);
-                b.setControlSize(NSControlSize::Small);
-                b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+                // Themed capsule (was a system `Push` bezel that ignored
+                // `[theme]` — the same ban as `NSSegmentedControl`).
+                let b = crate::ui::outline_button::OutlineButton::new(mtm, colors, title);
+                b.set_tone(crate::ui::outline_button::Tone::Neutral);
                 b
             };
             let test = button(&settings.test_label);
@@ -588,10 +587,7 @@ mod appkit {
                     (&i.buttons[1], sel!(curlClicked:)),
                     (&i.buttons[2], sel!(saveClicked:)),
                 ] {
-                    unsafe {
-                        b.setTarget(Some(target));
-                        b.setAction(Some(s));
-                    }
+                    b.set_target_action(target, s);
                 }
             }
             LIVE_FORM.with(|l| *l.borrow_mut() = Some(objc2::rc::Weak::from_retained(&v)));
@@ -673,7 +669,7 @@ mod appkit {
 
         fn busy(&self, on: bool) {
             for b in &self.ivars().buttons {
-                b.setEnabled(!on);
+                b.set_enabled(!on);
             }
         }
 

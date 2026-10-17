@@ -521,9 +521,9 @@ mod switch_ui {
                 }
             }));
             let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
-            ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
+            ui.list.set_drawer(Box::new(move |r, i, sel, hover| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.draw_row(r, i, sel);
+                    ui.draw_row(r, i, sel, hover);
                 }
             }));
             let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
@@ -662,7 +662,7 @@ mod switch_ui {
         }
 
         /// `ViewSwitcherPanel.draw(_:_:_:)`.
-        fn draw_row(&self, rect: crate::ui::chrome::Rect, pos: usize, selected: bool) {
+        fn draw_row(&self, rect: crate::ui::chrome::Rect, pos: usize, selected: bool, hovered: bool) {
             use crate::ui::chrome::Rect;
             let c = &self.colors;
             let m = self.model.borrow();
@@ -675,6 +675,9 @@ mod switch_ui {
                     1.5,
                     c.accent,
                 );
+            } else if hovered {
+                // Mouse feedback parity with the files/jira lists.
+                style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
             }
             let mono = style::mono_font(11.0, Weight::Regular);
             let mut x = inner.x + 12.0;
@@ -1605,7 +1608,7 @@ mod macos {
 
         /// `drawSplitRow(_:_:_:)`: the command cell left of `splitMid`, the
         /// workspace cell (id chip, apps / match, unread) right of it.
-        pub fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+        pub fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hover: bool) {
             use crate::ui::chrome::Rect;
             use crate::ui::style::{self, Weight};
             let c = crate::ui::theme::PopupThemeDefaults::colors();
@@ -1621,6 +1624,8 @@ mod macos {
                 if on {
                     style::fill_rounded(cell, 6.0, c.highlight);
                     style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
+                } else if hover {
+                    style::fill_rounded(cell, 6.0, style::button_fill(style::ButtonState::Hover, &c));
                 }
                 let f = style::system_font(13.0, if on { Weight::Semibold } else { Weight::Regular });
                 style::draw_text_left(
@@ -1636,6 +1641,8 @@ mod macos {
                 if on {
                     style::fill_rounded(cell, 6.0, c.highlight);
                     style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
+                } else if hover {
+                    style::fill_rounded(cell, 6.0, style::button_fill(style::ButtonState::Hover, &c));
                 }
                 let mono = style::mono_font(11.5, Weight::Semibold);
                 let chip = Rect::new(cell.x + 10.0, cell.mid_y() - 9.0, 22.0, 18.0);
@@ -1765,6 +1772,11 @@ mod macos {
         pub fn set_rows(&mut self, commands: Vec<(String, String)>, workspaces: Vec<WorkspaceRow>) {
             self.model = PaletteModel::new(commands, workspaces);
             if let Some(h) = &self.handler {
+                // A fresh model means a fresh query — empty the field too, or
+                // the stale text from the last open lingers over the
+                // unfiltered rows until the next keystroke (the view switcher
+                // clears on every show; parity).
+                h.ivars().search.setStringValue(&NSString::from_str(""));
                 *h.model_mut() = self.model.clone();
                 h.rebuild();
             }
@@ -1929,9 +1941,9 @@ mod macos {
             );
             retain_palette_handler(&handler);
             let weak = objc2::rc::Weak::from_retained(&handler);
-            list.set_drawer(Box::new(move |r, i, sel, _hover| {
+            list.set_drawer(Box::new(move |r, i, sel, hover| {
                 if let Some(h) = weak.load() {
-                    h.draw_row(r, i, sel);
+                    h.draw_row(r, i, sel, hover);
                 }
             }));
             let weak = objc2::rc::Weak::from_retained(&handler);

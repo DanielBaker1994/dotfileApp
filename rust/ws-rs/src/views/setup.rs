@@ -753,7 +753,7 @@ mod macos {
     };
     use objc2_app_kit::{
         NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-        NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSFont, NSPopUpMenuWindowLevel,
+        NSAutoresizingMaskOptions, NSBackingStoreType, NSFont, NSPopUpMenuWindowLevel,
         NSScrollView, NSStandardKeyBindingResponding, NSTextField, NSTextView, NSView, NSWindow,
         NSWindowStyleMask, NSWindowTitleVisibility,
     };
@@ -838,7 +838,7 @@ mod macos {
         pub rows_view: Retained<NSView>,
         pub status: Retained<NSTextField>,
         pub log_view: Retained<NSTextView>,
-        pub stack: RefCell<Retained<NSButton>>,
+        pub stack: RefCell<Retained<crate::ui::outline_button::OutlineButton>>,
         pub colors: PopupColors,
         pub on_recheck: RefCell<Option<Box<dyn FnMut()>>>,
         pub on_stack: RefCell<Option<Box<dyn FnMut()>>>,
@@ -902,7 +902,7 @@ mod macos {
 
         /// The real "Set Up Hotkeys & Borders…" button (built after the handler
         /// because it needs the handler as its target).
-        pub fn set_stack(&self, button: Retained<NSButton>) {
+        pub fn set_stack(&self, button: Retained<crate::ui::outline_button::OutlineButton>) {
             *self.ivars().stack.borrow_mut() = button;
         }
 
@@ -910,7 +910,7 @@ mod macos {
         pub fn update_buttons(&self) {
             let missing = stack_missing(&self.ivars().checks.borrow());
             let stack = self.ivars().stack.borrow();
-            stack.setEnabled(missing);
+            stack.set_enabled(missing);
             stack.setHidden(!missing);
         }
 
@@ -948,20 +948,12 @@ mod macos {
 
                         let mut right = width - RIGHT_INSET;
                         if let Some(title) = &row.fix_title {
-                            let b = unsafe {
-                                NSButton::buttonWithTitle_target_action(
-                                    &NSString::from_str(title),
-                                    Some(as_any(self)),
-                                    Some(objc2::sel!(fix:)),
-                                    mtm,
-                                )
-                            };
-                            b.setTag(match &row.kind {
+                            let b = create_button(mtm, colors, title, Some(as_any(self)), Some(objc2::sel!(fix:)));
+                            b.set_tag(match &row.kind {
                                 SetupRowKind::Check(i) => *i as objc2_foundation::NSInteger,
                                 _ => 0,
                             });
-                            b.sizeToFit();
-                            let fw = b.frame().size.width;
+                            let fw = crate::ui::outline_button::OutlineButton::width_for(title);
                             b.setFrame(NSRect::new(
                                 NSPoint::new(width - RIGHT_INSET - fw, row.y - 1.0),
                                 NSSize::new(fw, FIX_BUTTON_HEIGHT),
@@ -1158,7 +1150,7 @@ mod macos {
             rows_view: rows_view.clone().into_super(),
             status: status.clone(),
             log_view: log_view.clone(),
-            stack: RefCell::new(create_button(mtm, "Set Up Hotkeys & Borders…", None, None)),
+            stack: RefCell::new(create_button(mtm, colors, "Set Up Hotkeys & Borders…", None, None)),
             colors,
             on_recheck: RefCell::new(on_recheck),
             on_stack: RefCell::new(on_stack),
@@ -1169,25 +1161,25 @@ mod macos {
 
         let recheck = create_button(
             mtm,
+            colors,
             "Check Again",
             Some(as_any(&*handler)),
             Some(objc2::sel!(recheck:)),
         );
         let stack = create_button(
             mtm,
+            colors,
             "Set Up Hotkeys & Borders…",
             Some(as_any(&*handler)),
             Some(objc2::sel!(stack:)),
         );
-        let done = create_button(mtm, "Done", Some(as_any(&*handler)), Some(objc2::sel!(done:)));
+        let done = create_button(mtm, colors, "Done", Some(as_any(&*handler)), Some(objc2::sel!(done:)));
         handler.set_stack(stack.clone());
         for b in [&recheck, &stack, &done] {
-            b.sizeToFit();
             content.addSubview(b);
         }
-        let bw = |b: &NSButton| {
-            b.sizeToFit();
-            b.frame().size.width
+        let bw = |b: &crate::ui::outline_button::OutlineButton| {
+            crate::ui::outline_button::OutlineButton::width_for(&b.title())
         };
         done.setFrame(NSRect::new(
             NSPoint::new(cw - 20.0 - bw(&done), 12.0),
@@ -1223,18 +1215,19 @@ mod macos {
 
     fn create_button(
         mtm: MainThreadMarker,
+        colors: PopupColors,
         title: &str,
         target: Option<&AnyObject>,
         action: Option<objc2::runtime::Sel>,
-    ) -> Retained<NSButton> {
-        unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str(title),
-                target,
-                action,
-                mtm,
-            )
+    ) -> Retained<crate::ui::outline_button::OutlineButton> {
+        // Themed capsule (the old control was a system `Push` bezel that
+        // ignored `[theme]`). Dialog roles read as Neutral.
+        let b = crate::ui::outline_button::OutlineButton::new(mtm, colors, title);
+        b.set_tone(crate::ui::outline_button::Tone::Neutral);
+        if let (Some(t), Some(a)) = (target, action) {
+            b.set_target_action(t, a);
         }
+        b
     }
 }
 

@@ -11768,7 +11768,10 @@ mod daemon_ui {
 
         /// Zip `path` beside itself like `files_compress`: off the main
         /// thread, "Compressing …" then "Created …", and the recents rows
-        /// repainted so the archive shows up.
+        /// repainted so the archive shows up — pushed into the shelf first
+        /// (the screenshot-save pattern), because the FSEvents feed lags the
+        /// refresh by its latency (and only covers its watched roots), so a
+        /// zip made here would otherwise miss the live list.
         fn popup_compress(&self, path: &str) {
             let paths = vec![path.to_string()];
             crate::ui::toast::show(
@@ -11783,6 +11786,7 @@ mod daemon_ui {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
+                        shelf_add(&[zip], crate::engines::path_shelf::Why::Created);
                         crate::ui::toast::show(&format!("Created {name}"), "checkmark.circle.fill");
                         ui.refresh_paths_recents();
                     }

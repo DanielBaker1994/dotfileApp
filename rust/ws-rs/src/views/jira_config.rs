@@ -725,7 +725,7 @@ mod appkit {
         d_columns: Retained<NSTextField>,
         d_result: Retained<NSTextField>,
         /// Save / Set Columns / Poll Now / Delete.
-        d_buttons: [Retained<NSButton>; 4],
+        d_buttons: [Retained<crate::ui::outline_button::OutlineButton>; 4],
         /// The job the detail pane currently shows (its fields hold its values;
         /// an empty name = nothing selected).
         d_shown_for: RefCell<String>,
@@ -887,11 +887,10 @@ mod appkit {
             result.setFont(Some(&NSFont::systemFontOfSize(11.0)));
             result.setTextColor(Some(&dim));
             let button = |title: &str| {
-                let b = NSButton::new(mtm);
-                b.setTitle(&NSString::from_str(title));
-                b.setBezelStyle(NSBezelStyle::Push);
-                b.setControlSize(NSControlSize::Small);
-                b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+                // Themed capsule (was a system `Push` bezel that ignored
+                // `[theme]`).
+                let b = crate::ui::outline_button::OutlineButton::new(mtm, colors, title);
+                b.set_tone(crate::ui::outline_button::Tone::Neutral);
                 b
             };
             let d_buttons = [
@@ -954,10 +953,7 @@ mod appkit {
                     (&i.d_buttons[2], sel!(forceJobClicked:)),
                     (&i.d_buttons[3], sel!(deleteJobClicked:)),
                 ] {
-                    unsafe {
-                        b.setTarget(Some(target));
-                        b.setAction(Some(s));
-                    }
+                    b.set_target_action(target, s);
                 }
             }
             LIVE_BODY.with(|l| *l.borrow_mut() = Some(objc2::rc::Weak::from_retained(&v)));
@@ -1332,7 +1328,7 @@ mod appkit {
                     f.setEnabled(false);
                 }
                 for b in &i.d_buttons {
-                    b.setEnabled(false);
+                    b.set_enabled(false);
                 }
                 return;
             };
@@ -1377,7 +1373,7 @@ mod appkit {
             }
             if !i.d_busy.get() {
                 for b in &i.d_buttons {
-                    b.setEnabled(true);
+                    b.set_enabled(true);
                 }
             }
             *i.d_shown_for.borrow_mut() = name;
@@ -1398,7 +1394,7 @@ mod appkit {
         fn set_detail_busy(&self, on: bool) {
             self.ivars().d_busy.set(on);
             for b in &self.ivars().d_buttons {
-                b.setEnabled(!on);
+                b.set_enabled(!on);
             }
         }
 
@@ -1578,6 +1574,7 @@ mod appkit {
 
         fn render_controls(&self, mtm: MainThreadMarker, y: f64) -> f64 {
             let s = &self.ivars().settings;
+            let colors = self.ivars().colors.get();
             let enabled = crate::app::jira_poll::enabled_in_config();
             let lock_held = self
                 .ivars()
@@ -1596,17 +1593,16 @@ mod appkit {
             let target: &AnyObject = as_any(self);
             let mut x = PAD;
             for (title, action, kind) in specs {
-                let b = NSButton::new(mtm);
-                b.setTitle(&NSString::from_str(title));
-                b.setBezelStyle(NSBezelStyle::Push);
-                b.setControlSize(NSControlSize::Small);
-                b.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-                let w = (title.chars().count() as f64 * 7.2 + 26.0).max(84.0);
+                // Themed capsules (were system `Push` bezels the `[theme]`
+                // cannot reach), now sized by the label's real metrics.
+                let b = crate::ui::outline_button::OutlineButton::new(mtm, colors, title);
+                b.set_tone(crate::ui::outline_button::Tone::Neutral);
+                let w = crate::ui::outline_button::OutlineButton::width_for(title).max(84.0);
                 b.setFrame(rect(x, y, w, 28.0));
                 match kind {
                     JiraConfigAction::Stop => {
                         b.setToolTip(Some(&NSString::from_str("Stop the running poll (jira_poll.py --cancel)")));
-                        b.setEnabled(lock_held);
+                        b.set_enabled(lock_held);
                     }
                     JiraConfigAction::Force => {
                         // Clickable while a poll holds the lock meant a
@@ -1615,14 +1611,11 @@ mod appkit {
                         b.setToolTip(Some(&NSString::from_str(
                             "Poll every enabled job now (jira_poll.py --force)",
                         )));
-                        b.setEnabled(!lock_held);
+                        b.set_enabled(!lock_held);
                     }
                     _ => {}
                 }
-                unsafe {
-                    b.setTarget(Some(target));
-                    b.setAction(Some(action));
-                }
+                b.set_target_action(target, action);
                 self.add(&b);
                 x += w + 8.0;
             }

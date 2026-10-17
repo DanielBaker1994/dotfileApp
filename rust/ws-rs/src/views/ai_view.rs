@@ -544,15 +544,20 @@ mod appkit {
                 for (i, m) in snap.modes.iter().enumerate() {
                     let r = rect_of(C_MODE + i as i32).unwrap();
                     let on = snap.mode == i;
-                    let hov = hover == Some(C_MODE + i as i32);
+                    // Press shows on any chip (`TabPillView` semantics).
+                    let hov = self.ivars().pressed.get() == Some(C_MODE + i as i32)
+                        || (!on && hover == Some(C_MODE + i as i32));
                     style::capsule_chip(r, &c, on, hov);
                     style::draw_text_centered(m, r, &bf, if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim });
                 }
             }
             if let Some(r) = rect_of(C_COPY) {
                 let hov = hover == Some(C_COPY);
+                let pres = self.ivars().pressed.get() == Some(C_COPY);
                 style::stroke_rounded(r, r.height / 2.0, 1.0, c.text.with_alpha(0.25));
-                if hov {
+                if pres {
+                    style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.14));
+                } else if hov {
                     style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.08));
                 }
                 style::draw_text_centered(&snap.copy_title, r, &style::system_font(12.0, Weight::Semibold), c.text.with_alpha(0.9));

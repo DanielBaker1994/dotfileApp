@@ -13,7 +13,9 @@ pub enum ProseSwitchEvent {
     Style,
 }
 
-pub const HEIGHT: f64 = 28.0;
+/// The pill's natural height — canonical `capsule_track` height, matching
+/// `pill_selector::HEIGHT` (chips inset by `CAPSULE_GEO.track_pad` each side).
+pub const HEIGHT: f64 = 26.0;
 
 #[cfg(target_os = "macos")]
 pub use appkit::ProseSwitch;
@@ -189,7 +191,7 @@ mod appkit {
         }
 
         fn seg_widths(&self) -> Vec<f64> {
-            let f = style::system_font(11.5, Weight::Medium);
+            let f = style::system_font(12.0, Weight::Medium);
             // Canonical text chip (CAPSULE_GEO chip pad 22) + a 16 pt symbol
             // allowance: the icon sits at x + 8 (14 pt wide) and the label at
             // x + 26, so the segment is text + 38 = metrics width + 16.
@@ -215,16 +217,16 @@ mod appkit {
         fn draw(&self) {
             let c = self.ivars().colors.get();
             let b = self.bounds();
-            let track = Rect::new(0.0, 0.0, b.size.width, b.size.height).inset_by(0.5, 0.5);
-            style::fill_rounded(track, track.height / 2.0, c.mantle());
-            style::capsule_track(track, &c);
+            // One track, theme's `track_fill` — no under-fill, so the pill
+            // reads identical to `TabPillView` at every preset.
+            style::capsule_track(Rect::new(0.0, 0.0, b.size.width, b.size.height), &c);
             let hover = self.ivars().hover.get();
             for (i, sym) in [(3usize, "paintpalette"), (2usize, "rectangle.portrait.and.arrow.right")] {
                 let r = self.seg(i);
                 style::capsule_chip(r, &c, false, hover == Some(i));
                 style::draw_symbol(sym, r, if hover == Some(i) { c.text } else { c.dim }, 11.0);
             }
-            let f = style::system_font(11.5, Weight::Medium);
+            let f = style::system_font(12.0, Weight::Medium);
             let prose = self.ivars().prose.get();
             for (i, (sym, label)) in self.labels().iter().enumerate() {
                 let r = self.seg(i);

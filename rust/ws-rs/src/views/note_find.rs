@@ -98,9 +98,9 @@ impl NoteFindUi {
             on_log: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
-        ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
+        ui.list.set_drawer(Box::new(move |r, i, sel, hover| {
             if let Some(ui) = weak.upgrade() {
-                ui.draw_row(r, i, sel);
+                ui.draw_row(r, i, sel, hover);
             }
         }));
         let weak = Rc::downgrade(&ui);
@@ -332,7 +332,7 @@ impl NoteFindUi {
             .unwrap_or(false)
     }
 
-    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hovered: bool) {
         use crate::ui::chrome::Rect;
         let c = &self.colors;
         let m = self.model.borrow();
@@ -341,6 +341,8 @@ impl NoteFindUi {
         if selected {
             style::fill_rounded(inner, 7.0, c.highlight);
             style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
+        } else if hovered {
+            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
         }
         let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
         let x = inner.x + 12.0;
@@ -523,9 +525,9 @@ impl SidebarJumpUi {
             on_jump: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
-        ui.list.set_drawer(Box::new(move |r, i, sel, _| {
+        ui.list.set_drawer(Box::new(move |r, i, sel, hover| {
             if let Some(ui) = weak.upgrade() {
-                ui.draw_row(r, i, sel);
+                ui.draw_row(r, i, sel, hover);
             }
         }));
         let weak = Rc::downgrade(&ui);
@@ -630,7 +632,7 @@ impl SidebarJumpUi {
         }
     }
 
-    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hovered: bool) {
         use crate::ui::chrome::Rect;
         use crate::ui::theme::PopupTone;
         let c = &self.colors;
@@ -640,6 +642,8 @@ impl SidebarJumpUi {
         if selected {
             style::fill_rounded(inner, 7.0, c.highlight);
             style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
+        } else if hovered {
+            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
         }
         // `tone(_:)` per section, drawn as a tinted chip.
         let tone = match it.section.as_str() {
@@ -714,9 +718,9 @@ impl PaneFindUi {
             on_pick: RefCell::new(None),
         });
         let weak = Rc::downgrade(&ui);
-        ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
+        ui.list.set_drawer(Box::new(move |r, i, sel, hover| {
             if let Some(ui) = weak.upgrade() {
-                ui.draw_row(r, i, sel);
+                ui.draw_row(r, i, sel, hover);
             }
         }));
         let weak = Rc::downgrade(&ui);
@@ -832,7 +836,7 @@ impl PaneFindUi {
         }
     }
 
-    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hovered: bool) {
         use crate::ui::chrome::Rect;
         let c = &self.colors;
         let shown = self.shown.borrow();
@@ -842,6 +846,8 @@ impl PaneFindUi {
         if selected {
             style::fill_rounded(inner, 7.0, c.highlight);
             style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
+        } else if hovered {
+            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
         }
         let band = Rect::new(inner.x + 12.0, inner.y, inner.width - 22.0, inner.height);
         style::draw_text_left(&text, band, &style::system_font(13.0, Weight::Regular), c.text);

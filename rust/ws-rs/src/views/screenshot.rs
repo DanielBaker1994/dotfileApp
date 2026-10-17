@@ -931,7 +931,9 @@ pub fn window_shot_image(window_id: u32, scale: f64) -> Result<ShotImage, Captur
 // ScreenToast
 // ---------------------------------------------------------------------------
 
-pub const TOAST_DURATION: f64 = 1.4;
+/// One toast clock for the app: shares [`crate::ui::toast::HOLD_SECS`] so the
+/// capture overlay's pill and the `show()` pill can't drift apart.
+pub const TOAST_DURATION: f64 = crate::ui::toast::HOLD_SECS;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScreenToast {

@@ -675,8 +675,9 @@ mod appkit {
                     );
                     for (id, sym, t) in &actions {
                         let r = rect_of(*id).unwrap();
-                        style::capsule_chip(r, &c, false, hover == Some(*id));
-                        let fg = if hover == Some(*id) { c.text } else { c.text.with_alpha(0.85) };
+                        let hov = hover == Some(*id) || pressed == Some(*id);
+                        style::capsule_chip(r, &c, false, hov);
+                        let fg = if hov { c.text } else { c.text.with_alpha(0.85) };
                         let (tw, th) = style::text_size(t, &af);
                         let x0 = r.mid_x() - (tw + 18.0) / 2.0;
                         style::draw_symbol(sym, Rect::new(x0, r.y, 14.0, r.height), fg, 11.0);
@@ -770,7 +771,8 @@ mod appkit {
                 for i in 0..4 {
                     let r = rect_of(C_FILTER + i).unwrap();
                     let on = snap.filter == i as usize;
-                    let hov = hover == Some(C_FILTER + i);
+                    // Press shows on any chip (`TabPillView` semantics).
+                    let hov = pressed == Some(C_FILTER + i) || (!on && hover == Some(C_FILTER + i));
                     style::capsule_chip(r, &c, on, hov);
                     style::draw_text_centered(FILTERS[i as usize], r, &f, if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim });
                 }

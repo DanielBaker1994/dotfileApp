@@ -3327,7 +3327,7 @@ mod appkit {
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSStringDrawingDeprecated, NSBezierPath, NSButton, NSButtonType, NSControlSize, NSControlTextEditingDelegate,
+        NSStringDrawingDeprecated, NSBezierPath, NSControlSize, NSControlTextEditingDelegate,
         NSEvent, NSFont, NSGraphicsContext, NSLineBreakMode, NSMenuItem, NSPopUpButton,
         NSScrollView, NSStringDrawingOptions,
         NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
@@ -4142,6 +4142,7 @@ mod appkit {
         snap: Rc<RefCell<JiraSnapshot>>,
         colors: Cell<PopupColors>,
         hover: Cell<bool>,
+        pressed: Cell<bool>,
         sink: RefCell<Option<Sink>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     }
@@ -4183,6 +4184,17 @@ mod appkit {
             fn mouse_down(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 if self.button_rect().contains(p.x, p.y) && self.ivars().snap.borrow().inspector.is_some() {
+                    self.ivars().pressed.set(true);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, e: &NSEvent) {
+                let was = self.ivars().pressed.replace(false);
+                self.setNeedsDisplay(true);
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if was && self.button_rect().contains(p.x, p.y) {
                     let s = self.ivars().sink.borrow().clone();
                     if let Some(s) = s {
                         s(JiraEvent::OpenDetail);
@@ -4205,6 +4217,7 @@ mod appkit {
                 snap,
                 colors: Cell::new(colors),
                 hover: Cell::new(false),
+                pressed: Cell::new(false),
                 sink: RefCell::new(None),
                 tracking: RefCell::new(None),
             });
@@ -4270,8 +4283,11 @@ mod appkit {
                 y += vh.max(16.0) + 5.0;
             }
             let br = self.button_rect();
-            let fill = if self.ivars().hover.get() { c.accent_on().with_alpha(0.28) } else { c.accent_on().with_alpha(0.18) };
-            style::fill_rounded(br, 8.0, fill);
+            // The canonical one-shot capsule (`capsule_outline`: the accent
+            // fill + hairline `style.rs` cites for this button) with hover
+            // and press feedback — the old hand-roll had radius 8, no
+            // stroke and no press.
+            style::capsule_outline(br, &c, self.ivars().hover.get() || self.ivars().pressed.get());
             let bf = style::system_font(13.0, Weight::Semibold);
             let (_, bh) = style::text_size("Open full detail", &bf);
             style::draw_text("Open full detail", br.x + 14.0, br.mid_y() - bh / 2.0, &bf, c.accent);
@@ -4290,9 +4306,9 @@ mod appkit {
     pub struct BoardBarIvars {
         title: Retained<NSTextField>,
         sprint: Retained<NSPopUpButton>,
-        mode: Retained<TabPillView>,
+        mode: Retained<crate::ui::pill_selector::TabPillView>,
         summary: Retained<NSTextField>,
-        pin: Retained<NSButton>,
+        pin: Retained<crate::ui::outline_button::OutlineButton>,
         /// The sprint menu structure (one entry per choice; the popup's
         /// `indexOfSelectedItem` indexes this).
         choices: RefCell<Vec<SprintChoice>>,
@@ -4362,8 +4378,12 @@ mod appkit {
             title.setEditable(false);
             title.setSelectable(false);
 
+            // Themed: a borderless popup keeps the native menu but drops the
+            // system bezel that ignores the `[theme]`.
             let sprint = NSPopUpButton::new(mtm);
             sprint.setControlSize(NSControlSize::Small);
+            sprint.setBordered(false);
+            sprint.setFont(Some(&style::system_font(12.0, Weight::Medium)));
             sprint.setHidden(true);
 
             let mode = TabPillView::new(mtm, colors, &["Columns", "Table"]);
@@ -4377,17 +4397,10 @@ mod appkit {
             summary.setEditable(false);
             summary.setSelectable(false);
 
-            let pin = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str("☆ Star"),
-                    None,
-                    None,
-                    mtm,
-                )
-            };
-            pin.setButtonType(NSButtonType::MomentaryPushIn);
-            pin.setControlSize(NSControlSize::Small);
-            pin.setFont(Some(&style::system_font(11.0, Weight::Regular)));
+            // Themed one-shot capsule (the old control was a system
+            // `MomentaryPushIn` bezel the `[theme]` cannot reach).
+            let pin = crate::ui::outline_button::OutlineButton::new(mtm, colors, "☆ Star");
+            pin.set_tone(crate::ui::outline_button::Tone::Neutral);
 
             let this = Self::alloc(mtm).set_ivars(BoardBarIvars {
                 title,
@@ -4404,9 +4417,8 @@ mod appkit {
             unsafe {
                 iv.sprint.setTarget(Some(as_any(&*v)));
                 iv.sprint.setAction(Some(sel!(sprintPicked:)));
-                iv.pin.setTarget(Some(as_any(&*v)));
-                iv.pin.setAction(Some(sel!(pinClicked:)));
             }
+            iv.pin.set_target_action(as_any(&*v), sel!(pinClicked:));
             let weak_mode = objc2::rc::Weak::from_retained(&v);
             iv.mode.set_on_pick(Box::new(move |i| {
                 if let Some(bar) = weak_mode.load() {
@@ -4426,7 +4438,8 @@ mod appkit {
             iv.title.setTextColor(Some(&colors.text.to_nscolor()));
             iv.summary.setStringValue(&NSString::from_str(&m.summary));
             iv.summary.setTextColor(Some(&colors.dim.to_nscolor()));
-            iv.pin.setTitle(&NSString::from_str(m.pin_title()));
+            iv.pin.set_title(m.pin_title());
+            iv.pin.set_colors(colors);
             iv.pin.setToolTip(Some(&NSString::from_str(if m.pinned {
                 "Unstar this view (it leaves the sidebar)"
             } else {
@@ -4476,13 +4489,12 @@ mod appkit {
             let (w, h) = (b.size.width, b.size.height);
             // Natural widths from AppKit's own metrics (accurate for the font).
             iv.title.sizeToFit();
-            iv.pin.sizeToFit();
             // The ☆ leads, exactly like a row's star sits left of its title;
             // then the board name, sprint, mode and summary trail it.
             let title_w = iv.title.frame().size.width.min((w * 0.4).max(60.0));
-            let pin_w = iv.pin.frame().size.width.max(56.0);
+            let pin_w = crate::ui::outline_button::OutlineButton::width_for(&iv.pin.title()).max(56.0);
             let mut x = 16.0;
-            iv.pin.setFrame(ns(Rect::new(x, (h - 22.0) / 2.0, pin_w, 22.0)));
+            iv.pin.setFrame(ns(Rect::new(x, (h - 26.0) / 2.0, pin_w, 26.0)));
             x += pin_w + 8.0;
             let th = iv.title.frame().size.height;
             iv.title

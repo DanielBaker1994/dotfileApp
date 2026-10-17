@@ -280,7 +280,7 @@ impl PopupInspector {
         view.addSubview(&hint);
 
         let handler = macos::InspectorHandler::new(mtm, self.on_open.take());
-        let button = macos::make_open_button(mtm, &handler);
+        let button = macos::make_open_button(mtm, colors, &handler);
         view.addSubview(&button);
 
         // The view retains its subviews; the handler would otherwise be
@@ -319,6 +319,7 @@ impl PopupInspector {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::ui::outline_button::OutlineButton;
     use crate::ui::theme::PopupColors;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
@@ -326,8 +327,8 @@ mod macos {
         define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
     };
     use objc2_app_kit::{
-        NSBezierPath, NSButton, NSFont, NSFontWeightSemibold, NSMutableParagraphStyle,
-        NSScrollView, NSTextAlignment, NSTextField, NSTextView, NSView,
+        NSBezierPath, NSFont, NSFontWeightSemibold, NSMutableParagraphStyle, NSScrollView,
+        NSTextAlignment, NSTextField, NSTextView, NSView,
     };
     use objc2_foundation::{
         NSAttributedStringKey, NSMutableAttributedString, NSObjectProtocol, NSPoint, NSRange,
@@ -586,27 +587,25 @@ mod macos {
         hint
     }
 
-    /// The button's target stays unretained; the caller keeps the handler alive
-    /// through [`retain_handler`].
+    /// The button's target stays weak inside the control; the caller keeps the
+    /// handler alive through [`retain_handler`].
     pub fn make_open_button(
         mtm: MainThreadMarker,
+        colors: PopupColors,
         handler: &InspectorHandler,
-    ) -> Retained<NSButton> {
-        unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Open full detail"),
-                Some(as_any(handler)),
-                Some(objc2::sel!(openClicked:)),
-                mtm,
-            )
-        }
+    ) -> Retained<OutlineButton> {
+        // Themed capsule (was a system-bezel NSButton — the same button the
+        // Jira drawer draws with `capsule_outline`).
+        let b = OutlineButton::new(mtm, colors, "Open full detail");
+        b.set_target_action(as_any(handler), objc2::sel!(openClicked:));
+        b
     }
 
     pub fn apply_layout(
         view: &InspectorView,
         scroll: &NSScrollView,
         text: &NSTextView,
-        button: &NSButton,
+        button: &OutlineButton,
         hint: &NSTextField,
     ) {
         let l = super::inspector_layout(view.bounds().size.width, view.bounds().size.height);
@@ -658,10 +657,10 @@ mod macos {
         None
     }
 
-    fn find_button(view: &NSView) -> Option<Retained<NSButton>> {
+    fn find_button(view: &NSView) -> Option<Retained<OutlineButton>> {
         subviews(view)
             .into_iter()
-            .find_map(|v| v.downcast::<NSButton>().ok())
+            .find_map(|v| v.downcast::<OutlineButton>().ok())
     }
 
     fn find_hint(view: &NSView) -> Option<Retained<NSTextField>> {

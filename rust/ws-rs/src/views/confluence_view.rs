@@ -727,7 +727,12 @@ mod appkit {
             let (ws, _) = style::capsule_metrics(&MODES, &f);
             let mut sx = x + geo.track_pad;
             for (i, w) in ws.iter().enumerate() {
-                out.push((C_MODE + i as i32, Rect::new(sx, 10.0, *w, STRIP_ROW_H)));
+                // Canonical chip: 20 tall inside the row (track_pad inset), so
+                // the drawn pill is the same 26-pt capsule as `TabPillView`.
+                out.push((
+                    C_MODE + i as i32,
+                    Rect::new(sx, 10.0 + geo.track_pad, *w, STRIP_ROW_H - 2.0 * geo.track_pad),
+                ));
                 sx += w + geo.gutter;
             }
             // Bottom row chips.
@@ -801,6 +806,7 @@ mod appkit {
             let controls = self.controls();
             let rect_of = |id: i32| controls.iter().find(|(i, _)| *i == id).map(|(_, r)| *r);
             let hover = self.ivars().hover.get();
+            let pressed = self.ivars().pressed.get();
             // Strip + panes.
             style::fill_rect(strip, c.mantle().with_alpha(0.55));
             style::fill_rect(Rect::new(strip.x, STRIP_H, strip.width, preview.height), c.mantle().with_alpha(0.35));
@@ -822,7 +828,9 @@ mod appkit {
                 for i in 0..3 {
                     let r = rect_of(C_MODE + i as i32).unwrap();
                     let on = snap.mode == i;
-                    let hov = hover == Some(C_MODE + i as i32);
+                    // Same press semantics as `TabPillView`: a press shows on
+                    // any chip (it darkens even the selected one).
+                    let hov = pressed == Some(C_MODE + i as i32) || (!on && hover == Some(C_MODE + i as i32));
                     style::capsule_chip(r, &c, on, hov);
                     let col = if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim };
                     style::draw_text_centered(MODES[i], r, &f, col);
@@ -830,11 +838,12 @@ mod appkit {
             }
             // Title only (ConfToggle).
             if let Some(r) = rect_of(C_TITLE) {
-                style::capsule_track(r.inset_by(0.5, 0.5), &c);
-                if snap.title_only {
-                    style::capsule_chip(r.inset_by(geo.track_pad, geo.track_pad), &c, true, false);
-                }
-                style::draw_text_centered("Title only", r, &f, if snap.title_only { c.text } else { c.dim });
+                let on = snap.title_only;
+                let hov = pressed == Some(C_TITLE) || (!on && hover == Some(C_TITLE));
+                style::capsule_track(r, &c);
+                style::capsule_chip(r.inset_by(geo.track_pad, geo.track_pad), &c, on, hov);
+                let col = if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim };
+                style::draw_text_centered("Title only", r, &f, col);
             }
             // Search (primary).
             if let Some(r) = rect_of(C_SEARCH) {
@@ -878,8 +887,11 @@ mod appkit {
                 style::draw_text_left(&snap.status, status_r, &style::system_font(11.0, Weight::Regular), tone_rgba(&c, snap.tone));
                 let enabled = snap.can_more;
                 let hov = hover == Some(C_MORE) && enabled;
+                let pres = pressed == Some(C_MORE) && enabled;
                 style::stroke_rounded(more, more.height / 2.0, 1.0, c.text.with_alpha(if enabled { 0.25 } else { 0.12 }));
-                if hov {
+                if pres {
+                    style::fill_rounded(more, more.height / 2.0, c.text.with_alpha(0.14));
+                } else if hov {
                     style::fill_rounded(more, more.height / 2.0, c.text.with_alpha(0.08));
                 }
                 style::draw_text_centered("Load more", more, &bf, if enabled { c.text.with_alpha(0.85) } else { c.dim.with_alpha(0.6) });
@@ -888,7 +900,7 @@ mod appkit {
                 let both = Rect::new(cq.x, cq.y, cu.max_x() - cq.x, cq.height);
                 style::capsule_track(both, &c);
                 for (id, r, t, en) in [(C_CQL, cq, "Copy CQL", snap.has_cql), (C_CURL, cu, "Copy curl", snap.has_curl)] {
-                    if en && hover == Some(id) {
+                    if en && (hover == Some(id) || pressed == Some(id)) {
                         style::capsule_chip(r.inset_by(2.0, 2.0), &c, false, true);
                     }
                     style::draw_text_centered(t, r, &bf, if en { c.text.with_alpha(0.85) } else { c.dim.with_alpha(0.6) });
