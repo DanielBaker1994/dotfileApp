@@ -755,7 +755,7 @@ mod appkit {
     use objc2::rc::{Retained, Weak};
     use objc2::runtime::AnyObject;
     use objc2::{
-        define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+        define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly,
     };
     use objc2_app_kit::{
         NSAppearanceCustomization, NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior,
@@ -766,9 +766,7 @@ mod appkit {
 
     use crate::ui::card::CardNSWindow;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     pub struct SlotHostWindowIvars {
         corner_radius: Cell<f64>,

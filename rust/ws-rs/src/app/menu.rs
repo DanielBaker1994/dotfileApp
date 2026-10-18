@@ -288,8 +288,8 @@ pub use appkit::{
 mod appkit {
     use super::*;
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
-    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::runtime::{NSObject, ProtocolObject, Sel};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
         NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSSquareStatusItemLength,
@@ -297,9 +297,7 @@ mod appkit {
     use objc2_foundation::{ns_string, NSObjectProtocol, NSString};
     use std::cell::RefCell;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn ns_modifiers(modifiers: Modifiers) -> NSEventModifierFlags {
         let mut flags = NSEventModifierFlags::empty();

@@ -33,3 +33,5 @@ pub mod theme;
 pub mod action_picker;
 pub mod toast;
 pub mod tree_view;
+#[cfg(target_os = "macos")]
+pub mod view_base;

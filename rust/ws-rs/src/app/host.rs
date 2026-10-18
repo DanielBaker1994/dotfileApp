@@ -3280,7 +3280,7 @@ mod daemon_ui {
         define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
     };
     use objc2_app_kit::{
-        NSApplication, NSAutoresizingMaskOptions, NSButton, NSFont, NSEvent, NSTextField,
+        NSApplication, NSAutoresizingMaskOptions, NSFont, NSEvent, NSTextField,
         NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
         NSVisualEffectView, NSWindowCollectionBehavior,
     };
@@ -3303,9 +3303,7 @@ mod daemon_ui {
     const NAV_WIDTH: f64 = 64.0;
     const NAV_HEIGHT: f64 = 22.0;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn mask_fill() -> NSAutoresizingMaskOptions {
         NSAutoresizingMaskOptions::ViewWidthSizable

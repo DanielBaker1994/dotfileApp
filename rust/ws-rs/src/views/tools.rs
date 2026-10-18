@@ -433,9 +433,7 @@ mod pp_handler {
     use objc2_app_kit::{NSTextField, NSTextView};
     use objc2_foundation::NSObjectProtocol;
 
-    pub fn as_any<T: objc2::Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    
 
     pub struct PrettyPrintHandlerIvars {
         pub editor: Retained<NSTextView>,
@@ -1475,7 +1473,7 @@ impl ToolPanel {
         use crate::ui::popup::{CardFrame, PopupConfig, PopupPanel};
         use objc2::MainThreadOnly;
         use objc2_app_kit::{
-            NSAutoresizingMaskOptions, NSButton, NSFont, NSScreen, NSScrollView, NSTextField,
+            NSAutoresizingMaskOptions, NSFont, NSScreen, NSScrollView, NSTextField,
             NSTextView, NSView,
         };
         use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};

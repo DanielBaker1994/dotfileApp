@@ -119,7 +119,7 @@ mod appkit {
     use crate::ui::chrome::Rect;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{AnyThread, Message};
+    use objc2::AnyThread;
     use objc2_app_kit::{
         NSBezierPath, NSColor, NSCompositingOperation, NSFont,
         NSFontAttributeName, NSFontWeight, NSFontWeightBold, NSFontWeightMedium,
@@ -129,9 +129,7 @@ mod appkit {
     };
     use objc2_foundation::{NSArray, NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     pub fn ns(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))

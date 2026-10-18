@@ -13,8 +13,6 @@ use serde_json::{json, Value};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::NSView;
-#[cfg(target_os = "macos")]
 use crate::ui::popup::PopupPanel;
 
 /// One header view offered by the switcher (`ViewSwitcherPanel.all` rows).
@@ -1206,7 +1204,7 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{
-        define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+        define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly,
     };
     use objc2_app_kit::{
         NSButton, NSFont, NSTextField, NSTextFieldDelegate, NSView, NSControlTextEditingDelegate,
@@ -1216,9 +1214,7 @@ mod macos {
     };
     use std::cell::RefCell;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     pub struct SwitchFlippedViewIvars;
 

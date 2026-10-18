@@ -3342,42 +3342,23 @@ mod appkit {
     use crate::ui::theme::{PopupColors, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSStringDrawingDeprecated, NSBezierPath, NSControlSize, NSControlTextEditingDelegate,
         NSEvent, NSFont, NSGraphicsContext, NSLineBreakMode, NSMenuItem, NSPopUpButton,
         NSScrollView, NSStringDrawingOptions,
-        NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSView,
     };
     use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self, as_any};
 
     fn ns(r: Rect) -> NSRect {
         style::ns(r)
     }
 
-    fn tracking(view: &NSView) -> Retained<NSTrackingArea> {
-        let opts = NSTrackingAreaOptions::MouseMoved
-            | NSTrackingAreaOptions::MouseEnteredAndExited
-            | NSTrackingAreaOptions::ActiveAlways
-            | NSTrackingAreaOptions::InVisibleRect;
-        let t = unsafe {
-            NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(),
-                view.bounds(),
-                opts,
-                Some(as_any(view)),
-                None,
-            )
-        };
-        view.addTrackingArea(&t);
-        t
-    }
 
     /// Wrapped text in `r`; returns the drawn height.
     pub fn draw_wrapped(s: &str, r: Rect, font: &NSFont, color: Rgba) -> f64 {
@@ -3452,10 +3433,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]
@@ -4184,10 +4162,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]

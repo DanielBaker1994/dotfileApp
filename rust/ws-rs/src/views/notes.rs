@@ -2060,7 +2060,7 @@ mod macos {
     use super::*;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAccessibility, NSAutoresizingMaskOptions, NSBackingStoreType, NSDraggingInfo, NSFont,
         NSImage, NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScrollView,
@@ -2884,9 +2884,7 @@ mod macos {
         unsafe impl NSObjectProtocol for NotesProseHandler {}
     );
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     thread_local! {
         /// Keeps the pop-out button's target alive for the main thread's life.
@@ -3449,7 +3447,7 @@ mod macos {
         let has_tree = !tree_model.is_empty();
         model.refresh_sidebar(now_secs());
 
-        let sidebar_w = model.sidebar.width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let _sidebar_w = model.sidebar.width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let root = NotesFlippedView::new(mtm);
         root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0)));
         root.setAutoresizingMask(

@@ -5,9 +5,11 @@ use super::{MultiPickerModel, PickOption, GROUP_PREFIX, MORE_PREFIX};
 use crate::ui::chrome::Rect;
 use crate::ui::style::{self, ns, ButtonState, Weight};
 use crate::ui::theme::{PopupColors, Rgba};
+use crate::ui::view_base;
+
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSControlTextEditingDelegate, NSEvent, NSPopover,
     NSPopoverBehavior, NSPopoverDelegate, NSScrollView, NSTextField, NSTextFieldDelegate, NSTextView,
@@ -471,20 +473,7 @@ define_class!(
         #[unsafe(method(updateTrackingAreas))]
         fn uta(&self) {
             let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-            if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                self.removeTrackingArea(&t);
-            }
-            let t = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    self.bounds(),
-                    NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect,
-                    Some(self.as_ref()),
-                    None,
-                )
-            };
-            self.addTrackingArea(&t);
-            *self.ivars().tracking.borrow_mut() = Some(t);
+            view_base::reset_tracking(self, &self.ivars().tracking, NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect);
         }
 
         #[unsafe(method(mouseEntered:))]

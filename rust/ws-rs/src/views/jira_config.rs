@@ -579,10 +579,10 @@ mod appkit {
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSEvent, NSFont, NSLineBreakMode, NSScrollView, NSTextAlignment,
-        NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSTextField, NSTrackingArea, NSView,
     };
     use objc2_foundation::{
         NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -620,9 +620,7 @@ mod appkit {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
     }
 
-    fn as_any<T: objc2::Message + ?Sized>(o: &T) -> &AnyObject {
-        unsafe { &*(o as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self, as_any};
 
     /// `{name}` → value for a `[jira-config]` format string.
     fn fill(template: &str, name: &str) -> String {
@@ -885,24 +883,7 @@ mod appkit {
         }
 
         fn reset_tracking(&self) {
-            if let Some(old) = self.ivars().tracking.borrow_mut().take() {
-                self.removeTrackingArea(&old);
-            }
-            let opts = NSTrackingAreaOptions::MouseMoved
-                | NSTrackingAreaOptions::MouseEnteredAndExited
-                | NSTrackingAreaOptions::ActiveAlways
-                | NSTrackingAreaOptions::InVisibleRect;
-            let ta = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    self.bounds(),
-                    opts,
-                    Some(as_any(self)),
-                    None,
-                )
-            };
-            self.addTrackingArea(&ta);
-            *self.ivars().tracking.borrow_mut() = Some(ta);
+            view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
         }
 
         pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {

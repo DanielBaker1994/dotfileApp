@@ -75,23 +75,21 @@ mod appkit {
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
-    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSBackgroundColorAttributeName, NSColor, NSControlSize, NSEvent, NSFont, NSFontAttributeName,
         NSForegroundColorAttributeName, NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView,
         NSStrikethroughColorAttributeName, NSStrikethroughStyleAttributeName, NSTextDelegate, NSTextView,
-        NSTextViewDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSTextViewDelegate, NSTrackingArea, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSAttributedStringKey, NSDictionary, NSMutableAttributedString, NSNotification,
-        NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+        NSNumber, NSObjectProtocol, NSRect, NSSize, NSString,
     };
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self};
 
     fn ns(r: Rect) -> NSRect {
         style::ns(r)
@@ -99,17 +97,6 @@ mod appkit {
 
     type Sink = Rc<dyn Fn(AIEvent)>;
 
-    fn tracking(view: &NSView) -> Retained<NSTrackingArea> {
-        let opts = NSTrackingAreaOptions::MouseMoved
-            | NSTrackingAreaOptions::MouseEnteredAndExited
-            | NSTrackingAreaOptions::ActiveAlways
-            | NSTrackingAreaOptions::InVisibleRect;
-        let t = unsafe {
-            NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), view.bounds(), opts, Some(as_any(view)), None)
-        };
-        view.addTrackingArea(&t);
-        t
-    }
 
     fn text_view(mtm: MainThreadMarker, colors: &PopupColors, editable: bool) -> (Retained<NSScrollView>, Retained<NSTextView>) {
         let scroll = NSScrollView::new(mtm);
@@ -179,10 +166,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]

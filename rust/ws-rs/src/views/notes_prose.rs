@@ -94,7 +94,7 @@ mod appkit {
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
     use objc2_foundation::{
         ns_string, NSError, NSNumber, NSObjectProtocol, NSRect, NSString, NSURL,
@@ -106,9 +106,7 @@ mod appkit {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     type Sink = Rc<RefCell<Option<Box<dyn Fn(ProseMsg)>>>>;
 

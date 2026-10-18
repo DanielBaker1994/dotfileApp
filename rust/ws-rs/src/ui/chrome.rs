@@ -339,13 +339,13 @@ pub use appkit::{set_workspace_cells, workspace_cell_key, PopupChrome, Workspace
 mod appkit {
     use super::*;
     use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
+    
     use objc2::{
         define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
     };
     use objc2_app_kit::{
         NSApplication, NSBezierPath, NSColor, NSColorSpace, NSEvent, NSGradient, NSImage,
-        NSLineCapStyle, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSLineCapStyle, NSTrackingArea, NSView,
     };
     use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
@@ -377,9 +377,7 @@ mod appkit {
         WORKSPACE_CELLS.with(|c| c.borrow().get(index).map(|w| w.key.clone()))
     }
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self, as_any};
 
     fn to_nsrect(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
@@ -485,24 +483,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn update_tracking_areas(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                let opts = NSTrackingAreaOptions::MouseMoved
-                    | NSTrackingAreaOptions::MouseEnteredAndExited
-                    | NSTrackingAreaOptions::ActiveAlways
-                    | NSTrackingAreaOptions::InVisibleRect;
-                let t = unsafe {
-                    NSTrackingArea::initWithRect_options_owner_userInfo(
-                        NSTrackingArea::alloc(),
-                        self.bounds(),
-                        opts,
-                        Some(as_any(self)),
-                        None,
-                    )
-                };
-                self.addTrackingArea(&t);
-                *self.ivars().tracking.borrow_mut() = Some(t);
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]

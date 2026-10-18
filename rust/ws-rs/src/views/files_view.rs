@@ -121,15 +121,15 @@ mod appkit {
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone};
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
-    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::NSDraggingInfo;
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControlTextEditingDelegate, NSEvent,
         NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource,
-        NSEventModifierFlags, NSFocusRingType, NSFont, NSPasteboardWriting, NSGraphicsContext, NSImage, NSImageScaling,
+        NSEventModifierFlags, NSFont, NSPasteboardWriting, NSGraphicsContext, NSImage, NSImageScaling,
         NSImageView, NSLineBreakMode, NSScrollView, NSTextAlignment, NSTextField,
-        NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWorkspace,
+        NSTextFieldDelegate, NSTextView, NSTrackingArea, NSView, NSWorkspace,
     };
     use objc2_foundation::{
         NSArray, NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -138,9 +138,7 @@ mod appkit {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self, as_any};
 
     fn ns(r: Rect) -> NSRect {
         style::ns(r)
@@ -166,23 +164,6 @@ mod appkit {
         img
     }
 
-    fn tracking(view: &NSView) -> Retained<NSTrackingArea> {
-        let opts = NSTrackingAreaOptions::MouseMoved
-            | NSTrackingAreaOptions::MouseEnteredAndExited
-            | NSTrackingAreaOptions::ActiveAlways
-            | NSTrackingAreaOptions::InVisibleRect;
-        let t = unsafe {
-            NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(),
-                view.bounds(),
-                opts,
-                Some(as_any(view)),
-                None,
-            )
-        };
-        view.addTrackingArea(&t);
-        t
-    }
 
     // ------------------------------------------------------------ list pane
 
@@ -241,10 +222,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]
@@ -722,10 +700,7 @@ mod appkit {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]

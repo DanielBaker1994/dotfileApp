@@ -1668,7 +1668,7 @@ pub fn build_window() {
 #[cfg(target_os = "macos")]
 pub mod macos {
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, ProtocolObject};
+    use objc2::runtime::ProtocolObject;
     use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
     use objc2_foundation::{
         ns_string, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -1678,9 +1678,7 @@ pub mod macos {
         WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
     };
 
-    fn as_any<T: objc2::Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn open_external(url: &str) {
         crate::platform::open_url(url);

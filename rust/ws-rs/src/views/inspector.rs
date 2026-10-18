@@ -324,7 +324,7 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{
-        define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+        define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
     };
     use objc2_app_kit::{
         NSBezierPath, NSFont, NSFontWeightSemibold, NSMutableParagraphStyle, NSScrollView,
@@ -342,9 +342,7 @@ mod macos {
     const BG_KEY: &str = "NSBackgroundColor";
     const PARA_KEY: &str = "NSParagraphStyle";
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn nsrect(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))

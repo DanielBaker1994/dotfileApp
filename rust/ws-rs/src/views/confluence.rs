@@ -1595,9 +1595,7 @@ pub mod macos {
     use crate::ui::chrome::Rect;
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
 
-    fn as_any<T: objc2::Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn task_key(task: &ProtocolObject<dyn WKURLSchemeTask>) -> usize {
         NonNull::from(task).as_ptr() as usize

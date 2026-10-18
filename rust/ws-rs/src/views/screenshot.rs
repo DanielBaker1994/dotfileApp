@@ -4763,14 +4763,14 @@ mod shot_cg {
 
 #[cfg(target_os = "macos")]
 mod overlay {
+    use crate::ui::view_base;
     use std::cell::{Cell, RefCell};
 
     use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
+    
     use objc2_app_kit::{NSApplication, NSTrackingArea, NSTrackingAreaOptions};
-    use super::{ChromeRects, ShotModePill, ShotRecentButton};
-    use objc2::AnyThread;
-    use objc2_core_graphics::{CGLineCap, CGPath};
+    use super::{ChromeRects, ShotModePill};
+        use objc2_core_graphics::CGPath;
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPanel,
@@ -4857,18 +4857,7 @@ mod overlay {
             #[unsafe(method(updateTrackingAreas))]
             fn update_tracking_areas(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                let opts = NSTrackingAreaOptions::MouseMoved
-                    | NSTrackingAreaOptions::ActiveAlways
-                    | NSTrackingAreaOptions::InVisibleRect;
-                let owner: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
-                let t = unsafe {
-                    NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.bounds(), opts, Some(owner), None)
-                };
-                self.addTrackingArea(&t);
-                *self.ivars().tracking.borrow_mut() = Some(t);
+                view_base::reset_tracking(self, &self.ivars().tracking, NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect);
             }
 
             #[unsafe(method(mouseMoved:))]
@@ -6366,15 +6355,16 @@ mod pin_window {
 /// to reopen it as a pin; right-click for its menu.
 #[cfg(target_os = "macos")]
 pub mod recent_grid {
+    use crate::ui::view_base;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::rc::Rc;
 
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBackingStoreType, NSColor, NSEvent, NSImage, NSPanel, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSBackingStoreType, NSColor, NSEvent, NSImage, NSPanel, NSTrackingArea, NSView,
         NSWindowStyleMask,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
@@ -6443,19 +6433,7 @@ pub mod recent_grid {
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
                 let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
-                    self.removeTrackingArea(&t);
-                }
-                let opts = NSTrackingAreaOptions::MouseMoved
-                    | NSTrackingAreaOptions::MouseEnteredAndExited
-                    | NSTrackingAreaOptions::ActiveAlways
-                    | NSTrackingAreaOptions::InVisibleRect;
-                let owner: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
-                let t = unsafe {
-                    NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.bounds(), opts, Some(owner), None)
-                };
-                self.addTrackingArea(&t);
-                *self.ivars().tracking.borrow_mut() = Some(t);
+                view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
             }
 
             #[unsafe(method(mouseMoved:))]
@@ -6778,11 +6756,8 @@ fn pump_after_mouse() {
     });
 }
 
-/// Reinterpret any Objective-C object as `AnyObject` (for `downcast_ref`).
 #[cfg(target_os = "macos")]
-fn as_any<T: objc2::Message + ?Sized>(obj: &T) -> &objc2::runtime::AnyObject {
-    unsafe { &*(obj as *const T as *const objc2::runtime::AnyObject) }
-}
+use crate::ui::view_base::as_any;
 
 /// The body of `ScreenshotController.installKeyMonitor`'s block, extracted so it
 /// can borrow-free the closure. Runs on the main thread.

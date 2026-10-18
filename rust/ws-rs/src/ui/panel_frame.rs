@@ -11,7 +11,7 @@ mod appkit {
     use crate::ui::chrome::{ChromeConfig, PopupChrome};
     use crate::ui::theme::PopupColors;
     use objc2::rc::Retained;
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSImage, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
         NSVisualEffectState, NSVisualEffectView,

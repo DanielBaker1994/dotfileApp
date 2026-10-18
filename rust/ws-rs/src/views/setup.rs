@@ -749,7 +749,7 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{
-        define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+        define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
     };
     use objc2_app_kit::{
         NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
@@ -766,9 +766,7 @@ mod macos {
     const COLOR_KEY: &str = "NSColor";
     const PARA_KEY: &str = "NSParagraphStyle";
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn label(mtm: MainThreadMarker, s: &str, size: f64, color: crate::ui::theme::Rgba) -> Retained<NSTextField> {
         let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);

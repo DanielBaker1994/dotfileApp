@@ -37,15 +37,13 @@ mod appkit {
     use crate::ui::theme::{PopupColors, Rgba};
     use objc2::rc::{Retained, Weak};
     use objc2::runtime::{AnyObject, Sel};
-    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
-    use objc2_app_kit::{NSEvent, NSFont, NSTrackingArea, NSTrackingAreaOptions, NSView};
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{NSEvent, NSFont, NSTrackingArea, NSView};
     use objc2_foundation::NSObjectProtocol;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::{self, as_any};
 
     /// Chip width allowance on top of the title text (7 pt/side + breathing).
     const SIDE_PAD: f64 = 14.0;
@@ -243,24 +241,7 @@ mod appkit {
         }
 
         fn reset_tracking(&self) {
-            if let Some(old) = self.ivars().tracking.borrow_mut().take() {
-                self.removeTrackingArea(&old);
-            }
-            let opts = NSTrackingAreaOptions::MouseMoved
-                | NSTrackingAreaOptions::MouseEnteredAndExited
-                | NSTrackingAreaOptions::ActiveAlways
-                | NSTrackingAreaOptions::InVisibleRect;
-            let ta = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    self.bounds(),
-                    opts,
-                    Some(as_any(self)),
-                    None,
-                )
-            };
-            self.addTrackingArea(&ta);
-            *self.ivars().tracking.borrow_mut() = Some(ta);
+            view_base::reset_tracking(self, &self.ivars().tracking, view_base::hover_opts());
         }
 
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, title: &str) -> Retained<Self> {

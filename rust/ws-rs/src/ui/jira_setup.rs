@@ -387,9 +387,7 @@ mod appkit {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
     }
 
-    fn as_any<T: objc2::Message + ?Sized>(o: &T) -> &AnyObject {
-        unsafe { &*(o as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     pub struct FormIvars {
         settings: SetupStrings,

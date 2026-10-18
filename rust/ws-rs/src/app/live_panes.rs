@@ -53,9 +53,7 @@ impl LivePane {
     }
 }
 
-fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-    unsafe { &*(obj as *const T as *const AnyObject) }
-}
+use crate::ui::view_base::as_any;
 
 /// `NavPane.inside`: the responder is `v`, a descendant, or the field
 /// editor of a text field inside `v`.

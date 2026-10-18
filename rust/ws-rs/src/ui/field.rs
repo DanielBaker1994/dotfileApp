@@ -11,7 +11,7 @@ mod appkit {
     use crate::ui::style;
     use crate::ui::theme::PopupColors;
     use objc2::rc::Retained;
-    use objc2::{msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAutoresizingMaskOptions, NSFocusRingType, NSFont, NSTextField, NSView};
     use objc2_app_kit::{NSControlTextEditingDelegate, NSTextFieldDelegate};
     use objc2_app_kit::{NSFontAttributeName, NSForegroundColorAttributeName};
@@ -19,9 +19,7 @@ mod appkit {
     use objc2_foundation::{NSAttributedString, NSAttributedStringKey, NSDictionary};
     use objc2::runtime::AnyObject;
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     /// Build an attributed placeholder forced to the theme's `dim` colour so
     /// the text does not resolve against the window's effectiveAppearance.
@@ -181,7 +179,7 @@ mod appkit {
             on_change: Box<dyn Fn(String)>,
             on_command: Box<dyn Fn(&str) -> bool>,
         ) -> Retained<FieldDelegate> {
-            use objc2::DefinedClass;
+            
             let this = Self::alloc(mtm).set_ivars(FieldDelegateIvars {
                 on_change: std::cell::RefCell::new(Some(on_change)),
                 on_command: std::cell::RefCell::new(Some(on_command)),

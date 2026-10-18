@@ -4134,7 +4134,7 @@ impl CompareWindowModel {
 
     /// `CompareFolderView.handleKey`.
     fn folder_key(&mut self, key: crate::ui::popup::KeyInput) -> bool {
-        let (cmd, ctrl, opt, shift) = (key.cmd, key.ctrl, key.opt, key.shift);
+        let (cmd, ctrl, _opt, shift) = (key.cmd, key.ctrl, key.opt, key.shift);
         let code = key.key_code;
         let filter = |c: u16| [18u16, 19, 20, 21, 23, 22].iter().position(|d| *d == c);
         let fp = &mut self.folder_page;
@@ -5230,7 +5230,7 @@ mod macos {
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezierPath, NSBorderType, NSColor, NSEvent,
         NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold,
@@ -5241,9 +5241,7 @@ mod macos {
     };
     use std::cell::{Cell, RefCell};
 
-    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
-        unsafe { &*(obj as *const T as *const AnyObject) }
-    }
+    use crate::ui::view_base::as_any;
 
     fn nsrect(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
