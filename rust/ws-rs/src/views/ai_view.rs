@@ -141,16 +141,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSAIView"]
         #[ivars = AIIvars]
         pub struct AIView;
 
         impl AIView {
-
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
 
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {

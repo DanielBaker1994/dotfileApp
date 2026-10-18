@@ -188,7 +188,7 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSFileListView"]
         #[ivars = FileListIvars]
@@ -196,11 +196,6 @@ mod appkit {
         pub struct FileListView;
 
         impl FileListView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             /// `FileListPane` takes the keyboard (Ctrl+HJKL `files-list`).
             #[unsafe(method(acceptsFirstResponder))]
             fn afr(&self) -> bool {
@@ -662,18 +657,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSFilesView"]
         #[ivars = FilesIvars]
         pub struct FilesView;
 
         impl FilesView {
-
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
 
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {
@@ -892,7 +882,7 @@ mod appkit {
         pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
             let l = self.list_view();
             let rects = l.vim_shown_rects();
-            (Retained::into_super(l), rects)
+            (Retained::into_super(Retained::into_super(l)), rects)
         }
 
         pub fn sidebar(&self) -> Retained<SidebarView> {

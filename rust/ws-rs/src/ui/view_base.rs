@@ -9,9 +9,31 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AllocAnyThread, Message};
+use objc2::{define_class, AllocAnyThread, MainThreadOnly, Message};
 use objc2_app_kit::{NSEvent, NSView, NSTrackingArea, NSTrackingAreaOptions};
-use objc2_foundation::NSPoint;
+use objc2_foundation::{NSObjectProtocol, NSPoint};
+
+// The flipped base every pane/popup `NSView` subclass used to re-declare
+// against: one `isFlipped`-returns-true instead of 46 private copies.
+// Message dispatch is identical — subclasses keep any of their own overrides.
+// No Rust ivars, so subclassing it is like subclassing `NSView` itself.
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WSFlippedView"]
+
+    /// `WSFlippedView`.
+    pub struct WSFlippedView;
+
+    unsafe impl NSObjectProtocol for WSFlippedView {}
+
+    impl WSFlippedView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+    }
+);
 
 /// Up-cast any message-receiving reference to `&AnyObject` (the `owner:` of a
 /// tracking area, the receiver of a `performSelector:`, …).

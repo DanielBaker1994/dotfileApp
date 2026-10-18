@@ -481,7 +481,7 @@ impl DaemonUi {
         let (view, rects) = match src {
             RowsSource::Sidebar => {
                 let b = bar.as_ref()?;
-                (Retained::into_super(b.clone()), b.vim_shown_rects())
+                (Retained::into_super(Retained::into_super(b.clone())), b.vim_shown_rects())
             }
             RowsSource::Files => {
                 let view = self
@@ -679,7 +679,7 @@ pub(super) struct VimSearchBarIvars {
 }
 
 define_class!(
-    #[unsafe(super(NSView))]
+    #[unsafe(super(crate::ui::view_base::WSFlippedView))]
     #[thread_kind = MainThreadOnly]
     #[name = "WSVimSearchBar"]
     #[ivars = VimSearchBarIvars]
@@ -687,11 +687,6 @@ define_class!(
     pub(super) struct VimSearchBarView;
 
     impl VimSearchBarView {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool {
-            true
-        }
-
         #[unsafe(method(hitTest:))]
         fn hit_test(&self, _p: NSPoint) -> *mut NSView {
             std::ptr::null_mut()
@@ -753,7 +748,7 @@ pub(super) struct VimMatchOverlayIvars {
 }
 
 define_class!(
-    #[unsafe(super(NSView))]
+    #[unsafe(super(crate::ui::view_base::WSFlippedView))]
     #[thread_kind = MainThreadOnly]
     #[name = "WSVimMatchOverlay"]
     #[ivars = VimMatchOverlayIvars]
@@ -762,11 +757,6 @@ define_class!(
     pub(super) struct VimMatchOverlay;
 
     impl VimMatchOverlay {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool {
-            true
-        }
-
         #[unsafe(method(hitTest:))]
         fn hit_test(&self, _p: NSPoint) -> *mut NSView {
             std::ptr::null_mut()

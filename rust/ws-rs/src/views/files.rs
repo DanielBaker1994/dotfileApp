@@ -1977,7 +1977,7 @@ impl FileBrowser {
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         view.apply(self.snapshot());
-        self.root = Some(Retained::into_super(view.clone()));
+        self.root = Some(Retained::into_super(Retained::into_super(view.clone())));
         self.view = Some(view);
     }
 
@@ -2164,17 +2164,13 @@ mod macos {
     pub struct FlippedViewIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSFilesFlippedView"]
         #[ivars = FlippedViewIvars]
         pub struct FlippedView;
 
         impl FlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for FlippedView {}
@@ -2344,7 +2340,7 @@ mod macos {
 
         root.addSubview(&preview);
 
-        root.into_super()
+        Retained::into_super(Retained::into_super(root))
     }
 }
 

@@ -292,7 +292,7 @@ impl PopupInspector {
         button.setHidden(self.content.is_none());
         hint.setHidden(self.content.is_none());
 
-        let view: Retained<NSView> = view.into_super();
+        let view: Retained<NSView> = Retained::into_super(view.into_super());
         self.view = Some(view);
     }
 
@@ -477,18 +477,13 @@ mod macos {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSInspectorView"]
         #[ivars = InspectorViewIvars]
         pub struct InspectorView;
 
         impl InspectorView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 let c = &self.ivars().colors;

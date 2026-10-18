@@ -55,15 +55,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSListRows"]
         #[ivars = RowsIvars]
         pub struct ListRows;
 
         impl ListRows {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool { false }
             #[unsafe(method(acceptsFirstMouse:))]

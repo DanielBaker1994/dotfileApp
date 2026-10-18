@@ -3362,17 +3362,13 @@ mod daemon_ui {
     pub struct HostRootViewIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSHostRootView"]
         #[ivars = HostRootViewIvars]
         pub struct HostRootView;
 
         impl HostRootView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for HostRootView {}
@@ -7045,12 +7041,12 @@ mod daemon_ui {
                         Some(i) => {
                             let v = s.sidebar_view();
                             let r = v.title_rect(i)?;
-                            Some((Retained::into_super(v), r))
+                            Some((Retained::into_super(Retained::into_super(v)), r))
                         }
                         None => {
                             let v = s.tree_view();
                             let r = v.name_rect(&path)?;
-                            Some((Retained::into_super(v), r))
+                            Some((Retained::into_super(Retained::into_super(v)), r))
                         }
                     }
                 })
@@ -12712,18 +12708,18 @@ mod daemon_ui {
                             }
                         } else if v == SlotView::Ai {
                             let a = self.build_ai(mtm);
-                            let root: Retained<NSView> = Retained::into_super(a.view.clone());
+                            let root: Retained<NSView> = Retained::into_super(Retained::into_super(a.view.clone()));
                             st.ai = Some(a);
                             root
                         } else if v == SlotView::Confluence {
                             let cs = self.build_confluence(mtm);
-                            let root: Retained<NSView> = Retained::into_super(cs.view.clone());
+                            let root: Retained<NSView> = Retained::into_super(Retained::into_super(cs.view.clone()));
                             self.wire_sidebar_divider(SlotView::Confluence, &cs.view.divider());
                             st.confluence = Some(cs);
                             root
                         } else if v == SlotView::Jira {
                             let (list, view) = self.build_jira(mtm);
-                            let root: Retained<NSView> = Retained::into_super(view.clone());
+                            let root: Retained<NSView> = Retained::into_super(Retained::into_super(view.clone()));
                             self.wire_sidebar_divider(SlotView::Jira, &view.divider());
                             self.wire_inspector_divider(&view);
                             st.jira = Some((list, view));
@@ -13518,7 +13514,7 @@ mod daemon_ui {
         ));
         root.addSubview(&title);
         root.addSubview(&hint);
-        root.into_super()
+        Retained::into_super(Retained::into_super(root))
     }
 }
 

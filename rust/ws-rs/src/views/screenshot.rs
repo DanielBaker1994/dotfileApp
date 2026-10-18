@@ -4837,18 +4837,13 @@ mod overlay {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSShotOverlayView"]
         #[ivars = ShotOverlayViewIvars]
         pub struct ShotOverlayView;
 
         impl ShotOverlayView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 self.render();
@@ -6083,18 +6078,13 @@ mod pin_window {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSPinView"]
         #[ivars = WSPinViewIvars]
         pub struct WSPinView;
 
         impl WSPinView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 let image = self.ivars().image.borrow().clone();
@@ -6417,16 +6407,13 @@ pub mod recent_grid {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSShotRecentView"]
         #[ivars = ViewIvars]
         pub struct ShotRecentView;
 
         impl ShotRecentView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(acceptsFirstMouse:))]
             fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool { true }
 

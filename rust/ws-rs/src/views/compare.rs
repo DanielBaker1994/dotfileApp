@@ -5018,7 +5018,8 @@ impl CompareSurface {
     }
 
     pub fn build(mtm: objc2::MainThreadMarker) -> Self {
-        use objc2_app_kit::{NSAutoresizingMaskOptions as M, NSView};
+        use objc2_app_kit::{NSAutoresizingMaskOptions as M};
+
         use objc2_foundation::{NSPoint, NSRect, NSSize};
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
         let colors = crate::ui::theme::section_colors("compare");
@@ -5035,8 +5036,8 @@ impl CompareSurface {
         pane.set_colors(colors);
         let tree = macos::FolderTreeView::create(mtm);
         chrome.set_body(vec![
-            objc2::rc::Retained::into_super(pane.clone()),
-            objc2::rc::Retained::into_super(tree.clone()),
+            objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(pane.clone())),
+            objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(tree.clone())),
         ]);
         pane.set_model(PaneModel::empty());
         tree.setHidden(true);
@@ -5044,7 +5045,7 @@ impl CompareSurface {
         // that can reach past its frame.
         pane.setClipsToBounds(true);
         tree.setClipsToBounds(true);
-        let root: objc2::rc::Retained<NSView> = objc2::rc::Retained::into_super(chrome.clone());
+        let root: objc2::rc::Retained<objc2_app_kit::NSView> = objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(chrome.clone()));
         CompareSurface {
             root,
             chrome,
@@ -5234,7 +5235,7 @@ mod macos {
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezierPath, NSBorderType, NSColor, NSEvent,
         NSEventModifierFlags, NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold,
-        NSForegroundColorAttributeName, NSScrollView, NSStringDrawing, NSTextView, NSView,
+        NSForegroundColorAttributeName, NSScrollView, NSStringDrawing, NSTextView,
     };
     use objc2_foundation::{
         NSAttributedStringKey, NSDictionary, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -5307,18 +5308,13 @@ mod macos {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSComparePaneView"]
         #[ivars = ComparePaneViewIvars]
         pub struct ComparePaneView;
 
         impl ComparePaneView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(acceptsFirstResponder))]
             fn afr(&self) -> bool {
                 true
@@ -5563,18 +5559,13 @@ mod macos {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSCompareThumbnail"]
         #[ivars = CompareThumbnailIvars]
         pub struct CompareThumbnail;
 
         impl CompareThumbnail {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 self.render();
@@ -5783,18 +5774,13 @@ mod macos {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSFolderTreeView"]
         #[ivars = FolderTreeViewIvars]
         pub struct FolderTreeView;
 
         impl FolderTreeView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(acceptsFirstResponder))]
             fn afr(&self) -> bool {
                 true

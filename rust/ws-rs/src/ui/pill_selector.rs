@@ -29,7 +29,8 @@ mod appkit {
     use objc2::rc::Retained;
     
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSEvent, NSFont, NSTrackingArea, NSView};
+    use objc2_app_kit::{NSEvent, NSFont, NSTrackingArea};
+
     use objc2_foundation::{NSObjectProtocol, NSRect, NSSize};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -47,18 +48,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSTabPillView"]
         #[ivars = TabPillIvars]
         pub struct TabPillView;
 
         impl TabPillView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _r: NSRect) {
                 let iv = self.ivars();

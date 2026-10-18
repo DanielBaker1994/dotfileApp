@@ -1210,17 +1210,13 @@ mod macos {
     pub struct SwitchFlippedViewIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSSwitchFlippedView"]
         #[ivars = SwitchFlippedViewIvars]
         pub struct SwitchFlippedView;
 
         impl SwitchFlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for SwitchFlippedView {}

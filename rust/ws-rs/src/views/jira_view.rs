@@ -3409,16 +3409,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraTableView"]
         #[ivars = TableIvars]
         pub struct JiraTableView;
 
         impl JiraTableView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(acceptsFirstResponder))]
             fn afr(&self) -> bool { true }
 
@@ -3821,16 +3818,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraHeaderView"]
         #[ivars = HeaderIvars]
         pub struct JiraHeaderView;
 
         impl JiraHeaderView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool { false }
 
@@ -4132,16 +4126,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraInspectorView"]
         #[ivars = InspectorIvars]
         pub struct JiraInspectorView;
 
         impl JiraInspectorView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool { false }
 
@@ -4362,16 +4353,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraBoardBar"]
         #[ivars = BoardBarIvars]
         pub struct JiraBoardBarView;
 
         impl JiraBoardBarView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(sprintPicked:))]
             fn sprint_picked(&self, _sender: &AnyObject) {
                 let i = self.ivars().sprint.indexOfSelectedItem();
@@ -4632,16 +4620,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraView"]
         #[ivars = JiraIvars]
         pub struct JiraView;
 
         impl JiraView {
-
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
 
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {
@@ -4733,7 +4718,7 @@ mod appkit {
             let (frames, _) = h.frames();
             let (fx, fw) = *frames.get(col)?;
             let r = filter_rect(fx, fw, h.bounds().size.height);
-            Some((Retained::into_super(h), r))
+            Some((Retained::into_super(Retained::into_super(h)), r))
         }
 
         /// The rail (`sidebarJumpItems` / `do:jira-jump`).
@@ -4792,7 +4777,7 @@ mod appkit {
         pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
             let t = self.ivars().table.clone();
             let rects = t.vim_shown_rects();
-            (Retained::into_super(t), rects)
+            (Retained::into_super(Retained::into_super(t)), rects)
         }
 
         /// `JiraDashboard.navPanes`: sidebar, search, list, issue.
@@ -4958,7 +4943,7 @@ mod appkit {
         }
 
         pub fn table_view(&self) -> Retained<NSView> {
-            Retained::into_super(self.ivars().table.clone())
+            Retained::into_super(Retained::into_super(self.ivars().table.clone()))
         }
 
         pub fn search_field(&self) -> Retained<NSTextField> {

@@ -172,15 +172,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSConfResultsView"]
         #[ivars = ResultsIvars]
         pub struct ConfResultsView;
 
         impl ConfResultsView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
             #[unsafe(method(acceptsFirstResponder))]
             fn afr(&self) -> bool { true }
             #[unsafe(method(mouseDownCanMoveWindow))]
@@ -359,16 +357,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSConfluenceView"]
         #[ivars = ConfIvars]
         pub struct ConfluenceView;
 
         impl ConfluenceView {
-
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
 
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {
@@ -596,7 +591,7 @@ mod appkit {
         }
 
         pub fn results_view(&self) -> Retained<NSView> {
-            Retained::into_super(self.ivars().results.clone())
+            Retained::into_super(Retained::into_super(self.ivars().results.clone()))
         }
 
         /// The results list's document view plus each visible row's rect (the
@@ -604,7 +599,7 @@ mod appkit {
         pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
             let r = self.ivars().results.clone();
             let rects = r.vim_shown_rects();
-            (Retained::into_super(r), rects)
+            (Retained::into_super(Retained::into_super(r)), rects)
         }
 
         pub fn apply(&self, s: ConfSnapshot) {

@@ -1916,17 +1916,13 @@ pub mod macos {
     pub struct ConfRootIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSConfluenceFlippedView"]
         #[ivars = ConfRootIvars]
         pub struct ConfFlippedView;
 
         impl ConfFlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for ConfFlippedView {}

@@ -173,16 +173,13 @@ use crate::ui::view_base;
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraSearchBar"]
         #[ivars = BarIvars]
         pub struct JiraSearchBar;
 
         impl JiraSearchBar {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool { false }
 

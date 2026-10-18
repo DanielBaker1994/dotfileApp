@@ -168,16 +168,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSShortcutsList"]
         #[ivars = ListIvars]
         struct ShortcutsList;
 
         impl ShortcutsList {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _d: NSRect) {
                 self.draw();

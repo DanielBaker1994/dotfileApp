@@ -68,18 +68,13 @@ use crate::ui::view_base;
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSActionPicker"]
         #[ivars = PickerIvars]
         pub struct ActionPicker;
 
         impl ActionPicker {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(acceptsFirstMouse:))]
             fn afm(&self, _e: Option<&NSEvent>) -> bool {
                 true

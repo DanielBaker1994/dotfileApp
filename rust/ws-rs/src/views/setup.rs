@@ -799,17 +799,13 @@ mod macos {
     pub struct FlippedViewIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSSetupFlippedView"]
         #[ivars = FlippedViewIvars]
         pub struct FlippedView;
 
         impl FlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for FlippedView {}
@@ -1142,7 +1138,7 @@ mod macos {
         let handler = SetupHandler::alloc(mtm).set_ivars(SetupHandlerIvars {
             checks: RefCell::new(checks.to_vec()),
             window: window.clone(),
-            rows_view: rows_view.clone().into_super(),
+            rows_view: Retained::into_super(rows_view.clone().into_super()),
             status: status.clone(),
             log_view: log_view.clone(),
             stack: RefCell::new(create_button(mtm, colors, "Set Up Hotkeys & Borders…", None, None)),

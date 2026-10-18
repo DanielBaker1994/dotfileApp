@@ -410,18 +410,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraSetupFormView"]
         #[ivars = FormIvars]
         pub struct JiraSetupFormView;
 
         impl JiraSetupFormView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             /// The Config body sets the frame to the scroll width; re-lay out.
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {

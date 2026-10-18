@@ -28,11 +28,11 @@ mod appkit {
     use objc2::rc::Retained;
     
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSCursor, NSEvent, NSTrackingArea, NSView};
+    use objc2_app_kit::{NSCursor, NSEvent, NSTrackingArea};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
 
-    use crate::ui::view_base::{self};
+    use crate::ui::view_base::{self, WSFlippedView};
 
     pub struct SwitchIvars {
         colors: Cell<PopupColors>,
@@ -44,16 +44,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSProseSwitch"]
         #[ivars = SwitchIvars]
         pub struct ProseSwitch;
 
         impl ProseSwitch {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool { true }
-
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool { false }
 

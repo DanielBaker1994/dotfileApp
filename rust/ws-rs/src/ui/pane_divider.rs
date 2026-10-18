@@ -63,7 +63,8 @@ mod appkit {
     use super::*;
     use objc2::rc::Retained;
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSCursor, NSEvent, NSView};
+    use objc2_app_kit::{NSCursor, NSEvent};
+
     use objc2_foundation::{NSObjectProtocol, NSRect};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -87,18 +88,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSPaneDividerView"]
         #[ivars = DividerIvars]
         pub struct PaneDividerView;
 
         impl PaneDividerView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mouse_down_can_move_window(&self) -> bool {
                 false

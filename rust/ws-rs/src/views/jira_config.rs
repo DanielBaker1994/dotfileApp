@@ -677,17 +677,13 @@ mod appkit {
     pub struct FlippedIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraConfigFlippedView"]
         #[ivars = FlippedIvars]
         pub struct FlippedView;
 
         impl FlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for FlippedView {}
@@ -727,18 +723,13 @@ mod appkit {
     // the per-row `NSButton` `PushOnPushOff` bezels (system chrome the
     // `[theme]` cannot reach; see `pill_selector.rs` for the same ban).
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJobRowList"]
         #[ivars = JobListIvars]
         pub struct JobRowListView;
 
         impl JobRowListView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _r: NSRect) {
                 let iv = self.ivars();
@@ -974,18 +965,13 @@ mod appkit {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSJiraConfigBody"]
         #[ivars = BodyIvars]
         pub struct JiraConfigBodyView;
 
         impl JiraConfigBodyView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             /// Re-wrap the document whenever the Jira view resizes the surface.
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {

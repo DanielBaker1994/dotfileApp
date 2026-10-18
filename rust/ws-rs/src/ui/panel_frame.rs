@@ -21,17 +21,13 @@ mod appkit {
     pub struct FlippedIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSPanelFrameRoot"]
         #[ivars = FlippedIvars]
         pub struct PanelRoot;
 
         impl PanelRoot {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for PanelRoot {}
@@ -118,6 +114,6 @@ mod appkit {
         );
         content.setAutoresizingMask(fill());
         root.addSubview(&content);
-        PanelFrame { root: Retained::into_super(root), chrome, content, header_height: header_h }
+        PanelFrame { root: Retained::into_super(Retained::into_super(root)), chrome, content, header_height: header_h }
     }
 }

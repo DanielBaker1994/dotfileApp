@@ -90,16 +90,13 @@ pub struct ListIvars {
 
 define_class!(
     /// The option list (drawn rows) and the filter field's delegate.
-    #[unsafe(super(NSView))]
+    #[unsafe(super(crate::ui::view_base::WSFlippedView))]
     #[thread_kind = MainThreadOnly]
     #[name = "WSMultiPickerList"]
     #[ivars = ListIvars]
     pub struct PickerList;
 
     impl PickerList {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool { true }
-
         #[unsafe(method(acceptsFirstMouse:))]
         fn afm(&self, _e: Option<&NSEvent>) -> bool { true }
 
@@ -253,16 +250,13 @@ pub struct FooterIvars {
 
 define_class!(
     /// "N selected · M shown" + the extra buttons, Clear and Done.
-    #[unsafe(super(NSView))]
+    #[unsafe(super(crate::ui::view_base::WSFlippedView))]
     #[thread_kind = MainThreadOnly]
     #[name = "WSMultiPickerFooter"]
     #[ivars = FooterIvars]
     pub struct PickerFooter;
 
     impl PickerFooter {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool { true }
-
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, e: &NSEvent) {
             let p = view_base::mouse_point(self, e);
@@ -431,16 +425,13 @@ pub struct ChipIvars {
 define_class!(
     /// The closed picker: an input-styled box of pills + a chevron. Click,
     /// Space, Return or ↓ opens the popover (`JiraMultiPicker.keyDown`).
-    #[unsafe(super(NSView))]
+    #[unsafe(super(crate::ui::view_base::WSFlippedView))]
     #[thread_kind = MainThreadOnly]
     #[name = "WSMultiPickerChip"]
     #[ivars = ChipIvars]
     pub struct PickerChip;
 
     impl PickerChip {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool { true }
-
         #[unsafe(method(acceptsFirstResponder))]
         fn afr(&self) -> bool { true }
 

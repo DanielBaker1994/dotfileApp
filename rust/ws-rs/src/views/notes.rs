@@ -2086,18 +2086,13 @@ mod macos {
     }
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSNotesFlippedView"]
         #[ivars = NotesFlippedIvars]
         pub struct NotesFlippedView;
 
         impl NotesFlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(setFrameSize:))]
             fn set_frame_size(&self, size: NSSize) {
                 let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
@@ -2574,18 +2569,13 @@ mod macos {
         /// virtual lines for, over the SwiftTerm pane; click opens the
         /// FilePopup, right-click the image menu. Empty areas are
         /// click-through (`hitTest:` returns nil).
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSVimImageOverlay"]
         #[ivars = VimImageOverlayIvars]
         pub struct VimImageOverlay;
 
         impl VimImageOverlay {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
-
             #[unsafe(method(hitTest:))]
             fn hit_test(&self, point: NSPoint) -> *mut NSView {
                 let p = if let Some(sv) = unsafe { self.superview() } {
@@ -3729,7 +3719,7 @@ mod macos {
         root.set_rail_divider(&divider);
 
         Some(NotesSurface {
-            root: root.into_super(),
+            root: Retained::into_super(Retained::into_super(root)),
             editor: text.clone(),
             terminal,
             browser,

@@ -1057,17 +1057,13 @@ mod macos {
     pub struct FlippedViewIvars;
 
     define_class!(
-        #[unsafe(super(NSView))]
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSPathsFlippedView"]
         #[ivars = FlippedViewIvars]
         pub struct FlippedView;
 
         impl FlippedView {
-            #[unsafe(method(isFlipped))]
-            fn is_flipped(&self) -> bool {
-                true
-            }
         }
 
         unsafe impl NSObjectProtocol for FlippedView {}
@@ -1172,7 +1168,7 @@ mod macos {
         empty.setHidden(!rows.is_empty());
         root.addSubview(&empty);
 
-        (root.into_super(), search)
+        (Retained::into_super(Retained::into_super(root)), search)
     }
 }
 
