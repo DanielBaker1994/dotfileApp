@@ -21,6 +21,34 @@ mod appkit {
 
     use crate::ui::view_base::as_any;
 
+    /// The field-editor navigation commands the search fields route: Enter,
+    /// down, up, Escape — one home for the selector ladder the files /
+    /// Confluence / Jira pane delegates each re-typed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum NavCmd {
+        Enter,
+        Down,
+        Up,
+        Escape,
+    }
+
+    /// Map a `control:textView:doCommandBySelector:` selector to its
+    /// [`NavCmd`], or `None` when it is not a navigation command.
+    pub fn nav_command(cmd: objc2::runtime::Sel) -> Option<NavCmd> {
+        use objc2::sel;
+        if cmd == sel!(insertNewline:) {
+            Some(NavCmd::Enter)
+        } else if cmd == sel!(moveDown:) {
+            Some(NavCmd::Down)
+        } else if cmd == sel!(moveUp:) {
+            Some(NavCmd::Up)
+        } else if cmd == sel!(cancelOperation:) {
+            Some(NavCmd::Escape)
+        } else {
+            None
+        }
+    }
+
     /// Build an attributed placeholder forced to the theme's `dim` colour so
     /// the text does not resolve against the window's effectiveAppearance.
     pub fn build_attributed_placeholder(

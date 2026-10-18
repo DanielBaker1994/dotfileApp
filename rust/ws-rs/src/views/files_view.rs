@@ -122,7 +122,7 @@ mod appkit {
     use crate::ui::theme::{PopupColors, PopupTone};
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::NSDraggingInfo;
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSColor, NSControlTextEditingDelegate, NSEvent,
@@ -734,16 +734,12 @@ mod appkit {
 
             #[unsafe(method(control:textView:doCommandBySelector:))]
             fn do_command(&self, _c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
-                let ev = if cmd == sel!(insertNewline:) {
-                    FilesEvent::Enter
-                } else if cmd == sel!(moveDown:) {
-                    FilesEvent::Move(1)
-                } else if cmd == sel!(moveUp:) {
-                    FilesEvent::Move(-1)
-                } else if cmd == sel!(cancelOperation:) {
-                    FilesEvent::Escape
-                } else {
-                    return objc2::runtime::Bool::NO;
+                let ev = match crate::ui::field::nav_command(cmd) {
+                    Some(crate::ui::field::NavCmd::Enter) => FilesEvent::Enter,
+                    Some(crate::ui::field::NavCmd::Down) => FilesEvent::Move(1),
+                    Some(crate::ui::field::NavCmd::Up) => FilesEvent::Move(-1),
+                    Some(crate::ui::field::NavCmd::Escape) => FilesEvent::Escape,
+                    None => return objc2::runtime::Bool::NO,
                 };
                 self.emit(ev);
                 objc2::runtime::Bool::YES

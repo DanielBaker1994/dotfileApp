@@ -4642,16 +4642,12 @@ mod appkit {
 
             #[unsafe(method(control:textView:doCommandBySelector:))]
             fn do_command(&self, _c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
-                let ev = if cmd == sel!(insertNewline:) {
-                    JiraEvent::Enter
-                } else if cmd == sel!(moveDown:) {
-                    JiraEvent::Move(1)
-                } else if cmd == sel!(moveUp:) {
-                    JiraEvent::Move(-1)
-                } else if cmd == sel!(cancelOperation:) {
-                    JiraEvent::Escape
-                } else {
-                    return objc2::runtime::Bool::NO;
+                let ev = match crate::ui::field::nav_command(cmd) {
+                    Some(crate::ui::field::NavCmd::Enter) => JiraEvent::Enter,
+                    Some(crate::ui::field::NavCmd::Down) => JiraEvent::Move(1),
+                    Some(crate::ui::field::NavCmd::Up) => JiraEvent::Move(-1),
+                    Some(crate::ui::field::NavCmd::Escape) => JiraEvent::Escape,
+                    None => return objc2::runtime::Bool::NO,
                 };
                 self.emit(ev);
                 objc2::runtime::Bool::YES

@@ -135,7 +135,7 @@ mod appkit {
     use crate::views::jira_view::draw_wrapped;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-    use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSControlTextEditingDelegate, NSEvent, NSProgressIndicator, NSProgressIndicatorStyle,
         NSScrollView, NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea,
@@ -455,16 +455,12 @@ mod appkit {
 
             #[unsafe(method(control:textView:doCommandBySelector:))]
             fn do_command(&self, _c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
-                let ev = if cmd == sel!(insertNewline:) {
-                    ConfEvent::Enter
-                } else if cmd == sel!(moveDown:) {
-                    ConfEvent::Move(1)
-                } else if cmd == sel!(moveUp:) {
-                    ConfEvent::Move(-1)
-                } else if cmd == sel!(cancelOperation:) {
-                    ConfEvent::Escape
-                } else {
-                    return objc2::runtime::Bool::NO;
+                let ev = match crate::ui::field::nav_command(cmd) {
+                    Some(crate::ui::field::NavCmd::Enter) => ConfEvent::Enter,
+                    Some(crate::ui::field::NavCmd::Down) => ConfEvent::Move(1),
+                    Some(crate::ui::field::NavCmd::Up) => ConfEvent::Move(-1),
+                    Some(crate::ui::field::NavCmd::Escape) => ConfEvent::Escape,
+                    None => return objc2::runtime::Bool::NO,
                 };
                 self.emit(ev);
                 objc2::runtime::Bool::YES
