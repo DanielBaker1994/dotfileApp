@@ -9409,7 +9409,7 @@ mod daemon_ui {
         fn jira_group_menu(&self) -> Option<crate::ui::menu_kit::MenuEntry> {
             use crate::ui::menu_kit::MenuEntry;
             let (cur, choices) = self.jira_surface(|l| (l.effective_group_by(), l.group_choices()))?;
-            let on_list = self.jira_surface(|l| l.on_board_list()).unwrap_or(false);
+            let on_list = self.jira_surface(|l| l.on_catalog_list()).unwrap_or(false);
             if on_list {
                 return None;
             }
@@ -10220,15 +10220,6 @@ mod daemon_ui {
                         self.jira_event(E::OpenDetail);
                     }
                 }
-                E::Check(row) => {
-                    self.jira_surface(|l| {
-                        if let Some(k) = l.row(row).and_then(|r| r.get("key")).cloned() {
-                            if !l.checked.remove(&k) {
-                                l.checked.insert(k);
-                            }
-                        }
-                    });
-                }
                 E::Star(row) => {
                     let msg = self.jira_surface(|l| {
                         let r = l.row(row)?.clone();
@@ -10237,6 +10228,14 @@ mod daemon_ui {
                         // One verb for the user: ☆ = star. Issues star into
                         // the Starred issues list, boards into the Boards
                         // sidebar row, releases star as before.
+                        let label = r.get("labelName").filter(|_| k.starts_with(crate::views::jira_view::LABEL_PREFIX)).cloned();
+                        if let Some(name) = label {
+                            let on = l.pinned_labels().contains(&name);
+                            return Some((
+                                format!("{} {name}", if on { "Starred" } else { "Unstarred" }),
+                                if on { "star.fill" } else { "star" },
+                            ));
+                        }
                         Some(match k.strip_prefix(BOARD_PREFIX) {
                             Some(id) => {
                                 let on = l.boards.iter().any(|(b, _)| b == id);
@@ -10302,6 +10301,12 @@ mod daemon_ui {
                 E::Enter | E::OpenDetail => {
                     let sel = self.jira_surface(|l| l.selection).unwrap_or(0);
                     if self.jira_surface(|l| l.activate_synthetic(sel)) == Some(true) {
+                        return;
+                    }
+                    if let Some(name) = self.jira_surface(|l| l.selected_label()).flatten() {
+                        if let Some(Err(e)) = self.jira_surface(|l| l.open_label(&name)) {
+                            crate::ui::toast::show(&format!("Label {name}: {e}"), "exclamationmark.triangle");
+                        }
                         return;
                     }
                     let target = self.jira_surface(|l| {
@@ -10421,7 +10426,7 @@ mod daemon_ui {
                 }
                 E::Sidebar(SidebarEvent::Select(i)) => {
                     self.jira_leave_config();
-                    self.jira_surface(|l| l.select_tab(i));
+                    self.jira_surface(|l| l.select_browse_row(i));
                 }
                 E::Sidebar(SidebarEvent::Pinned(key)) => {
                     if let Some(e) = self.jira_open_pin_key(&key) {
@@ -10476,8 +10481,16 @@ mod daemon_ui {
                 if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
                     return l.open_my_work(id).err().map(|e| format!("My work {id}: {e}"));
                 }
+                if key == crate::views::jira_view::TICKETS_KEY {
+                    l.open_tickets();
+                    return None;
+                }
                 if key == BOARD_LIST_KEY {
                     l.show_board_list();
+                    return None;
+                }
+                if key == crate::views::jira_view::LABEL_LIST_KEY {
+                    l.show_label_list();
                     return None;
                 }
                 if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
@@ -10794,8 +10807,8 @@ mod daemon_ui {
         }
 
         /// The list window's Jira keys (`hostShortcutKey` + `listKey`):
-        /// Cmd+I issue panel, Ctrl+Space tick, Tab / Shift+Tab, Home / End /
-        /// Page Up / Page Down, Cmd+F live search.
+        /// Cmd+I issue panel, Tab / Shift+Tab, Home / End / Page Up /
+        /// Page Down, Cmd+F live search.
         fn jira_key(&self, key: &popup::KeyInput) -> bool {
             let plain = !key.cmd && !key.ctrl && !key.opt;
             match key.key_code {
@@ -10805,23 +10818,6 @@ mod daemon_ui {
                 }
                 3 if key.cmd && !key.ctrl && !key.shift => {
                     self.jira_toggle_search();
-                    true
-                }
-                49 if key.ctrl && !key.cmd => {
-                    // Ctrl+Space ticks the selected row — a LIST key. With
-                    // the caret in a text field (search strip, live-search
-                    // row, setup form) it must reach the field editor
-                    // (rule 1: editing belongs to the focused field).
-                    if self.jira_text_focused() {
-                        return false;
-                    }
-                    self.jira_surface(|l| {
-                        if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
-                            if !l.checked.remove(&k) {
-                                l.checked.insert(k);
-                            }
-                        }
-                    });
                     true
                 }
                 48 if !key.cmd && !key.ctrl && !key.opt => {
@@ -10938,8 +10934,7 @@ mod daemon_ui {
             *self.ivars().action_picker.borrow_mut() = picker;
         }
 
-        /// `showActions()` for the Jira list: the highlighted row plus every
-        /// ticked row.
+        /// `showActions()` for the Jira list: the highlighted row.
         fn jira_actions(&self) {
             use crate::views::jira_view::{browse_url, is_release_row, issue_labels};
             let Some(mtm) = MainThreadMarker::new() else { return };
@@ -10953,12 +10948,8 @@ mod daemon_ui {
                 copy_keys: Vec<String>,
             }
             let Some(Some(cx)) = self.jira_surface(|l| {
-                let mut keys: Vec<String> = l.checked.iter().cloned().collect();
-                if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
-                    if !keys.contains(&k) {
-                        keys.insert(0, k);
-                    }
-                }
+                let keys: Vec<String> =
+                    l.selected().and_then(|r| r.get("key")).cloned().into_iter().collect();
                 let rows: Vec<_> = keys
                     .iter()
                     .filter(|k| !k.is_empty())
@@ -10995,7 +10986,7 @@ mod daemon_ui {
             let noun = if releases.is_empty() { "issue" } else if issues.is_empty() { "release" } else { "item" };
             let mut items: Vec<(String, String)> = Vec::new();
             if !urls.is_empty() {
-                items.push(("Open in browser".into(), format!("opens {} {noun}{s} · the highlighted row + ticked rows", urls.len())));
+                items.push(("Open in browser".into(), format!("opens {} {noun}{s} · the highlighted row", urls.len())));
                 items.push(("Copy URL and title".into(), format!("{} {noun}{s} · one “URL Title” line each", urls.len())));
             }
             items.push(("Copy to clipboard".into(), format!("{what} · {}", cx.copy_keys.join(", "))));
@@ -11101,7 +11092,6 @@ mod daemon_ui {
                             let on = t == "Blacklist release";
                             ui.jira_surface(|l| {
                                 l.set_blacklisted(&release_keys, on);
-                                l.checked.clear();
                             });
                             crate::ui::toast::show(&if on { format!("Hid {rs}") } else { format!("Restored {rs}") }, if on { "eye.slash" } else { "eye" });
                         }

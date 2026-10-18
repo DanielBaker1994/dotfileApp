@@ -95,7 +95,7 @@ Legend: ✅ works · 🟡 partial / differs · ❌ missing · ❓ unverified
 | Tab, Home/End/PgUp/PgDn | ❓ |
 | Cmd+F live search, Cmd+I issue panel | ❌ |
 | Space s f sidebar jump (`SidebarJump.swift`) | ❌ |
-| Cmd+K actions, 1-9 in it, Ctrl+Space tick | ❌ |
+| Cmd+K actions, 1-9 in it | ❌ |
 | Esc back / close search | 🟡 field Esc only |
 
 ## Confluence (`Confluence.handleKey`)

@@ -56,6 +56,10 @@
     {"field": "project", "width": 20, "filter": true, "sort": true},
     {"field": "boardId", "title": "ID", "width": 10, "sort": true}
   ],
+  "label_list_columns": [
+    {"field": "title", "title": "Label", "width": 70, "sort": true},
+    {"field": "count", "title": "Issues", "width": 30, "align": "right", "sort": true}
+  ],
   "board_table_columns": [
     {"field": "column", "title": "Column", "width": 18, "filter": true},
     {"field": "key", "width": 12},

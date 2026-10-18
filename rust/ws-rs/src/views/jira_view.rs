@@ -26,8 +26,8 @@ pub type Record = BTreeMap<String, String>;
 pub const ROW_H: f64 = 32.0;
 pub const HEADER_H: f64 = 26.0;
 pub const PADDING: f64 = 8.0;
-/// `rowLeadInset` with checkboxes + stars: padding + 10 + 22 + 20.
-pub const LEAD: f64 = PADDING + 10.0 + 22.0 + 20.0;
+/// `rowLeadInset` with the ☆ star only: padding + 10 + 22.
+pub const LEAD: f64 = PADDING + 10.0 + 22.0;
 /// The ticket inspector's collapsed strip — the right-pane mirror of the
 /// sidebar rail: just the expand button rides there (the divider hides).
 pub const INSPECTOR_RAIL_W: f64 = 40.0;
@@ -79,6 +79,10 @@ pub const BOARD_PREFIX: &str = "board:";
 pub const VIEW_PREFIX: &str = "view:";
 pub const LABEL_PREFIX: &str = "label:";
 pub const BOARD_LIST_KEY: &str = "boards:all";
+/// The STARRED section's "Tickets" row: opens the starred-issues list.
+/// The BROWSE "Labels" row: every label on the synced issues.
+pub const LABEL_LIST_KEY: &str = "labels:all";
+pub const TICKETS_KEY: &str = "tickets:starred";
 
 /// One sprint in the cached `boardCatalog.json` (`CatalogSprint`).
 #[derive(Clone, Debug, PartialEq)]
@@ -582,7 +586,6 @@ pub struct JiraList {
     /// Indices into `all`, filtered + sorted.
     pub rows: Vec<usize>,
     pub selection: usize,
-    pub checked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
     pub rules: Option<StyleRules>,
     pub catalog: Vec<(String, String, String)>,
@@ -962,13 +965,42 @@ impl JiraList {
         }
     }
 
+    /// The starred-issues list's tab (`favorites*` file): it is reached from
+    /// the STARRED section's "Tickets" row, not from the BROWSE rows.
+    fn favorites_tab(&self) -> Option<usize> {
+        self.tabs.iter().position(|t| t.file.to_lowercase().starts_with("favorites"))
+    }
+
+    /// Tab indices shown as BROWSE rows (every tab but the starred list).
+    fn browse_tabs(&self) -> Vec<usize> {
+        let fav = self.favorites_tab();
+        (0..self.tabs.len()).filter(|i| Some(*i) != fav).collect()
+    }
+
+    /// A BROWSE row click: the row index maps through `browse_tabs`.
+    pub fn select_browse_row(&mut self, row: usize) {
+        if let Some(i) = self.browse_tabs().get(row).copied() {
+            self.select_tab(i);
+        }
+    }
+
+    /// The STARRED "Tickets" row: show the starred-issues list.
+    pub fn open_tickets(&mut self) -> bool {
+        match self.favorites_tab() {
+            Some(i) => {
+                self.select_tab(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn select_tab(&mut self, i: usize) {
         let Some(t) = self.tabs.get(i).cloned() else { return };
         self.place = Some(JiraPlace::Tab(i));
         self.last_tab = i;
         self.back_to_board_list = false;
         self.col_filters.clear();
-        self.checked.clear(); // batch ticks belong to the shown list only
         self.sprint_filter = None;
         self.sprint_pending = None;
         self.sprint_error = None;
@@ -990,7 +1022,6 @@ impl JiraList {
     pub fn show_pin_file(&mut self, key: &str, path: &str, columns: Vec<ListColumn>) {
         self.place = Some(JiraPlace::Pin(key.to_string()));
         self.col_filters.clear();
-        self.checked.clear();
         self.sprint_filter = None;
         self.sprint_pending = None;
         self.sprint_error = None;
@@ -1006,7 +1037,6 @@ impl JiraList {
     /// `boardListRows()` as records (the "All boards" pin).
     pub fn show_board_list(&mut self) {
         self.place = Some(JiraPlace::Pin(BOARD_LIST_KEY.into()));
-        self.checked.clear();
         self.col_filters.clear();
         self.sprint_filter = None;
         self.sprint_pending = None;
@@ -1039,6 +1069,73 @@ impl JiraList {
         self.selection = 0;
         self.board_cols = Vec::new();
         self.refilter();
+    }
+
+    /// The BROWSE "Labels" list: every label on the synced issues with its
+    /// issue count; ☆ keeps one under STARRED, a double-click opens it.
+    pub fn show_label_list(&mut self) {
+        self.place = Some(JiraPlace::Pin(LABEL_LIST_KEY.into()));
+        self.col_filters.clear();
+        self.sprint_filter = None;
+        self.sprint_pending = None;
+        self.sprint_error = None;
+        self.columns = parse_columns_value(&crate::views::jira::label_list_columns());
+        self.all = self.label_rows();
+        self.selection = 0;
+        self.board_cols = Vec::new();
+        self.refilter();
+    }
+
+    /// One record per label (`key` = `label:NAME`), most used first. Reads
+    /// the synced issue lists (not releases), each issue counted once.
+    fn label_rows(&self) -> Vec<Record> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for i in self.browse_tabs() {
+            let t = &self.tabs[i];
+            let f = t.file.to_lowercase();
+            if f.starts_with("release") || f.contains("blacklist") {
+                continue;
+            }
+            for r in load_records(&t.path) {
+                if is_release_row(&r) || !r.get("key").is_some_and(|k| seen.insert(k.clone())) {
+                    continue;
+                }
+                for l in issue_labels([&r]) {
+                    *counts.entry(l).or_default() += 1;
+                }
+            }
+        }
+        // A starred label with no issue left still shows (so it can be unstarred).
+        for l in self.pinned_labels() {
+            counts.entry(l).or_default();
+        }
+        let mut v: Vec<(String, usize)> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+        v.into_iter()
+            .map(|(name, n)| {
+                let mut r = Record::new();
+                r.insert("key".into(), format!("{LABEL_PREFIX}{name}"));
+                r.insert("title".into(), name.clone());
+                r.insert("labelName".into(), name);
+                r.insert("count".into(), n.to_string());
+                r
+            })
+            .collect()
+    }
+
+    /// `true` while a catalog list (boards or labels) is the shown pin — the
+    /// lists that are not issue tables (no grouping, no column saves).
+    pub fn on_catalog_list(&self) -> bool {
+        matches!(&self.place, Some(JiraPlace::Pin(k)) if k == BOARD_LIST_KEY || k == LABEL_LIST_KEY)
+    }
+
+    /// The label named by the selected row of the Labels list.
+    pub fn selected_label(&self) -> Option<String> {
+        if !matches!(&self.place, Some(JiraPlace::Pin(k)) if k == LABEL_LIST_KEY) {
+            return None;
+        }
+        self.selected().and_then(|r| r.get("labelName")).cloned()
     }
 
     fn default_columns(&self) -> Vec<ListColumn> {
@@ -1714,6 +1811,11 @@ impl JiraList {
             self.toggle_pin_board(id);
             return;
         }
+        if let Some(name) = r.get("labelName").filter(|_| k.starts_with(LABEL_PREFIX)) {
+            let on = !self.pinned_labels().contains(name);
+            self.set_pinned_labels(&[name.clone()], on);
+            return;
+        }
         if is_release_row(&r) {
             let on = !self.favorite_releases().contains(&k);
             self.set_release_favorite(&[k], on);
@@ -2044,7 +2146,6 @@ impl JiraList {
             columns,
             rows,
             selection,
-            checked: self.checked.clone(),
             favs: self.favs.clone(),
             pinned_boards: self.boards.iter().map(|(id, _)| id.clone()).collect(),
             sort: None,
@@ -2337,7 +2438,7 @@ impl JiraList {
         let borrowed = match &self.place {
             Some(JiraPlace::Pin(k)) => {
                 k.starts_with(LABEL_PREFIX) || k.starts_with(MY_WORK_PREFIX) || str_list(&self.config, "favoriteReleases").contains(k)
-                    || (!k.starts_with(BOARD_PREFIX) && !k.starts_with(VIEW_PREFIX) && k != BOARD_LIST_KEY)
+                    || (!k.starts_with(BOARD_PREFIX) && !k.starts_with(VIEW_PREFIX) && k != BOARD_LIST_KEY && k != LABEL_LIST_KEY)
             }
             _ => false,
         };
@@ -2367,7 +2468,7 @@ impl JiraList {
     /// lists go through `jira_config.py --set-columns`; `None` means the
     /// `[jira] columns` key in commands.toml owns them (spec returned).
     pub fn save_columns(&mut self) -> Option<String> {
-        if self.on_board_list() || self.board_snapshot().is_some() {
+        if self.on_catalog_list() || self.board_snapshot().is_some() {
             return None;
         }
         let spec = crate::views::jira::serialize_columns(&self.columns, false);
@@ -2591,7 +2692,7 @@ impl JiraList {
 
     /// `effectiveGroupBy`.
     pub fn effective_group_by(&self) -> Option<String> {
-        if self.on_board_list() {
+        if self.on_catalog_list() {
             return None;
         }
         if self.on_board().is_some() {
@@ -2786,6 +2887,33 @@ impl JiraList {
                 });
             }
         }
+        // STARRED: one place for everything the ☆ keeps — tickets first (one
+        // row, they are too many to list), then boards, releases, labels.
+        pinned.push(SidebarPin {
+            key: TICKETS_KEY.into(),
+            label: "Tickets".into(),
+            icon: "star".into(),
+            section: "Starred".into(),
+            meta: self.favs.len().to_string(),
+            tip: "Every ticket you starred".into(),
+            ..Default::default()
+        });
+        // A board is one object: its plain row yields to a starred
+        // `board|sprint|mode` view of the same board.
+        let viewed: BTreeSet<&str> = self.pinned_views.iter().filter_map(|v| v.split('|').next()).collect();
+        for (id, name) in &self.boards {
+            if viewed.contains(id.as_str()) {
+                continue;
+            }
+            pinned.push(SidebarPin {
+                key: format!("{BOARD_PREFIX}{id}"),
+                label: name.clone(),
+                icon: "rectangle.split.3x1.fill".into(),
+                section: "Starred".into(),
+                meta: "Board".into(),
+                ..Default::default()
+            });
+        }
         for v in &self.pinned_views {
             let mut parts = v.split('|');
             let board = parts.next().unwrap_or("").to_string();
@@ -2804,7 +2932,7 @@ impl JiraList {
             pinned.push(SidebarPin {
                 key: format!("{VIEW_PREFIX}{v}"),
                 label,
-                icon: if v.ends_with("|table") { "tablecells" } else { "rectangle.split.3x1.fill" }.into(),
+                icon: "rectangle.split.3x1.fill".into(),
                 section: "Starred".into(),
                 meta: "Board".into(),
                 ..Default::default()
@@ -2836,36 +2964,31 @@ impl JiraList {
                 ..Default::default()
             });
         }
+        // BROWSE: the board catalog first, then the synced lists below it
+        // (the rows share this header — their own title is empty).
         if !self.catalog.is_empty() || !self.boards.is_empty() {
             pinned.push(SidebarPin {
                 key: BOARD_LIST_KEY.into(),
-                label: "All boards".into(),
-                icon: "square.grid.2x2".into(),
-                section: "Boards".into(),
+                label: "Boards".into(),
+                icon: "rectangle.split.3x1".into(),
+                section: "Browse".into(),
                 meta: if self.catalog.is_empty() { String::new() } else { self.catalog.len().to_string() },
-                tip: "Every board in the projects in scope — ☆ one to keep it here".into(),
-                collapsible: !self.boards.is_empty(),
-                expanded: !self.boards_collapsed,
+                tip: "Every board in the projects in scope — ☆ one to keep it in Starred".into(),
                 ..Default::default()
             });
         }
-        // Starred boards are children of "All boards" (they came out of that
-        // catalog); the disclosure triangle hides them.
-        if !self.boards_collapsed {
-            for (id, name) in &self.boards {
-                pinned.push(SidebarPin {
-                    key: format!("{BOARD_PREFIX}{id}"),
-                    label: name.clone(),
-                    icon: "rectangle.split.3x1".into(),
-                    section: "Boards".into(),
-                    depth: 1,
-                    ..Default::default()
-                });
-            }
-        }
-        let rows = self
-            .tabs
+        pinned.push(SidebarPin {
+            key: LABEL_LIST_KEY.into(),
+            label: "Labels".into(),
+            icon: "tag".into(),
+            section: "Browse".into(),
+            tip: "Every label on your synced issues — ☆ one to keep it in Starred".into(),
+            ..Default::default()
+        });
+        let browse = self.browse_tabs();
+        let rows = browse
             .iter()
+            .map(|&i| &self.tabs[i])
             .map(|t| {
                 let name = t.file.to_lowercase();
                 let icon = if name.contains("blacklist_release") {
@@ -2889,12 +3012,13 @@ impl JiraList {
             })
             .collect();
         let (selected, pinned_selected) = match &self.place {
-            Some(JiraPlace::Tab(i)) => (Some(*i), None),
+            Some(JiraPlace::Tab(i)) if Some(*i) == self.favorites_tab() => (None, Some(TICKETS_KEY.to_string())),
+            Some(JiraPlace::Tab(i)) => (browse.iter().position(|b| b == i), None),
             Some(JiraPlace::Pin(_)) => (None, Some(self.sidebar_selected())),
             None => (None, None),
         };
         SidebarModel {
-            section_title: "Synced".into(),
+            section_title: String::new(),
             rows,
             selected,
             pinned,
@@ -3061,7 +3185,6 @@ pub struct FilterOption {
 #[derive(Clone, Debug, PartialEq)]
 pub enum JiraEvent {
     Click { row: usize, double: bool },
-    Check(usize),
     Star(usize),
     Sort(usize),
     /// Click on a filterable column's chevron (`onTableFilter`); `x`/`y` is
@@ -3127,7 +3250,6 @@ pub struct JiraSnapshot {
     pub columns: Vec<ListColumn>,
     pub rows: Vec<Record>,
     pub selection: usize,
-    pub checked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
     /// Pinned board ids (`boards`): the "All boards" ☆ shows these, not
     /// favourites (a board key could never resolve as a favourite).
@@ -3182,8 +3304,13 @@ impl JiraList {
             columns: self.columns.clone(),
             rows,
             selection: self.selection,
-            checked: self.checked.clone(),
-            favs: self.favs.iter().cloned().chain(self.favorite_releases()).collect(),
+            favs: self
+                .favs
+                .iter()
+                .cloned()
+                .chain(self.favorite_releases())
+                .chain(self.pinned_labels().into_iter().map(|l| format!("{LABEL_PREFIX}{l}")))
+                .collect(),
             pinned_boards: self.boards.iter().map(|(id, _)| id.clone()).collect(),
             sort,
             filter_active: self
@@ -3225,13 +3352,6 @@ impl JiraList {
                     self.handle(JiraEvent::OpenDetail);
                 }
             }
-            JiraEvent::Check(row) => {
-                if let Some(k) = self.row(row).and_then(|r| r.get("key")).cloned() {
-                    if !self.checked.remove(&k) {
-                        self.checked.insert(k);
-                    }
-                }
-            }
             JiraEvent::Star(row) => self.toggle_star(row),
             JiraEvent::Sort(i) => self.sort_by(i),
             // The Fit Columns menu and the filter picker are UI actions.
@@ -3268,6 +3388,12 @@ impl JiraList {
             }
             // A board row opens its board; an issue row opens a URL (UI).
             JiraEvent::Enter | JiraEvent::OpenDetail => {
+                if let Some(name) = self.selected_label() {
+                    if let Err(e) = self.open_label(&name) {
+                        self.surface_error(&format!("Label {name}: {e}"));
+                    }
+                    return;
+                }
                 let board = self.selected().and_then(|r| {
                     r.get("boardId")
                         .filter(|_| r.get("key").is_some_and(|k| k.starts_with(BOARD_PREFIX)))
@@ -3292,7 +3418,7 @@ impl JiraList {
             }
             // Opening a card is a UI action (browser URL).
             JiraEvent::OpenKey(_) => {}
-            JiraEvent::Sidebar(SidebarEvent::Select(i)) => self.select_tab(i),
+            JiraEvent::Sidebar(SidebarEvent::Select(i)) => self.select_browse_row(i),
             JiraEvent::Sidebar(SidebarEvent::Pinned(key)) => {
                 // A pin that cannot open says why (status line + toast) —
                 // none of these may fail silently.
@@ -3300,8 +3426,12 @@ impl JiraList {
                     if let Err(e) = self.open_my_work(id) {
                         self.surface_error(&format!("My work {id}: {e}"));
                     }
+                } else if key == TICKETS_KEY {
+                    self.open_tickets();
                 } else if key == BOARD_LIST_KEY {
                     self.show_board_list();
+                } else if key == LABEL_LIST_KEY {
+                    self.show_label_list();
                 } else if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
                     // `open_board` surfaces its own reason / pins + opens a
                     // never-pinned board.
@@ -3459,8 +3589,6 @@ mod appkit {
                 let synthetic = self.ivars().snap.borrow().rows.get(row).is_some_and(is_synthetic);
                 let ev = if synthetic {
                     JiraEvent::Click { row, double: false }
-                } else if check_rect(band).inset_by(-4.0, -6.0).contains(p.x, p.y) {
-                    JiraEvent::Check(row)
                 } else if star_rect(band).inset_by(-3.0, -6.0).contains(p.x, p.y) {
                     JiraEvent::Star(row)
                 } else {
@@ -3490,12 +3618,8 @@ mod appkit {
         unsafe impl NSObjectProtocol for JiraTableView {}
     );
 
-    fn check_rect(band: Rect) -> Rect {
-        Rect::new(PADDING + 2.0, band.mid_y() - 6.5, 13.0, 13.0)
-    }
-
     fn star_rect(band: Rect) -> Rect {
-        Rect::new(PADDING + 2.0 + 22.0 - 1.0, band.mid_y() - 7.0, 14.0, 14.0)
+        Rect::new(PADDING + 2.0, band.mid_y() - 7.0, 14.0, 14.0)
     }
 
     impl JiraTableView {
@@ -3596,7 +3720,6 @@ mod appkit {
                     continue;
                 }
                 let key = r.get("key").cloned().unwrap_or_default();
-                draw_check(check_rect(band), snap.checked.contains(&key), &c);
                 // A board row's ☆ is its sidebar pin, not a favourite.
                 let star_on = key
                     .strip_prefix(BOARD_PREFIX)
@@ -3699,22 +3822,6 @@ mod appkit {
             _ => {
                 style::draw_text_left(&display_cell(field, raw), Rect::new(cell.x + 3.0, cell.y, cell.width - 6.0, cell.height), font, c.dim.with_alpha(alpha));
             }
-        }
-    }
-
-    fn draw_check(r: Rect, on: bool, c: &PopupColors) {
-        if on {
-            style::fill_rounded(r, 3.0, c.accent_on());
-            let p = NSBezierPath::bezierPath();
-            p.setLineWidth(1.6);
-            p.moveToPoint(NSPoint::new(r.x + 3.0, r.mid_y() + 0.5));
-            p.lineToPoint(NSPoint::new(r.mid_x() - 0.5, r.max_y() - 3.0));
-            p.lineToPoint(NSPoint::new(r.max_x() - 2.5, r.y + 3.0));
-            c.on_accent().to_nscolor().setStroke();
-            p.stroke();
-        } else {
-            style::fill_rounded(r, 3.0, c.highlight.with_alpha(0.5));
-            style::stroke_rounded(r, 3.0, 1.0, c.dim.with_alpha(0.8));
         }
     }
 
@@ -5502,27 +5609,77 @@ mod tests {
     }
 
     #[test]
-    fn starred_boards_are_children_of_all_boards() {
+    fn starred_boards_live_under_starred_and_boards_browse_is_flat() {
         let mut l = JiraList::default();
         l.catalog = vec![("42".into(), "Demo board".into(), "D".into()), ("7".into(), "Other".into(), "O".into())];
         l.toggle_pin_board("42");
         l.toggle_pin_board("7");
         let pins = l.sidebar_model().pinned;
-        let all = pins.iter().find(|p| p.key == BOARD_LIST_KEY).unwrap();
-        assert!(all.collapsible && all.expanded, "the parent has an open disclosure");
-        let kids: Vec<&str> = pins.iter().filter(|p| p.depth > 0).map(|p| p.key.as_str()).collect();
-        assert_eq!(kids, vec![format!("{BOARD_PREFIX}42"), format!("{BOARD_PREFIX}7")]);
-        // Collapsing hides the children; the parent stays selectable.
-        l.boards_collapsed = true;
-        let pins = l.sidebar_model().pinned;
-        let all = pins.iter().find(|p| p.key == BOARD_LIST_KEY).unwrap();
-        assert!(!all.expanded && pins.iter().all(|p| p.depth == 0), "children hidden");
-        // Starring a board while collapsed re-opens the tree so the new star
-        // is not hidden away.
-        l.toggle_pin_board("42"); // unstar
-        l.toggle_pin_board("42"); // re-star
-        let pins = l.sidebar_model().pinned;
-        assert!(pins.iter().any(|p| p.depth > 0), "a fresh star re-expands");
+        let in_section = |s: &str| -> Vec<String> { pins.iter().filter(|p| p.section == s).map(|p| p.key.clone()).collect() };
+        assert_eq!(
+            in_section("Starred"),
+            vec![TICKETS_KEY.to_string(), format!("{BOARD_PREFIX}42"), format!("{BOARD_PREFIX}7")],
+            "Tickets first, then the starred boards"
+        );
+        assert_eq!(in_section("Browse"), vec![BOARD_LIST_KEY.to_string(), LABEL_LIST_KEY.to_string()]);
+        let boards = pins.iter().find(|p| p.key == BOARD_LIST_KEY).unwrap();
+        assert!(!boards.collapsible && boards.depth == 0 && boards.meta == "2", "flat row with a count");
+        assert!(pins.iter().all(|p| p.depth == 0), "no tree anywhere");
+    }
+
+    #[test]
+    fn a_starred_board_view_replaces_the_plain_board_row() {
+        let mut l = JiraList::default();
+        l.catalog = vec![("42".into(), "Demo board".into(), "D".into())];
+        l.toggle_pin_board("42");
+        l.pinned_views = vec!["42|current|columns".into()];
+        let starred: Vec<String> =
+            l.sidebar_model().pinned.iter().filter(|p| p.section == "Starred").map(|p| p.key.clone()).collect();
+        assert_eq!(starred, vec![TICKETS_KEY.to_string(), format!("{VIEW_PREFIX}42|current|columns")]);
+    }
+
+    #[test]
+    fn labels_browse_list_counts_stars_and_opens() {
+        let dir = std::env::temp_dir().join(format!("ks-labels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("all.json");
+        std::fs::write(
+            &path,
+            r#"[{"key":"A-1","title":"x","labels":"ui, api"},{"key":"A-2","title":"y","labels":"ui"},{"key":"A-3","title":"z","labels":""}]"#,
+        )
+        .unwrap();
+        let mut l = JiraList::default();
+        l.tabs = vec![JiraTab { path: path.to_string_lossy().into(), file: "all.json".into(), title: "All issues".into(), columns: vec![], badge: None }];
+        let m = l.sidebar_model();
+        assert!(m.pinned.iter().any(|p| p.key == LABEL_LIST_KEY && p.section == "Browse" && p.label == "Labels"));
+        l.show_label_list();
+        let rows: Vec<(String, String)> = l.rows.iter().map(|&i| (l.all[i]["title"].clone(), l.all[i]["count"].clone())).collect();
+        assert_eq!(rows, vec![("ui".into(), "2".into()), ("api".into(), "1".into())], "most used first, issues counted once");
+        assert!(l.on_catalog_list() && l.effective_group_by().is_none());
+        // ☆ on the first row stars the label: it moves into STARRED and the row's star is on.
+        l.toggle_star(0);
+        assert_eq!(l.pinned_labels(), vec!["ui".to_string()]);
+        assert!(l.snapshot().favs.contains("label:ui"));
+        assert!(l.sidebar_model().pinned.iter().any(|p| p.section == "Starred" && p.key == "label:ui"));
+        assert_eq!(l.selected_label().as_deref(), Some("ui"));
+        l.toggle_star(0);
+        assert!(l.pinned_labels().is_empty(), "☆ again unstars");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn starred_issues_tab_is_the_tickets_row_not_a_browse_row() {
+        let mut l = JiraList::default();
+        let tab = |file: &str, title: &str| JiraTab { path: String::new(), file: file.into(), title: title.into(), columns: vec![], badge: None };
+        l.tabs = vec![tab("all.json", "All issues"), tab("favorites.json", "Starred issues"), tab("releases.json", "Releases")];
+        let m = l.sidebar_model();
+        let titles: Vec<&str> = m.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["All issues", "Releases"], "no Starred issues row under BROWSE");
+        l.place = Some(JiraPlace::Tab(1));
+        let m = l.sidebar_model();
+        assert_eq!((m.selected, m.pinned_selected.as_deref()), (None, Some(TICKETS_KEY)));
+        l.place = Some(JiraPlace::Tab(2));
+        assert_eq!(l.sidebar_model().selected, Some(1), "Releases is browse row 1");
     }
 
     #[test]

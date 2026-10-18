@@ -212,7 +212,9 @@ impl SidebarGeometry {
             }
         }
         let top = pinned_rows.last().map_or(card.y + 6.0, |r| r.max_y() + 10.0);
-        let head = Rect::new(card.x, top, card.width, HEAD_H);
+        // An empty title means the rows continue the pinned section above.
+        let head_h = if m.section_title.is_empty() && !m.pinned.is_empty() { 0.0 } else { HEAD_H };
+        let head = Rect::new(card.x, top, card.width, head_h);
         let add = if collapsed {
             Rect::new(head.mid_x() - 11.0, head.mid_y() - 11.0, 22.0, 22.0)
         } else {

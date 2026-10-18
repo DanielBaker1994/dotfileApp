@@ -169,6 +169,14 @@ pub fn board_list_columns() -> Value {
         .unwrap_or_else(|| Value::Array(Vec::new()))
 }
 
+/// The "Labels" browse list's columns (`label_list_columns` in the file).
+pub fn label_list_columns() -> Value {
+    jira_defaults()
+        .get("label_list_columns")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
 /// The open board's columns-mode table (`board_table_columns` in the file).
 pub fn board_table_columns() -> Value {
     jira_defaults()

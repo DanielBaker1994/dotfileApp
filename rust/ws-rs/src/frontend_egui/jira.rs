@@ -21,9 +21,8 @@ use super::app::Pane;
 use super::theme::c;
 use super::widgets;
 
-/// The lead gutter width (check + star), mirroring `jira_view.rs` `LEAD`'s
-/// checkbox/star lead-in.
-const GUTTER: f32 = 54.0;
+/// The lead gutter width (the ☆ star), mirroring `jira_view.rs` `LEAD`.
+const GUTTER: f32 = 36.0;
 
 pub struct JiraPane {
     pub model: JiraList,
@@ -272,15 +271,10 @@ impl JiraPane {
                     let key = r.get("key").cloned().unwrap_or_default();
                     row.set_selected(i == snap.selection);
 
-                    // --- check + star lead-in (`JiraTableView.draw` / `mouseDown:`) ---
+                    // --- star lead-in (`JiraTableView.draw` / `mouseDown:`) ---
                     let mut lead_consumed = false;
                     row.col(|ui| {
                         ui.horizontal(|ui| {
-                            let mut on = snap.checked.contains(&key);
-                            if ui.checkbox(&mut on, "").changed() {
-                                events.push(JiraEvent::Check(i));
-                                lead_consumed = true;
-                            }
                             // Board rows: the ☆ is the sidebar pin, not a favourite.
                             let on = key
                                 .strip_prefix(BOARD_PREFIX)
