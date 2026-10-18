@@ -752,15 +752,11 @@ mod appkit {
     );
 
     fn label(mtm: MainThreadMarker, size: f64, color: crate::ui::theme::Rgba) -> Retained<NSTextField> {
-        let l = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        l.setFont(Some(&NSFont::systemFontOfSize(size)));
-        l.setTextColor(Some(&color.to_nscolor()));
-        l
+        crate::ui::style::label(mtm, "", size, color)
     }
 
     fn scroll(mtm: MainThreadMarker) -> Retained<NSScrollView> {
-        let s = crate::ui::style::plain_scroll(mtm);
-        s
+        crate::ui::style::plain_scroll(mtm)
     }
 
     impl FilesView {
