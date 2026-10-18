@@ -1059,10 +1059,7 @@ mod appkit {
             let text_color = colors.text.to_nscolor();
             let dim = colors.dim.to_nscolor();
 
-            let scroll = NSScrollView::new(mtm);
-            scroll.setHasVerticalScroller(true);
-            scroll.setAutohidesScrollers(true);
-            scroll.setDrawsBackground(false);
+            let scroll = crate::ui::style::plain_scroll(mtm);
             scroll.setAutoresizingMask(
                 NSAutoresizingMaskOptions::ViewWidthSizable
                     | NSAutoresizingMaskOptions::ViewHeightSizable,

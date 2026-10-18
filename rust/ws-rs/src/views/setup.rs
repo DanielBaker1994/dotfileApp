@@ -769,10 +769,7 @@ mod macos {
     use crate::ui::view_base::as_any;
 
     fn label(mtm: MainThreadMarker, s: &str, size: f64, color: crate::ui::theme::Rgba) -> Retained<NSTextField> {
-        let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);
-        l.setFont(Some(&NSFont::systemFontOfSize(size)));
-        l.setTextColor(Some(&color.to_nscolor()));
-        l
+        crate::ui::style::label(mtm, s, size, color)
     }
 
     fn attributed(parts: &[(String, f64, crate::ui::theme::Rgba)]) -> Retained<objc2_foundation::NSAttributedString> {

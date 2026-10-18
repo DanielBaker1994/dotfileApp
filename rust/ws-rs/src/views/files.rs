@@ -2145,10 +2145,7 @@ mod macos {
     }
 
     fn label(mtm: objc2::MainThreadMarker, s: &str, size: f64, color: Rgba) -> Retained<NSTextField> {
-        let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);
-        l.setFont(Some(&NSFont::systemFontOfSize(size)));
-        l.setTextColor(Some(&color.to_nscolor()));
-        l
+        crate::ui::style::label(mtm, s, size, color)
     }
 
     fn wrapping_label(

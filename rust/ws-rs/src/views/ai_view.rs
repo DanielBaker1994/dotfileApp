@@ -99,10 +99,7 @@ mod appkit {
 
 
     fn text_view(mtm: MainThreadMarker, colors: &PopupColors, editable: bool) -> (Retained<NSScrollView>, Retained<NSTextView>) {
-        let scroll = NSScrollView::new(mtm);
-        scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        scroll.setDrawsBackground(false);
+        let scroll = crate::ui::style::plain_scroll(mtm);
         let tv = NSTextView::new(mtm);
         tv.setEditable(editable);
         tv.setSelectable(true);

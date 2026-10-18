@@ -4837,10 +4837,7 @@ mod appkit {
             let config = crate::views::jira_config::JiraConfigBodyView::new(mtm, colors);
             config.setHidden(true);
             let header = JiraHeaderView::new(mtm, snap.clone(), colors);
-            let scroll = NSScrollView::new(mtm);
-            scroll.setHasVerticalScroller(true);
-            scroll.setAutohidesScrollers(true);
-            scroll.setDrawsBackground(false);
+            let scroll = crate::ui::style::plain_scroll(mtm);
             let table = JiraTableView::new(mtm, snap.clone(), colors);
             scroll.setDocumentView(Some(&table));
             let inspector = JiraInspectorView::new(mtm, snap.clone(), colors);

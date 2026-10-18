@@ -514,10 +514,7 @@ mod appkit {
                 6.0,
                 STRIP_ROW_H + 4.0,
             );
-            let scroll = NSScrollView::new(mtm);
-            scroll.setHasVerticalScroller(true);
-            scroll.setAutohidesScrollers(true);
-            scroll.setDrawsBackground(false);
+            let scroll = crate::ui::style::plain_scroll(mtm);
             let results = ConfResultsView::new(mtm, snap.clone(), colors);
             scroll.setDocumentView(Some(&results));
             let spinner = NSProgressIndicator::new(mtm);

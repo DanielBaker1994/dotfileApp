@@ -785,10 +785,7 @@ mod appkit {
     }
 
     fn scroll(mtm: MainThreadMarker) -> Retained<NSScrollView> {
-        let s = NSScrollView::new(mtm);
-        s.setHasVerticalScroller(true);
-        s.setAutohidesScrollers(true);
-        s.setDrawsBackground(false);
+        let s = crate::ui::style::plain_scroll(mtm);
         s
     }
 

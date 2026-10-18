@@ -119,17 +119,35 @@ mod appkit {
     use crate::ui::chrome::Rect;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::AnyThread;
+    use objc2::{AnyThread, MainThreadMarker};
     use objc2_app_kit::{
         NSBezierPath, NSColor, NSCompositingOperation, NSFont,
         NSFontAttributeName, NSFontWeight, NSFontWeightBold, NSFontWeightMedium,
         NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName,
         NSGraphicsContext, NSImage, NSImageSymbolConfiguration, NSLineCapStyle, NSLineJoinStyle,
-        NSShadow, NSStringDrawing,
+        NSScrollView, NSShadow, NSStringDrawing, NSTextField,
     };
     use objc2_foundation::{NSArray, NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
     use crate::ui::view_base::as_any;
+
+    /// A bare themed scroll view: vertical scroller, autohidden, transparent
+    /// background — the recipe ~19 call sites used to retype.
+    pub fn plain_scroll(mtm: MainThreadMarker) -> Retained<NSScrollView> {
+        let s = NSScrollView::new(mtm);
+        s.setHasVerticalScroller(true);
+        s.setAutohidesScrollers(true);
+        s.setDrawsBackground(false);
+        s
+    }
+
+    /// A plain (non-wrapping) themed text label.
+    pub fn label(mtm: MainThreadMarker, s: &str, size: f64, color: Rgba) -> Retained<NSTextField> {
+        let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);
+        l.setFont(Some(&NSFont::systemFontOfSize(size)));
+        l.setTextColor(Some(&color.to_nscolor()));
+        l
+    }
 
     pub fn ns(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
