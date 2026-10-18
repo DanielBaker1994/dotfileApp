@@ -147,9 +147,7 @@ mod appkit {
 
     use crate::ui::view_base::{self};
 
-    fn ns(r: Rect) -> NSRect {
-        style::ns(r)
-    }
+    use crate::ui::style::ns;
 
     type Sink = Rc<dyn Fn(ConfEvent)>;
 

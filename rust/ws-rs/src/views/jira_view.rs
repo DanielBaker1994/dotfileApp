@@ -3355,9 +3355,7 @@ mod appkit {
 
     use crate::ui::view_base::{self, as_any};
 
-    fn ns(r: Rect) -> NSRect {
-        style::ns(r)
-    }
+    use crate::ui::style::ns;
 
 
     /// Wrapped text in `r`; returns the drawn height.
