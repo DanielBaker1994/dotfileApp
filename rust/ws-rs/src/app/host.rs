@@ -1730,22 +1730,51 @@ impl SwitcherController {
         }
     }
 
+    /// Read/apply one of the pane-width verbs (`sidebar-width:`,
+    /// `inspector-width:`): parse/clamp/persist/echo shared by both — the
+    /// per-pane bits (membership, bounds, getter, the UI push) are closures.
+    /// Replies are socket-contract-critical; keep them byte-for-byte.
+    fn do_pane_width(
+        &self,
+        kind: &str,
+        rest: &str,
+        allowed: impl Fn(&str) -> bool,
+        bounds: impl Fn(&str) -> (f64, f64),
+        current: impl Fn(&str) -> f64,
+        cmd: impl Fn(&str, f64) -> Option<UiCommand>,
+    ) -> Value {
+        let (view, val) = match rest.split_once(':') {
+            Some((v, x)) => (v, Some(x)),
+            None => (rest, None),
+        };
+        if !allowed(view) {
+            return json!({ "error": format!("no resizable {kind} on '{view}'") });
+        }
+        let (min, max) = bounds(view);
+        let width = match val {
+            None => current(view),
+            Some(x) => {
+                let Ok(raw) = x.parse::<f64>() else {
+                    return json!({ "error": format!("'{x}' is not a number") });
+                };
+                let w = crate::ui::pane_divider::clamp_width(raw, min, max);
+                crate::app::config::save_config_value(view, &format!("{kind}-width"), &fmt_width(w));
+                if let Some(c) = cmd(view, w) {
+                    self.inner.lock().unwrap().ui_push(c);
+                }
+                w
+            }
+        };
+        json!({ "view": view, (format!("{kind}Width")): width, "min": min, "max": max })
+    }
+
     fn do_host_action(&self, action: &str) -> Option<Value> {
         // Window-only verbs have no effect without a window; refuse rather than
         // write a `shown`/visible flag into state with nothing behind it.
         if self.is_headless() && needs_window(action) {
             return Some(json!({ "error": format!("{action} unavailable in headless mode") }));
         }
-        if let Some(v) = action.strip_prefix("open:") {
-            return match SlotView::from_raw(v) {
-                Some(view) => {
-                    self.open(view);
-                    None
-                }
-                None => Some(json!({ "error": "unknown view" })),
-            };
-        }
-        if let Some(v) = action.strip_prefix("show:") {
+        if let Some(v) = action.strip_prefix("open:").or_else(|| action.strip_prefix("show:")) {
             return match SlotView::from_raw(v) {
                 Some(view) => {
                     self.open(view);
@@ -1830,63 +1859,25 @@ impl SwitcherController {
             return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
         }
         if let Some(rest) = action.strip_prefix("sidebar-width:") {
-            let (view, val) = match rest.split_once(':') {
-                Some((v, x)) => (v, Some(x)),
-                None => (rest, None),
-            };
-            if !SIDEBAR_VIEWS.contains(&view) {
-                return Some(json!({ "error": format!("no resizable sidebar on '{view}'") }));
-            }
-            let (min, max) = pane_sidebar_bounds(view);
-            let width = match val {
-                None => pane_sidebar_width(view),
-                Some(x) => {
-                    let Ok(raw) = x.parse::<f64>() else {
-                        return Some(json!({ "error": format!("'{x}' is not a number") }));
-                    };
-                    let w = crate::ui::pane_divider::clamp_width(raw, min, max);
-                    crate::app::config::save_config_value(view, "sidebar-width", &fmt_width(w));
-                    if let Some(sv) = SlotView::from_raw(view) {
-                        self.inner.lock().unwrap().ui_push(UiCommand::SidebarWidth(sv, w));
-                    }
-                    w
-                }
-            };
-            return Some(json!({
-                "view": view,
-                "sidebarWidth": width,
-                "min": min,
-                "max": max,
-            }));
+            return Some(self.do_pane_width(
+                "sidebar",
+                rest,
+                |v| SIDEBAR_VIEWS.contains(&v),
+                pane_sidebar_bounds,
+                pane_sidebar_width,
+                |v, w| SlotView::from_raw(v).map(|sv| UiCommand::SidebarWidth(sv, w)),
+            ));
         }
         if let Some(rest) = action.strip_prefix("inspector-width:") {
             // The right-pane mirror of `sidebar-width`: only Jira has one.
-            let (view, val) = match rest.split_once(':') {
-                Some((v, x)) => (v, Some(x)),
-                None => (rest, None),
-            };
-            if view != "jira" {
-                return Some(json!({ "error": format!("no resizable inspector on '{view}'") }));
-            }
-            let (min, max) = pane_inspector_bounds();
-            let width = match val {
-                None => pane_inspector_width(),
-                Some(x) => {
-                    let Ok(raw) = x.parse::<f64>() else {
-                        return Some(json!({ "error": format!("'{x}' is not a number") }));
-                    };
-                    let w = crate::ui::pane_divider::clamp_width(raw, min, max);
-                    crate::app::config::save_config_value(view, "inspector-width", &fmt_width(w));
-                    self.inner.lock().unwrap().ui_push(UiCommand::InspectorWidth(w));
-                    w
-                }
-            };
-            return Some(json!({
-                "view": view,
-                "inspectorWidth": width,
-                "min": min,
-                "max": max,
-            }));
+            return Some(self.do_pane_width(
+                "inspector",
+                rest,
+                |v| v == "jira",
+                |_| pane_inspector_bounds(),
+                |_| pane_inspector_width(),
+                |_v, w| Some(UiCommand::InspectorWidth(w)),
+            ));
         }
         if let Some(rest) = action.strip_prefix("jira-inspector:") {
             // Show / hide / toggle the Jira ticket panel (same as ⌘I; the
