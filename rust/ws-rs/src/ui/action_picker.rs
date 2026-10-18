@@ -48,6 +48,7 @@ mod appkit {
     use crate::ui::chrome::Rect;
     use crate::ui::style::{self, Weight};
     use crate::ui::theme::PopupColors;
+use crate::ui::view_base;
     use objc2::rc::Retained;
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSEvent, NSView};
@@ -86,7 +87,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let i = ((p.y - PAD - TITLE_H) / ROW_H).floor();
                 if i >= 0.0 && (i as usize) < self.ivars().items.len() {
                     self.pick(i as usize);

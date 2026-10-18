@@ -105,7 +105,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, e: &NSEvent) {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             let row = (p.y / ROW_H).floor();
             if row >= 0.0 {
                 self.toggle(row as usize);
@@ -265,7 +265,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, e: &NSEvent) {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             let hit = self.button_rects().into_iter().position(|r| r.contains(p.x, p.y));
             if let Some(i) = hit {
                 let a = self.ivars().buttons.borrow().get(i).map(|b| b.action.clone());

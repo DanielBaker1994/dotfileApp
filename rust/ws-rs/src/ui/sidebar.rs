@@ -461,7 +461,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let g = self.geometry();
                 let hit = {
                     let m = self.ivars().model.borrow();
@@ -503,7 +503,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let g = self.geometry();
                 let (hit, pinned_key) = {
                     let m = self.ivars().model.borrow();
@@ -541,7 +541,7 @@ mod appkit {
 
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let g = self.geometry();
                 let ev = {
                     let m = self.ivars().model.borrow();

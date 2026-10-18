@@ -116,6 +116,7 @@ mod appkit {
     use crate::ui::style::{self, ns, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone};
     use crate::views::jira::{FilterKind, ValueKind};
+use crate::ui::view_base;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
     use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
@@ -193,7 +194,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let hit = self.buttons().into_iter().find(|(_, r, _)| r.contains(p.x, p.y));
                 let Some((b, r, _)) = hit else { return };
                 let below = self.screen_point(r.x, r.max_y());

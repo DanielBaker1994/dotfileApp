@@ -817,14 +817,14 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 self.ivars().pressed.set(self.row_at(p));
                 self.setNeedsDisplay(true);
             }
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let was = self.ivars().pressed.replace(None);
                 self.setNeedsDisplay(true);
                 if was.is_some() && was == self.row_at(p) {
@@ -874,7 +874,7 @@ mod appkit {
         }
 
         fn track(&self, e: &NSEvent) {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             let on = self.row_at(p);
             if self.ivars().hover.get() != on {
                 self.ivars().hover.set(on);

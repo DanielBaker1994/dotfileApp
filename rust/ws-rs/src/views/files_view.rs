@@ -227,7 +227,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let i = (p.y / self.row_h()).floor();
                 let n = self.ivars().rows.borrow().len();
                 let h = (i >= 0.0 && (i as usize) < n).then_some(i as usize);
@@ -241,7 +241,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let i = (p.y / self.row_h()).floor();
                 let n = self.ivars().rows.borrow().len();
                 if i < 0.0 || i as usize >= n {
@@ -304,7 +304,7 @@ mod appkit {
                 if self.ivars().preview.get() {
                     return;
                 }
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let i = (p.y / self.row_h()).floor();
                 let n = self.ivars().rows.borrow().len();
                 if i < 0.0 || i as usize >= n {
@@ -489,7 +489,7 @@ mod appkit {
             if paths.is_empty() {
                 return;
             }
-            let at = self.convertPoint_fromView(e.locationInWindow(), None);
+            let at = view_base::mouse_point(self, e);
             let items: Vec<Retained<NSDraggingItem>> = paths
                 .iter()
                 .enumerate()
@@ -701,7 +701,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.toolbar_hit(p.x, p.y);
                 view_base::set_hover(self, &self.ivars().hover, h);
             }
@@ -713,7 +713,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.toolbar_hit(p.x, p.y);
                 self.ivars().pressed.set(h);
                 self.setNeedsDisplay(true);
@@ -721,7 +721,7 @@ mod appkit {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.toolbar_hit(p.x, p.y);
                 let was = self.ivars().pressed.replace(None);
                 self.setNeedsDisplay(true);

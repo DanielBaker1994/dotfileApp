@@ -6438,7 +6438,7 @@ pub mod recent_grid {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let i = self.index_at(p.x, p.y);
                 view_base::set_hover(self, &self.ivars().hover, i);
             }
@@ -6465,7 +6465,7 @@ pub mod recent_grid {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if self.folder_rect().contains(p.x, p.y) {
                     let cb = self.ivars().on_folder.borrow().clone();
                     if let Some(cb) = cb {
@@ -6483,7 +6483,7 @@ pub mod recent_grid {
 
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if let Some(e) = self.index_at(p.x, p.y).and_then(|i| self.ivars().entries.borrow().get(i).cloned()) {
                     let cb = self.ivars().on_menu.borrow().clone();
                     if let Some(cb) = cb {

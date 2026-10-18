@@ -198,7 +198,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.row_at(p.y);
                 view_base::set_hover(self, &self.ivars().hover, h);
             }
@@ -210,7 +210,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let Some(row) = self.row_at(p.y) else { return };
                 let ev = if p.x < STAR_GUTTER {
                     ConfEvent::Star(row)
@@ -222,7 +222,7 @@ mod appkit {
 
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let Some(row) = self.row_at(p.y) else { return };
                 let s = NSEvent::mouseLocation();
                 self.emit(ConfEvent::RowMenu { row, x: s.x, y: s.y });
@@ -386,7 +386,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let tip = h.and_then(|id| match id {
                     C_MODE..=12 => Some(MODE_TIPS[(id - C_MODE) as usize].to_string()),
@@ -415,14 +415,14 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 self.ivars().pressed.set(self.hit(p.x, p.y));
                 self.setNeedsDisplay(true);
             }
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let was = self.ivars().pressed.replace(None);
                 self.setNeedsDisplay(true);

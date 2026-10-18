@@ -2177,7 +2177,7 @@ mod macos {
                     let _: () = unsafe { msg_send![super(self), rightMouseDown: e] };
                     return;
                 };
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 cb(self.characterIndexForInsertionAtPoint(p));
             }
 
@@ -2202,7 +2202,7 @@ mod macos {
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &objc2_app_kit::NSEvent) {
                 if e.clickCount() == 1 {
-                    let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                    let p = view_base::mouse_point(self, e);
                     if let Some(rel) = self.attachment_rel_at_point(p) {
                         let cb = self.ivars().on_open_image.borrow().clone();
                         if let Some(cb) = cb {
@@ -2682,7 +2682,7 @@ mod macos {
         }
 
         fn path_at(&self, e: &objc2_app_kit::NSEvent) -> Option<String> {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             self.ivars()
                 .hits
                 .borrow()
@@ -2884,7 +2884,7 @@ mod macos {
         unsafe impl NSObjectProtocol for NotesProseHandler {}
     );
 
-    use crate::ui::view_base::as_any;
+    use crate::ui::view_base::{self, as_any};
 
     thread_local! {
         /// Keeps the pop-out button's target alive for the main thread's life.

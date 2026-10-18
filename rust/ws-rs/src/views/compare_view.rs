@@ -214,7 +214,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let tip = h.and_then(|id| match id {
                     C_FILTER..=13 => Some(FILTER_TIPS[(id - C_FILTER) as usize].to_string()),
@@ -265,7 +265,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 if let Some(id) = h {
                     if id >= C_RECENT {
@@ -282,7 +282,7 @@ mod appkit {
 
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if let Some(id) = self.hit(p.x, p.y).filter(|id| *id >= C_RECENT) {
                     let s = NSEvent::mouseLocation();
                     self.emit(CompareEvent::RecentMenu { row: ((id - C_RECENT) % 10000) as usize, x: s.x, y: s.y });
@@ -291,7 +291,7 @@ mod appkit {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let was = self.ivars().pressed.replace(None);
                 self.setNeedsDisplay(true);

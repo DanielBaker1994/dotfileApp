@@ -6,7 +6,6 @@
 //! with any ivars type and add no Objective-C classes.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -64,43 +63,5 @@ pub fn set_hover<T: Copy + PartialEq>(view: &NSView, cell: &Cell<T>, new: T) {
     if cell.get() != new {
         cell.set(new);
         view.setNeedsDisplay(true);
-    }
-}
-
-/// `on_event: RefCell<Option<Box<dyn Fn(Event)>>>` + `fn emit`, unified.
-///
-/// The sink is taken out while it runs, so a handler that calls `set` (or
-/// `emit`) re-entrantly cannot hit the double-borrow panic the clone-and-call
-/// variant could, and a handler that replaces the sink during its own call is
-/// honoured afterwards.
-pub struct EventSlot<E>(RefCell<Option<Rc<dyn Fn(E)>>>);
-
-impl<E> Default for EventSlot<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E> EventSlot<E> {
-    pub fn new() -> Self {
-        Self(RefCell::new(None))
-    }
-
-    /// `set_on_event`.
-    pub fn set(&self, sink: Rc<dyn Fn(E)>) {
-        *self.0.borrow_mut() = Some(sink);
-    }
-
-    pub fn clear(&self) {
-        *self.0.borrow_mut() = None;
-    }
-
-    /// Deliver `ev` if a sink is attached.
-    pub fn emit(&self, ev: E) {
-        let sink = self.0.borrow_mut().take();
-        if let Some(sink) = sink {
-            sink(ev);
-            *self.0.borrow_mut() = Some(sink);
-        }
     }
 }

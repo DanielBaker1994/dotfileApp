@@ -488,7 +488,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, event: &NSEvent) {
-                let p = self.convertPoint_fromView(event.locationInWindow(), None);
+                let p = view_base::mouse_point(self, event);
                 let hit = self.hit_id(p.x, p.y);
                 self.ivars().close_hovered.set(hit == Some(HEADER_CLOSE_ID));
                 self.ivars().icon_hovered.set(hit == Some(HEADER_ICON_ID));
@@ -513,7 +513,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, event: &NSEvent) {
-                let p = self.convertPoint_fromView(event.locationInWindow(), None);
+                let p = view_base::mouse_point(self, event);
                 if let Some(id) = self.hit_id(p.x, p.y) {
                     if let Some(cb) = self.ivars().on_click.borrow().as_ref() {
                         cb(id);

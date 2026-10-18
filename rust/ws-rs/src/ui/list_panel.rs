@@ -77,7 +77,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.row_at(p.y);
                 view_base::set_hover(self, &self.ivars().hover, h);
             }
@@ -89,7 +89,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let Some(row) = self.row_at(p.y) else { return };
                 if let Some(cb) = self.ivars().on_click.borrow().as_ref() {
                     cb(row, p.x, e.clickCount() >= 2);

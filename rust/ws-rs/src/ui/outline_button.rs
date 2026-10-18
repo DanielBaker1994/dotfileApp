@@ -172,7 +172,7 @@ mod appkit {
                 if !was || !iv.enabled.get() {
                     return;
                 }
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let b = self.bounds();
                 if !Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height).contains(p.x, p.y) {
                     return;
@@ -231,7 +231,7 @@ mod appkit {
 
     impl OutlineButton {
         fn track_hover(&self, e: &NSEvent) {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             let b = self.bounds();
             let on = Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height).contains(p.x, p.y);
             if self.ivars().hover.get() != on {

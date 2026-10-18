@@ -5241,7 +5241,7 @@ mod macos {
     };
     use std::cell::{Cell, RefCell};
 
-    use crate::ui::view_base::as_any;
+    use crate::ui::view_base::{self, as_any};
 
     fn nsrect(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
@@ -5333,7 +5333,7 @@ mod macos {
             /// pointer, then the host's `paneMenu`.
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let b = self.bounds();
                 let layout = PaneLayout::new(b.size.width, b.size.height);
                 let (row, n) = {
@@ -5809,7 +5809,7 @@ mod macos {
             /// then the host's folder menu.
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if p.y < FOLDER_HEADER_HEIGHT {
                     return;
                 }

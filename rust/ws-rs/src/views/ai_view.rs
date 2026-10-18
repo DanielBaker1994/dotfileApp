@@ -171,7 +171,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let tip = h.and_then(|id| match id {
                     C_CMD => Some("The command this rule runs — click to copy it (with your text) for a shell".to_string()),
@@ -193,14 +193,14 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 self.ivars().pressed.set(self.hit(p.x, p.y));
                 self.setNeedsDisplay(true);
             }
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.hit(p.x, p.y);
                 let was = self.ivars().pressed.replace(None);
                 self.setNeedsDisplay(true);

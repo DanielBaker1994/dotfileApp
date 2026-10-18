@@ -77,7 +77,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = (0..4).find(|i| self.seg(*i).contains(p.x, p.y));
                 view_base::set_hover(self, &self.ivars().hover, h);
             }
@@ -89,7 +89,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let Some(i) = (0..4).find(|i| self.seg(*i).contains(p.x, p.y)) else { return };
                 let ev = match i {
                     2 => ProseSwitchEvent::PopOut,

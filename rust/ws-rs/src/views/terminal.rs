@@ -762,7 +762,7 @@ mod header {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let h = self.close_rect().inset_by(-3.0, -3.0).contains(p.x, p.y);
                 view_base::set_hover(self, &self.ivars().hover, h);
             }
@@ -774,7 +774,7 @@ mod header {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if self.close_rect().inset_by(-3.0, -3.0).contains(p.x, p.y) {
                     if let Some(cb) = self.ivars().on_close.borrow().as_ref() {
                         cb();

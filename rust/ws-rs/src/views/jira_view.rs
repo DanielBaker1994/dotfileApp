@@ -3438,7 +3438,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let n = self.ivars().snap.borrow().rows.len();
                 let i = (p.y / row_h()).floor();
                 let h = (i >= 0.0 && (i as usize) < n).then_some(i as usize);
@@ -3453,7 +3453,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let n = self.ivars().snap.borrow().rows.len();
                 let i = (p.y / row_h()).floor();
                 if i < 0.0 || i as usize >= n {
@@ -3476,7 +3476,7 @@ mod appkit {
 
             #[unsafe(method(rightMouseDown:))]
             fn right_mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let n = self.ivars().snap.borrow().rows.len();
                 let i = (p.y / row_h()).floor();
                 if i < 0.0 || i as usize >= n {
@@ -3849,7 +3849,7 @@ mod appkit {
                 // `PopupTableHeaderView.mouseDown`: a divider starts a resize,
                 // a column press may become a reorder drag; sort / filter /
                 // fit wait for mouse-up.
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let iv = self.ivars();
                 iv.down_x.set(p.x);
                 iv.moved.set(false);
@@ -3871,7 +3871,7 @@ mod appkit {
 
             #[unsafe(method(mouseDragged:))]
             fn mouse_dragged(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let iv = self.ivars();
                 if let (Some(from), true) = (iv.press_col.get(), iv.drag.borrow().is_none()) {
                     if iv.reorder.borrow().is_none() && (p.x - iv.down_x.get()).abs() < 6.0 {
@@ -3891,7 +3891,7 @@ mod appkit {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let iv = self.ivars();
                 iv.press_col.set(None);
                 let r = iv.reorder.borrow_mut().take();
@@ -4163,7 +4163,7 @@ mod appkit {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let full = self.ivars().snap.borrow().show_inspector;
                 let on = full && self.button_rect().contains(p.x, p.y);
                 view_base::set_hover(self, &self.ivars().hover, on);
@@ -4185,7 +4185,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if self.toggle_rect().contains(p.x, p.y) {
                     self.ivars().toggle_pressed.set(true);
                     self.setNeedsDisplay(true);
@@ -4205,7 +4205,7 @@ mod appkit {
                 let pressed = self.ivars().toggle_pressed.replace(false);
                 let was = self.ivars().pressed.replace(false);
                 self.setNeedsDisplay(true);
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if pressed && self.toggle_rect().contains(p.x, p.y) {
                     let s = self.ivars().sink.borrow().clone();
                     if let Some(s) = s {

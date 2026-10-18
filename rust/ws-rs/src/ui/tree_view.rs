@@ -217,7 +217,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 if self.geometry().head.contains(p.x, p.y) {
                     self.emit(TreeEvent::ToggleSection);
                     return;
@@ -445,7 +445,7 @@ mod appkit {
         }
 
         fn row_at(&self, e: &NSEvent) -> Option<usize> {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             if self.collapsed() {
                 return None;
             }

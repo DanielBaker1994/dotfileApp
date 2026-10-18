@@ -26,6 +26,7 @@ use crate::app::config::AppSettings;
 /// The envelopes below hold AppKit handles only on macOS; the panel model is
 /// pure so the host can hold it on any platform.
 #[cfg(target_os = "macos")]
+use crate::ui::view_base;
 use objc2::rc::Retained;
 
 /// Filefast's background-run latch (ok, last stdout line).
@@ -1889,7 +1890,7 @@ impl ToolPanel {
                                 return false;
                             }
                             if let (Some(btn), Some(nf)) = (&copy_btn, &name_field) {
-                                let bp = btn.convertPoint_fromView(event.locationInWindow(), None);
+                                let bp = view_base::mouse_point(btn, event);
                                 let bb = btn.bounds();
                                 if bp.x >= 0.0 && bp.y >= 0.0 && bp.x <= bb.size.width && bp.y <= bb.size.height {
                                     let name = nf.stringValue().to_string().trim().to_string();
@@ -1921,7 +1922,7 @@ impl ToolPanel {
                                     return true;
                                 }
                             }
-                            let p = cell.convertPoint_fromView(event.locationInWindow(), None);
+                            let p = view_base::mouse_point(&cell, event);
                             let b = cell.bounds();
                             if p.x >= 0.0 && p.y >= 0.0 && p.x <= b.size.width && p.y <= b.size.height {
                                 let r: &objc2_app_kit::NSResponder = &field_paste;

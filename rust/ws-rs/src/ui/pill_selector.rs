@@ -78,7 +78,7 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 let idx = self.chip_at(p.x, p.y);
                 if idx != self.ivars().tab.get() {
                     self.ivars().pressed.set(Some(idx));
@@ -90,7 +90,7 @@ mod appkit {
             fn mouse_up(&self, e: &NSEvent) {
                 let iv = self.ivars();
                 let was = iv.pressed.take();
-                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let p = view_base::mouse_point(self, e);
                 self.setNeedsDisplay(true);
                 if was.is_some() && Some(self.chip_at(p.x, p.y)) == was {
                     if let Some(s) = iv.sink.borrow().as_ref() {
@@ -129,7 +129,7 @@ mod appkit {
 
     impl TabPillView {
         fn track_hover(&self, e: &NSEvent) {
-            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            let p = view_base::mouse_point(self, e);
             let idx = self.chip_at(p.x, p.y);
             if self.ivars().hover.get() != Some(idx) {
                 self.ivars().hover.set(Some(idx));
