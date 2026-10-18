@@ -484,8 +484,7 @@ define_class!(
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _e: &NSEvent) {
-            self.ivars().hover.set(false);
-            self.setNeedsDisplay(true);
+            view_base::set_hover(self, &self.ivars().hover, false);
         }
 
         #[unsafe(method(drawRect:))]

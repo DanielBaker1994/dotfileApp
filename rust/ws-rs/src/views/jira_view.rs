@@ -3442,17 +3442,13 @@ mod appkit {
                 let n = self.ivars().snap.borrow().rows.len();
                 let i = (p.y / row_h()).floor();
                 let h = (i >= 0.0 && (i as usize) < n).then_some(i as usize);
-                if h != self.ivars().hover.get() {
-                    self.ivars().hover.set(h);
-                    self.setNeedsDisplay(true);
-                }
+                view_base::set_hover(self, &self.ivars().hover, h);
                 self.update_cell_tip(h, p.x);
             }
 
             #[unsafe(method(mouseExited:))]
             fn mouse_exited(&self, _e: &NSEvent) {
-                self.ivars().hover.set(None);
-                self.setNeedsDisplay(true);
+                view_base::set_hover(self, &self.ivars().hover, None);
             }
 
             #[unsafe(method(mouseDown:))]
@@ -4170,10 +4166,7 @@ mod appkit {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 let full = self.ivars().snap.borrow().show_inspector;
                 let on = full && self.button_rect().contains(p.x, p.y);
-                if on != self.ivars().hover.get() {
-                    self.ivars().hover.set(on);
-                    self.setNeedsDisplay(true);
-                }
+                view_base::set_hover(self, &self.ivars().hover, on);
                 // The collapse toggle works in both modes (full panel and
                 // rail), and carries the tooltip like the sidebar's toggle.
                 let tog = self.toggle_rect().contains(p.x, p.y);

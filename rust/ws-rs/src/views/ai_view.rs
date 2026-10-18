@@ -183,16 +183,12 @@ mod appkit {
                 if cur != tip {
                     self.setToolTip(tip.as_deref().map(NSString::from_str).as_deref());
                 }
-                if h != self.ivars().hover.get() {
-                    self.ivars().hover.set(h);
-                    self.setNeedsDisplay(true);
-                }
+                view_base::set_hover(self, &self.ivars().hover, h);
             }
 
             #[unsafe(method(mouseExited:))]
             fn mouse_exited(&self, _e: &NSEvent) {
-                self.ivars().hover.set(None);
-                self.setNeedsDisplay(true);
+                view_base::set_hover(self, &self.ivars().hover, None);
             }
 
             #[unsafe(method(mouseDown:))]

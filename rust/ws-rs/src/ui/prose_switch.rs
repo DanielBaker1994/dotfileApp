@@ -79,16 +79,12 @@ mod appkit {
             fn mouse_moved(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 let h = (0..4).find(|i| self.seg(*i).contains(p.x, p.y));
-                if h != self.ivars().hover.get() {
-                    self.ivars().hover.set(h);
-                    self.setNeedsDisplay(true);
-                }
+                view_base::set_hover(self, &self.ivars().hover, h);
             }
 
             #[unsafe(method(mouseExited:))]
             fn mouse_exited(&self, _e: &NSEvent) {
-                self.ivars().hover.set(None);
-                self.setNeedsDisplay(true);
+                view_base::set_hover(self, &self.ivars().hover, None);
             }
 
             #[unsafe(method(mouseDown:))]
