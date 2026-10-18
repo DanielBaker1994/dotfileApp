@@ -779,19 +779,7 @@ mod appkit {
                     let pill = band.inset_by(4.0, 1.0);
                     let sel = iv.selected.get() == Some(idx);
                     let hov = iv.pressed.get() == Some(idx) || (!sel && iv.hover.get() == Some(idx));
-                    if sel {
-                        style::fill_rounded(pill, 4.0, c.highlight);
-                        style::fill_rect(
-                            chrome::Rect::new(pill.x, pill.y + 3.0, 3.0, pill.height - 6.0),
-                            c.accent_on(),
-                        );
-                    } else if hov {
-                        style::fill_rounded(
-                            pill,
-                            4.0,
-                            style::button_fill(style::ButtonState::Hover, &c),
-                        );
-                    }
+                    style::row_pill(pill, 4.0, sel, sel, hov, &c, style::RowAccent::Inset(3.0));
                     style::draw_text_left(
                         "\u{25cf}",
                         chrome::Rect::new(pill.x + 6.0, band.y, 12.0, band.height),

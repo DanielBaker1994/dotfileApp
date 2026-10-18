@@ -125,9 +125,9 @@ mod appkit {
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::NSDraggingInfo;
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControlTextEditingDelegate, NSEvent,
+        NSAutoresizingMaskOptions, NSColor, NSControlTextEditingDelegate, NSEvent,
         NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource,
-        NSEventModifierFlags, NSFont, NSPasteboardWriting, NSGraphicsContext, NSImage, NSImageScaling,
+        NSEventModifierFlags, NSFont, NSPasteboardWriting, NSImage, NSImageScaling,
         NSImageView, NSLineBreakMode, NSScrollView, NSTextAlignment, NSTextField,
         NSTextFieldDelegate, NSTextView, NSTrackingArea, NSView, NSWorkspace,
     };
@@ -602,17 +602,7 @@ mod appkit {
                 let r = self.row_rect(i);
                 let pill = r.inset_by(4.0, 1.0);
                 let on = i == sel || marked.contains(&i);
-                if on {
-                    style::fill_rounded(pill, radius, c.highlight);
-                    if i == sel {
-                        NSGraphicsContext::saveGraphicsState_class();
-                        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns(pill), radius, radius).addClip();
-                        style::fill_rect(Rect::new(pill.x, pill.y, 3.0, pill.height), c.accent_on());
-                        NSGraphicsContext::restoreGraphicsState_class();
-                    }
-                } else if hover == Some(i) {
-                    style::fill_rounded(pill, radius, style::button_fill(ButtonState::Hover, &c));
-                }
+                style::row_pill(pill, radius, on, i == sel, hover == Some(i), &c, style::RowAccent::Clipped);
                 let ir = Rect::new(r.x + 10.0, r.y, isz, rh).inset_by(1.0, (rh - isz) / 2.0);
                 let icon = if e.is_parent() {
                     style::symbol_image("arrow.turn.left.up", 11.0, Weight::Semibold, c.dim)

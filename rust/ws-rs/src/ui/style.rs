@@ -149,6 +149,61 @@ mod appkit {
         l
     }
 
+    /// The accent bar inside a selected list-row pill (see `row_pill`).
+    #[derive(Clone, Copy)]
+    pub enum RowAccent {
+        /// Rounded 3px bar, `f64` inset top/bottom, `PopupColors::accent` —
+        /// the popup row lists.
+        Rounded(f64),
+        /// Square 3px bar, full height, clipped to the pill radius —
+        /// `accent_on`, the files/jira panes.
+        Clipped,
+        /// Square 3px bar, `f64` inset top/bottom, unclipped — `accent_on`.
+        Inset(f64),
+    }
+
+    /// Selection/hover chrome for a list row: a rounded pill that carries an
+    /// accent bar when `selected` (and `accent`), else the hover fill. The
+    /// one home for what the popup and pane row painters each re-typed
+    /// (radii 4–7, bars clipped or not).
+    pub fn row_pill(
+        pill: Rect,
+        radius: f64,
+        selected: bool,
+        accent: bool,
+        hovered: bool,
+        c: &PopupColors,
+        bar: RowAccent,
+    ) {
+        if selected {
+            fill_rounded(pill, radius, c.highlight);
+            if accent {
+                match bar {
+                    RowAccent::Rounded(inset) => fill_rounded(
+                        Rect::new(pill.x, pill.y + inset, 3.0, pill.height - 2.0 * inset),
+                        1.5,
+                        c.accent,
+                    ),
+                    RowAccent::Clipped => {
+                        NSGraphicsContext::saveGraphicsState_class();
+                        let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                            ns(pill), radius, radius,
+                        );
+                        path.addClip();
+                        fill_rect(Rect::new(pill.x, pill.y, 3.0, pill.height), c.accent_on());
+                        NSGraphicsContext::restoreGraphicsState_class();
+                    }
+                    RowAccent::Inset(inset) => fill_rect(
+                        Rect::new(pill.x, pill.y + inset, 3.0, pill.height - 2.0 * inset),
+                        c.accent_on(),
+                    ),
+                }
+            }
+        } else if hovered {
+            fill_rounded(pill, radius, button_fill(ButtonState::Hover, c));
+        }
+    }
+
     pub fn ns(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
     }

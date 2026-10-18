@@ -338,12 +338,7 @@ impl NoteFindUi {
         let m = self.model.borrow();
         let Some(h) = m.shown.get(i) else { return };
         let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-        if selected {
-            style::fill_rounded(inner, 7.0, c.highlight);
-            style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
-        } else if hovered {
-            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
-        }
+        style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
         let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
         let x = inner.x + 12.0;
         style::draw_symbol(
@@ -639,12 +634,7 @@ impl SidebarJumpUi {
         let shown = self.shown.borrow();
         let Some(it) = shown.get(i) else { return };
         let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-        if selected {
-            style::fill_rounded(inner, 7.0, c.highlight);
-            style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
-        } else if hovered {
-            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
-        }
+        style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
         // `tone(_:)` per section, drawn as a tinted chip.
         let tone = match it.section.as_str() {
             "My work" | "My Work" | "MY WORK" => PopupTone::Accent,
@@ -843,12 +833,7 @@ impl PaneFindUi {
         let Some(orig) = shown.get(i).copied() else { return };
         let text = self.all.borrow().get(orig).cloned().unwrap_or_default();
         let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-        if selected {
-            style::fill_rounded(inner, 7.0, c.highlight);
-            style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
-        } else if hovered {
-            style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
-        }
+        style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
         let band = Rect::new(inner.x + 12.0, inner.y, inner.width - 22.0, inner.height);
         style::draw_text_left(&text, band, &style::system_font(13.0, Weight::Regular), c.text);
     }

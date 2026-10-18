@@ -3581,15 +3581,7 @@ mod appkit {
                 let r = &snap.rows[i];
                 let band = Rect::new(0.0, i as f64 * row_h(), w, row_h());
                 let pill = Rect::new(4.0, band.y + 1.0, w - 8.0 - 6.0, band.height - 2.0);
-                if i == snap.selection {
-                    style::fill_rounded(pill, 5.0, c.highlight);
-                    NSGraphicsContext::saveGraphicsState_class();
-                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns(pill), 5.0, 5.0).addClip();
-                    style::fill_rect(Rect::new(pill.x, pill.y, 3.0, pill.height), c.accent_on());
-                    NSGraphicsContext::restoreGraphicsState_class();
-                } else if hover == Some(i) {
-                    style::fill_rounded(pill, 5.0, style::button_fill(ButtonState::Hover, &c));
-                }
+                style::row_pill(pill, 5.0, i == snap.selection, i == snap.selection, hover == Some(i), &c, style::RowAccent::Clipped);
                 if let Some(g) = r.get("__group") {
                     // `groupedRows` header: ▸/▾, the name, its row count.
                     let shut = r.contains_key("__collapsed");

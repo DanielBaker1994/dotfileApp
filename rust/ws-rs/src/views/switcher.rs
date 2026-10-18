@@ -666,17 +666,8 @@ mod switch_ui {
             let m = self.model.borrow();
             let Some(&i) = m.visible.get(pos) else { return };
             let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-            if selected {
-                style::fill_rounded(inner, 7.0, c.highlight);
-                style::fill_rounded(
-                    Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0),
-                    1.5,
-                    c.accent,
-                );
-            } else if hovered {
-                // Mouse feedback parity with the files/jira lists.
-                style::fill_rounded(inner, 7.0, style::button_fill(style::ButtonState::Hover, c));
-            }
+            // Mouse feedback parity with the files/jira lists.
+            style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
             let mono = style::mono_font(11.0, Weight::Regular);
             let mut x = inner.x + 12.0;
             let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
@@ -1617,12 +1608,7 @@ mod macos {
             if let Some((_, label)) = &r.command {
                 let on = selected && model.split_pane == 0;
                 let cell = pill(8.0, mid - 16.0);
-                if on {
-                    style::fill_rounded(cell, 6.0, c.highlight);
-                    style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
-                } else if hover {
-                    style::fill_rounded(cell, 6.0, style::button_fill(style::ButtonState::Hover, &c));
-                }
+                style::row_pill(cell, 6.0, on, on, hover, &c, style::RowAccent::Rounded(5.0));
                 let f = style::system_font(13.0, if on { Weight::Semibold } else { Weight::Regular });
                 style::draw_text_left(
                     label,
@@ -1634,12 +1620,7 @@ mod macos {
             if let Some(ws) = &r.workspace {
                 let on = selected && model.split_pane == 1;
                 let cell = pill(mid + 8.0, rect.width - mid - 16.0);
-                if on {
-                    style::fill_rounded(cell, 6.0, c.highlight);
-                    style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
-                } else if hover {
-                    style::fill_rounded(cell, 6.0, style::button_fill(style::ButtonState::Hover, &c));
-                }
+                style::row_pill(cell, 6.0, on, on, hover, &c, style::RowAccent::Rounded(5.0));
                 let mono = style::mono_font(11.5, Weight::Semibold);
                 let chip = Rect::new(cell.x + 10.0, cell.mid_y() - 9.0, 22.0, 18.0);
                 let tint = if ws.focused { c.accent } else { c.dim };
