@@ -27,6 +27,7 @@ use crate::app::config::AppSettings;
 /// pure so the host can hold it on any platform.
 #[cfg(target_os = "macos")]
 use crate::ui::view_base;
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 
 /// Filefast's background-run latch (ok, last stdout line).
