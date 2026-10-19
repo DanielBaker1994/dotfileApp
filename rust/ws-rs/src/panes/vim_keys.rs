@@ -49,9 +49,9 @@ impl Default for VimMode {
 impl VimMode {
     pub fn raw_value(self) -> &'static str {
         match self {
-            VimMode::Normal => "NORMAL",
-            VimMode::Insert => "INSERT",
-            VimMode::Search => "SEARCH",
+            VimMode::Normal => "N",
+            VimMode::Insert => "I",
+            VimMode::Search => "S",
         }
     }
 }
@@ -1174,7 +1174,7 @@ mod tests {
             VimAction::ExitToNormal
         );
         assert_eq!(vim.mode, VimMode::Normal);
-        assert_eq!(vim.test_state().mode, "NORMAL");
+        assert_eq!(vim.test_state().mode, "N");
 
         assert_eq!(apply(&mut vim, &mut t, "list", false, key(0, Some('a'))), VimAction::EnterInsert);
         assert_eq!(vim.mode, VimMode::Insert);
