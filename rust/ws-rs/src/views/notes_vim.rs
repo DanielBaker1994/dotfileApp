@@ -615,7 +615,9 @@ impl VimPane {
         {
             return;
         }
-        self.remote(&format!("<C-\\><C-N>:{ex} | echo ''<CR>"));
+        // `:execute '<ex>'` keeps the whole command one argument: a bare
+        // `{ex} | echo ''` turns the tail into Lua for `:lua` (E5107).
+        self.remote(&format!("<C-\\><C-N>:execute {} | echo ''<CR>", vim_string(ex)));
     }
 
     /// Like [`Self::command`] but with no typed-keys fallback: for background

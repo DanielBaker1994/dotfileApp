@@ -51,10 +51,34 @@ local function load(ft)
   return list
 end
 
-local busy = false
+-- `busy` guards the accept -> expand hop (the expansion runs in vim.schedule).
+-- It is a timestamp, not a bare flag: if anything in that hop ever errors or is
+-- dropped, the guard EXPIRES by itself instead of silencing the popup for the
+-- rest of the session (the "intellisense just stopped" failure mode).
+local BUSY_MS = 300
+local busy_until = 0
+local function is_busy() return (vim.uv or vim.loop).now() < busy_until end
+local function set_busy() busy_until = (vim.uv or vim.loop).now() + BUSY_MS end
+local function clear_busy() busy_until = 0 end
+
+-- A snippet session outlives <Esc> (vim.snippet stays active until its last
+-- tabstop is reached or it is stopped) and `popup` bails while one is active.
+-- Drop a stale one when insert mode ends so completion always comes back.
+local function stop_snippet()
+  if vim.snippet and vim.snippet.active() then pcall(vim.snippet.stop) end
+end
+
+-- Runs `fn`, never lets an error escape into an autocmd/keymap (which would
+-- spam the message area and, from a keymap, swallow the keypress). The last
+-- error is kept in vim.g.ws_snippet_error for diagnosis.
+local function safely(fn, ...)
+  local ok, err = pcall(fn, ...)
+  if not ok then vim.g.ws_snippet_error = tostring(err) end
+  return ok
+end
 
 local function popup()
-  if busy or vim.fn.pumvisible() == 1 or vim.snippet.active() then return end
+  if is_busy() or vim.fn.pumvisible() == 1 or vim.snippet.active() then return end
   local snippets = load(vim.bo.filetype)
   if #snippets == 0 then return end
   local col = vim.fn.col('.')
@@ -73,18 +97,29 @@ local function popup()
   if #items > 0 then vim.fn.complete(col - #word, items) end
 end
 
+-- Autocmd entry: a failure here must not break later TextChangedI events.
+local function popup_safe() safely(popup) end
+
 local function expand_chosen()
   local item = vim.v.completed_item
   local ud = type(item) == 'table' and item.user_data
   if type(ud) ~= 'table' or not ud.ws_snippet then return end
   local word, body = item.word, ud.ws_snippet
-  busy = true
+  set_busy()
   vim.schedule(function()
-    local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-    vim.api.nvim_buf_set_text(0, row - 1, col - #word, row - 1, col, {})
-    vim.api.nvim_win_set_cursor(0, { row, col - #word })
-    vim.snippet.expand(body)
-    busy = false
+    -- Whatever happens in here, the guard is released and an error is
+    -- recorded rather than thrown (this used to leave `busy` stuck true).
+    safely(function()
+      if vim.fn.mode():sub(1, 1) ~= 'i' then return end
+      local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+      local line = vim.api.nvim_get_current_line()
+      -- the typed prefix must still sit right before the cursor
+      if col < #word or line:sub(col - #word + 1, col) ~= word then return end
+      vim.api.nvim_buf_set_text(0, row - 1, col - #word, row - 1, col, {})
+      vim.api.nvim_win_set_cursor(0, { row, col - #word })
+      vim.snippet.expand(body)
+    end)
+    clear_busy()
   end)
 end
 
@@ -288,20 +323,43 @@ end
 function M.setup()
   vim.opt.completeopt = { 'menu', 'menuone', 'noselect' }
   local g = vim.api.nvim_create_augroup('ws_snippets', { clear = true })
-  vim.api.nvim_create_autocmd('TextChangedI', { group = g, callback = popup })
-  vim.api.nvim_create_autocmd('CompleteDone', { group = g, callback = expand_chosen })
+  vim.api.nvim_create_autocmd('TextChangedI', { group = g, callback = popup_safe })
+  vim.api.nvim_create_autocmd('CompleteDone', { group = g, callback = function() safely(expand_chosen) end })
+  -- a stale snippet session or guard must never outlive the insert it belongs to
+  vim.api.nvim_create_autocmd({ 'InsertLeave', 'BufLeave' }, { group = g, callback = function()
+    safely(stop_snippet)
+    clear_busy()
+  end })
+  -- self-heal: if the autocmds were ever lost (another config clearing the
+  -- group, a partial reload), re-arm them the next time insert mode starts
+  local guard = vim.api.nvim_create_augroup('ws_snippets_guard', { clear = true })
+  vim.api.nvim_create_autocmd('InsertEnter', { group = guard, callback = function()
+    local ok, found = pcall(vim.api.nvim_get_autocmds, { group = 'ws_snippets', event = 'TextChangedI' })
+    if not ok or #found == 0 then M.setup() end
+  end })
   vim.keymap.set({ 'i', 's' }, '<Tab>', function()
-    if vim.fn.pumvisible() == 1 then
-      feed(vim.fn.complete_info({ 'selected' }).selected == -1 and '<C-n><C-y>' or '<C-y>')
-    elseif vim.snippet.active({ direction = 1 }) then
-      vim.snippet.jump(1)
-    else
-      feed('<Tab>')
-    end
+    -- on any error fall back to a plain Tab, never a swallowed keypress
+    local ok = safely(function()
+      if vim.fn.pumvisible() == 1 then
+        feed(vim.fn.complete_info({ 'selected' }).selected == -1 and '<C-n><C-y>' or '<C-y>')
+      elseif vim.snippet.active({ direction = 1 }) then
+        vim.snippet.jump(1)
+      else
+        feed('<Tab>')
+      end
+    end)
+    if not ok then feed('<Tab>') end
   end, { desc = 'accept snippet / next placeholder' })
   vim.keymap.set({ 'i', 's' }, '<S-Tab>', function()
-    if vim.snippet.active({ direction = -1 }) then vim.snippet.jump(-1) else feed('<S-Tab>') end
+    local ok = safely(function()
+      if vim.snippet.active({ direction = -1 }) then vim.snippet.jump(-1) else feed('<S-Tab>') end
+    end)
+    if not ok then feed('<S-Tab>') end
   end, { desc = 'previous placeholder' })
+  vim.api.nvim_create_user_command('SnippetReset', function()
+    safely(stop_snippet); clear_busy(); vim.g.ws_snippet_error = nil
+    M.setup()
+  end, { desc = 'reset the snippet popup state' })
   vim.api.nvim_create_user_command('Insert', M.pick, { desc = 'search + insert a snippet' })
   vim.keymap.set('n', '<leader>i', M.pick, { desc = 'insert: search snippets' })
 end
