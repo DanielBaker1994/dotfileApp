@@ -618,6 +618,14 @@ impl VimPane {
         self.remote(&format!("<C-\\><C-N>:{ex} | echo ''<CR>"));
     }
 
+    /// Like [`Self::command`] but with no typed-keys fallback: for background
+    /// polls (`checktime`), where `<C-\\><C-N>` would knock the user out of
+    /// insert mode (closing the completion popup) on any RPC hiccup. A missed
+    /// tick is harmless; the next one retries.
+    pub fn command_rpc_only(&self, ex: &str) {
+        let _ = self.eval(&format!("execute({})", vim_string(ex)));
+    }
+
     /// `PopupWindow.vimPaste`: paste `text` via `nvim_paste` (so nvim keeps its
     /// own registers/undo), else fall back to the PTY with bracketed-paste
     /// markers — Swift's exact order. A no-op for empty text.

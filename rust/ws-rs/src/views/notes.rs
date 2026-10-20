@@ -3058,8 +3058,28 @@ mod macos {
         web
     }
 
+    /// Load through a page file with read access to `/`, like the inline view
+    /// (`notes_prose`): a nil-base `loadHTMLString` gets an about:blank origin
+    /// that WebKit refuses to let read `file://` images.
     fn load_html(web: &WKWebView, html: &str) {
-        unsafe { web.loadHTMLString_baseURL(&NSString::from_str(html), None) };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let page_file = std::path::PathBuf::from(format!(
+            "{home}/.cache/kitchen-sink/prose/popout-{}-{}.html",
+            std::process::id(),
+            web as *const WKWebView as usize
+        ));
+        if let Some(dir) = page_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::write(&page_file, html).is_err() {
+            unsafe { web.loadHTMLString_baseURL(&NSString::from_str(html), None) };
+            return;
+        }
+        let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(
+            &page_file.to_string_lossy(),
+        ));
+        let root = objc2_foundation::NSURL::fileURLWithPath(ns_string!("/"));
+        unsafe { web.loadFileURL_allowingReadAccessToURL(&url, &root) };
     }
 
     /// `ProseWindow.show` — reuse/open a floating `WKWebView` panel.

@@ -4558,7 +4558,7 @@ mod daemon_ui {
                     }
                     if due && st.window.isVisible() {
                         if let Some(pane) = surface.vim_pane() {
-                            pane.command("silent! checktime");
+                            pane.command_rpc_only("silent! checktime");
                         }
                     }
                 }
