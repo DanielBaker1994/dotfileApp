@@ -1073,7 +1073,7 @@ pub const CONFIG_BOOL_KEYS: &[&str] = &[
     "in-palette", "panel", "vim-keys", "vim-mode-badge", "show-help", "show-side-panel-button",
     "show-size-badge", "magnifier", "square-magnifier", "copy-on-double-click", "save-path-fixed",
     "save-after-copy", "copy-path-after-save", "save-last-region", "reverse-arrow",
-    "counter-outline", "insecure-pixelate",
+    "counter-outline", "insecure-pixelate", "syntax-highlight",
 ];
 
 pub const CONFIG_COLOR_KEYS: &[&str] = &[
@@ -2017,6 +2017,11 @@ mod tests {
             Some("'maybe' is not true/false")
         );
         assert_eq!(config_value_problem("app", "vim-keys", "true"), None);
+        assert_eq!(config_value_problem("prettyprint", "syntax-highlight", "true"), None);
+        assert_eq!(
+            config_value_problem("prettyprint", "syntax-highlight", "sometimes").as_deref(),
+            Some("'sometimes' is not true/false")
+        );
         assert_eq!(config_value_problem("compare", "use-gitignore", "zzz").as_deref(), Some("'zzz' is not true/false"));
     }
 

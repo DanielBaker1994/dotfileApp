@@ -612,6 +612,7 @@ title = ""
 icon = "notes"
 
 save-dir = "/tmp/"
+syntax-highlight = true
 
 [terminal]
 enabled = true

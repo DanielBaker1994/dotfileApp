@@ -46,7 +46,7 @@ on-window-detected = [
   { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
 
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty && test %{window-title} = ws-settings', run = ['layout floating'] },
-{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1', 'exec-and-forget $HOME/.dotfiles/ghostty-strip/launch.sh --auto'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace G'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },

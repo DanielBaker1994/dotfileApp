@@ -29,6 +29,7 @@ pub mod quiet_web;
 pub mod web_pane;
 pub mod sidebar;
 pub mod style;
+pub mod syntax_text;
 pub mod theme;
 pub mod action_picker;
 pub mod toast;

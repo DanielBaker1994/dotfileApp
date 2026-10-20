@@ -6,9 +6,9 @@
 //! non-activating `PopupPanel` at the floating level that never activates the
 //! app, ordered front with `orderFrontRegardless` + `makeKey`. The bodies are
 //! ported per kind: the prettyprint editor (debounced auto-format through
-//! `jq`/`xmllint`, the two header buttons), the filefast paste view
-//! (`FF_DIR`/`FF_NAME` script run on Return) and the streaming health-checks
-//! output.
+//! `jq`/`xmllint`, JSON/XML syntax highlighting via `ui::syntax_text`, the two
+//! header buttons), the filefast paste view (`FF_DIR`/`FF_NAME` script run on
+//! Return) and the streaming health-checks output.
 //!
 //! `text-table` (no Swift original) is the "Text to Table" panel: the input
 //! (pre-filled from the clipboard, e.g. Hyper+X's Copy Text) goes through the
@@ -80,6 +80,8 @@ pub struct ToolSpec {
     pub font: String,
     /// Text-table: close the panel (and return focus) after a copy.
     pub close_on_copy: bool,
+    /// Prettyprint: color JSON/XML tokens (the editor's syntax highlighting).
+    pub syntax_highlight: bool,
 }
 
 impl ToolSpec {
@@ -92,6 +94,7 @@ impl ToolSpec {
                 height: 600.0,
                 font: String::new(),
                 close_on_copy: false,
+                syntax_highlight: true,
             },
             ToolKind::Filefast => ToolSpec {
                 script: String::new(),
@@ -100,6 +103,7 @@ impl ToolSpec {
                 height: 180.0,
                 font: String::new(),
                 close_on_copy: false,
+                syntax_highlight: false,
             },
             ToolKind::HealthChecks => ToolSpec {
                 script: String::new(),
@@ -108,6 +112,7 @@ impl ToolSpec {
                 height: 640.0,
                 font: "SF Mono".to_string(),
                 close_on_copy: false,
+                syntax_highlight: false,
             },
             ToolKind::TextTable => ToolSpec {
                 script: String::new(),
@@ -116,6 +121,7 @@ impl ToolSpec {
                 height: 600.0,
                 font: String::new(),
                 close_on_copy: true,
+                syntax_highlight: false,
             },
         }
     }
@@ -208,6 +214,9 @@ impl ToolSpec {
         }
         if let Some(on) = tri(vars.get("close-on-copy")) {
             spec.close_on_copy = on;
+        }
+        if let Some(on) = tri(vars.get("syntax-highlight")) {
+            spec.syntax_highlight = on;
         }
         let _ = tri(vars.get("enabled"));
         spec
@@ -645,6 +654,9 @@ pub struct ToolPanel {
     pp_last_seen: String,
     pp_last_change: Option<std::time::Instant>,
     pp_status: Option<(String, bool)>,
+    /// Prettyprint: the text last colored (the highlight pass's guard).
+    #[cfg(target_os = "macos")]
+    pp_highlighted: String,
     /// Filefast: the script result latch + run latch + auto-hide deadline.
     ff_out: FfOut,
     ff_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -725,6 +737,8 @@ impl ToolPanel {
             pp_last_seen: String::new(),
             pp_last_change: None,
             pp_status: None,
+            #[cfg(target_os = "macos")]
+            pp_highlighted: String::new(),
             ff_out: std::sync::Arc::new(std::sync::Mutex::new(None)),
             ff_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ff_status: None,
@@ -1188,6 +1202,47 @@ impl ToolPanel {
                 pending.store(false, std::sync::atomic::Ordering::Relaxed);
             });
         }
+    }
+
+    /// Re-color the prettyprint editor from its text: the base font/color over
+    /// the whole string, then the theme color of each JSON/XML token. Called
+    /// only once the text has settled (never mid-keystroke), so it cannot fight
+    /// typing; a no-op when the text is unchanged since the last pass.
+    #[cfg(target_os = "macos")]
+    fn apply_pp_highlight(&mut self) {
+        if self.kind != ToolKind::PrettyPrint || !self.spec.syntax_highlight {
+            return;
+        }
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let Some(colors) = self.colors else {
+            return;
+        };
+        let raw = editor.string().to_string();
+        if raw == self.pp_highlighted {
+            return;
+        }
+        self.pp_highlighted = raw.clone();
+        let Some(storage) = (unsafe { editor.textStorage() }) else {
+            return;
+        };
+        let font = editor.font().unwrap_or_else(|| {
+            objc2_app_kit::NSFont::monospacedSystemFontOfSize_weight(
+                13.0,
+                unsafe { objc2_app_kit::NSFontWeightRegular },
+            )
+        });
+        let attr = crate::ui::syntax_text::attributed(&raw, &font, &colors);
+        // Keep the caret/selection: the pass only rewrites attributes, but the
+        // storage is replaced wholesale (which also normalizes rich pastes).
+        let sel = editor.selectedRange();
+        storage.setAttributedString(&attr);
+        let len = storage.length();
+        let loc = sel.location.min(len);
+        let l = sel.length.min(len - loc);
+        editor.setSelectedRange(objc2_foundation::NSRange::new(loc, l));
+        unsafe { editor.setTypingAttributes(&crate::ui::style::attrs(&font, colors.text)) };
     }
 
     /// Start the health-checks script streaming into the buffer (only once
@@ -1769,7 +1824,10 @@ impl ToolPanel {
                 let text = NSTextView::new(mtm);
                 text.setEditable(self.kind == ToolKind::PrettyPrint);
                 text.setSelectable(true);
-                text.setRichText(self.kind == ToolKind::HealthChecks);
+                // Rich text: the health panel paints ANSI runs, the prettyprint
+                // editor paints JSON/XML token colors — both live in the text
+                // storage's attributes.
+                text.setRichText(true);
                 text.setDrawsBackground(false);
                 text.setTextColor(Some(&colors.text.to_nscolor()));
                 text.setInsertionPointColor(Some(&colors.accent_on().to_nscolor()));
@@ -2067,6 +2125,13 @@ impl ToolPanel {
                     Some(Err(e)) => self.set_pp_status(Some((e, true))),
                     None => {}
                 }
+                // Color the settled text (JSON/XML). Waits for any in-flight
+                // format so it colors the formatted result, not the raw paste.
+                if !self.fmt_pending.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.pp_last_change.is_none()
+                {
+                    self.apply_pp_highlight();
+                }
             }
             // `poll_table` (every platform) does the work.
             ToolKind::TextTable => {}
@@ -2197,6 +2262,17 @@ mod tests {
         assert_eq!(ToolSpec::defaults(ToolKind::PrettyPrint).width, 1000.0);
         assert_eq!(ToolSpec::defaults(ToolKind::HealthChecks).height, 640.0);
         assert_eq!(ToolSpec::defaults(ToolKind::Filefast).width, 620.0);
+    }
+
+    #[test]
+    fn prettyprint_syntax_highlight_defaults_on_and_reads_the_key() {
+        assert!(ToolSpec::defaults(ToolKind::PrettyPrint).syntax_highlight);
+        assert!(!ToolSpec::defaults(ToolKind::Filefast).syntax_highlight);
+        let text = "[prettyprint]\nsyntax-highlight = false\n";
+        assert_eq!(
+            tri(section_vars(text, "prettyprint").get("syntax-highlight")),
+            Some(false)
+        );
     }
 
     #[test]
