@@ -10871,7 +10871,7 @@ mod daemon_ui {
             let Some(model) = self.ivars().controller.compare_model() else { return };
             let (has, folder) = {
                 let m = model.lock().unwrap();
-                (m.current().is_some(), m.current().is_some_and(|s| s.folder.is_some()))
+                (m.current().is_some(), m.current_is_folder())
             };
             let mut items: Vec<(&str, &str, &str)> = vec![("New Comparison", "the start page · ⌘0", "start")];
             if has && folder {

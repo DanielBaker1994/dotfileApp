@@ -3986,7 +3986,7 @@ impl CompareWindowModel {
             .iter()
             .map(|s| {
                 json!({
-                    "kind": if s.folder.is_some() { "folder" } else { "text" },
+                    "kind": if s.folder.is_some() || self.folder_bound == Some(s.id) { "folder" } else { "text" },
                     "left": s.path.get(&CompareSide::Left).cloned().unwrap_or_else(|| s.name(CompareSide::Left)),
                     "right": s.path.get(&CompareSide::Right).cloned().unwrap_or_else(|| s.name(CompareSide::Right)),
                     "dirtyL": s.dirty(CompareSide::Left),
@@ -4074,7 +4074,9 @@ impl CompareWindowModel {
         if self.current().is_none() || in_text {
             return false;
         }
-        if self.current().is_some_and(|s| s.folder.is_some()) {
+        // The folder session is moved into `folder_page` while bound, so
+        // `s.folder` alone is None for the selected folder pair.
+        if self.current_is_folder() {
             return self.folder_key(key);
         }
         let filter = |c: u16| [18u16, 19, 20, 21].iter().position(|d| *d == c);
@@ -5126,7 +5128,7 @@ impl CompareSurface {
             .iter()
             .map(|s| SidebarRow {
                 title: s.label(),
-                icon: if s.folder.is_some() { "folder".into() } else { "arrow.left.arrow.right".into() },
+                icon: if s.folder.is_some() || model.folder_bound == Some(s.id) { "folder".into() } else { "arrow.left.arrow.right".into() },
                 badge: s.is_dirty().then(|| (String::new(), crate::ui::theme::PopupTone::Warning)),
                 tip: format!(
                     "{}\n{}",
