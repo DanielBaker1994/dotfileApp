@@ -767,11 +767,20 @@ mod appkit {
             // `set_model` from inside it can't double-borrow.
             let cb = self.ivars().on_event.borrow_mut().take();
             if let Some(cb) = cb {
-                cb(ev);
-                let mut slot = self.ivars().on_event.borrow_mut();
-                if slot.is_none() {
-                    *slot = Some(cb);
+                // Restore on drop so a callback that unwinds (or panics) can
+                // not leave the slot empty and drop every later event.
+                struct Restore<'a>(&'a RefCell<Option<Box<dyn Fn(SidebarEvent)>>>, Option<Box<dyn Fn(SidebarEvent)>>);
+                impl Drop for Restore<'_> {
+                    fn drop(&mut self) {
+                        if let Ok(mut slot) = self.0.try_borrow_mut() {
+                            if slot.is_none() {
+                                *slot = self.1.take();
+                            }
+                        }
+                    }
                 }
+                let guard = Restore(&self.ivars().on_event, Some(cb));
+                (guard.1.as_ref().unwrap())(ev);
             }
         }
 

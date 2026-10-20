@@ -32,7 +32,7 @@ const KEY_DELETE: u16 = 51;
 const KEY_FORWARD_DELETE: u16 = 117;
 const KEY_ENTER_NUMPAD: u16 = 76;
 
-/// `VimMode` (`"NORMAL"` / `"INSERT"` / `"SEARCH"`).
+/// `VimMode` (`"N"` / `"I"` / `"S"`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum VimMode {
     Normal,
@@ -1164,7 +1164,7 @@ mod tests {
         assert_eq!(apply(&mut vim, &mut t, "list", false, key(0, Some('i'))), VimAction::EnterInsert);
         assert_eq!(vim.mode, VimMode::Insert);
         let st = vim.test_state();
-        assert_eq!(st.mode, "INSERT");
+        assert_eq!(st.mode, "I");
         assert_eq!(st.pane, "list");
         assert!(!st.search.open);
 
@@ -1197,7 +1197,7 @@ mod tests {
             VimAction::OpenSearch { back: false }
         );
         let st = vim.test_state();
-        assert_eq!(st.mode, "SEARCH");
+        assert_eq!(st.mode, "S");
         assert!(st.search.open);
         assert_eq!(st.search.pane, "list");
 

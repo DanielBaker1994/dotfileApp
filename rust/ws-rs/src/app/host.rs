@@ -7008,9 +7008,16 @@ mod daemon_ui {
         fn notes_click_arms_rename(path: &str) -> bool {
             use objc2_app_kit::NSEventModifierFlags as F;
             let Some(mtm) = MainThreadMarker::new() else { return false };
+            // `clickCount` is only defined for mouse events: on a KeyDown (the
+            // rail's Return) it raises an NSException, which unwound out of the
+            // sidebar's event callback and left the rail deaf to every click.
             let single = NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| {
                 let m = e.modifierFlags();
-                e.clickCount() <= 1 && !m.intersects(F::Command | F::Shift | F::Control | F::Option)
+                matches!(
+                    e.r#type(),
+                    objc2_app_kit::NSEventType::LeftMouseDown | objc2_app_kit::NSEventType::LeftMouseUp
+                ) && e.clickCount() <= 1
+                    && !m.intersects(F::Command | F::Shift | F::Control | F::Option)
             });
             if !single {
                 cancel_click_rename();

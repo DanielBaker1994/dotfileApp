@@ -4383,7 +4383,7 @@ mod macos {
             let h = cell.1.round() as i64;
             if h > 0 && h != self.vim_cell_h.get() {
                 self.vim_cell_h.set(h);
-                pane.command(&format!("let g:ws_cell_h={h} | lua _G.ws_images_refresh()"));
+                pane.command(&format!("let g:ws_cell_h={h} | call v:lua.ws_images_refresh()"));
             }
         }
 
