@@ -6684,6 +6684,58 @@ mod tests {
         assert!(!tc.can_undo());
     }
 
+    /// A nested row's `rel` is the real relative path and its ancestors keep
+    /// their case, so `folder:select` accepts `MixedCase/InnerFile.TXT`. The
+    /// helper used to prefix descendants with the folded matching key, which
+    /// made the row `mixedcase/InnerFile.TXT`.
+    #[test]
+    fn folder_scan_nested_rel_keeps_ancestor_case_when_helper_present() {
+        if !helper_ready() {
+            eprintln!("skipping: no python 3.11+ or pylib/helper not found");
+            return;
+        }
+        let dir = temp_dir("folder-rel-case");
+        let (l, r) = (format!("{dir}/L"), format!("{dir}/R"));
+        for root in [&l, &r] {
+            std::fs::create_dir_all(format!("{root}/MixedCase")).unwrap();
+        }
+        if !FolderScan::is_case_insensitive(&l) {
+            eprintln!("skipping: temp volume is case-sensitive");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        std::fs::write(format!("{l}/MixedCase/InnerFile.TXT"), "content\n").unwrap();
+        std::fs::write(format!("{r}/MixedCase/InnerFile.TXT"), "other\n").unwrap();
+        std::fs::create_dir_all(format!("{l}/subL")).unwrap();
+        std::fs::create_dir_all(format!("{r}/subR")).unwrap();
+        std::fs::write(format!("{l}/subL/x.txt"), "x\n").unwrap();
+        std::fs::write(format!("{r}/subR/y.txt"), "y\n").unwrap();
+
+        let mut tree = FolderScan::run(real_backend(), &l, &r, &FolderOptions::default());
+        let mut rels: Vec<String> = tree.all().iter().map(|n| n.rel.clone()).collect();
+        rels.sort();
+        for want in [
+            "MixedCase",
+            "MixedCase/InnerFile.TXT",
+            "subL",
+            "subL/x.txt",
+            "subR",
+            "subR/y.txt",
+        ] {
+            assert!(rels.iter().any(|rel| rel == want), "missing {want:?} in {rels:?}");
+        }
+
+        tree.expand_all(true);
+        let mut session = FolderSession::new(&l, &r);
+        session.rows = tree.rows(&FolderView::default());
+        session.tree = Some(tree);
+        let mut page = FolderPageState::new(real_backend(), FolderOptions::default());
+        page.bind(session);
+        assert_eq!(page.test_do("select", "MixedCase/InnerFile.TXT"), None);
+        assert!(page.test_do("select", "mixedcase/InnerFile.TXT").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn start_pasted_then_edit_replaces_side() {
         let stub = Stub::new();

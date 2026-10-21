@@ -202,7 +202,7 @@ def scan_step(handle: int, max_dirs: int = 24) -> dict:
             if _is_dir(node) and not _kind_mismatch(node):
                 stack.append((os.path.join(lp, node["left"]["name"]) if (node["left"] and lp) else None,
                               os.path.join(rp, node["right"]["name"]) if (node["right"] and rp) else None,
-                              node["key"], node["id"], depth + 1))
+                              node["rel"], node["id"], depth + 1))
         if parent_id is None:
             session["roots"] += children
     return {"count": len(nodes), "done": not stack,
