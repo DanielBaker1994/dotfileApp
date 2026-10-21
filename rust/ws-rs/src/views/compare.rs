@@ -4123,8 +4123,9 @@ impl CompareWindowModel {
         match code {
             45 if ctrl && !cmd => self.jump_section(1),
             35 if ctrl && !cmd => self.jump_section(-1),
+            15 if ctrl && opt && !cmd => self.copy_line(CompareSide::Left),
             15 if ctrl && !cmd => self.copy_across(CompareSide::Left),
-            37 if ctrl && opt && !cmd => self.copy_across(CompareSide::Right),
+            37 if ctrl && opt && !cmd => self.copy_line(CompareSide::Right),
             124 if opt && !cmd && !ctrl => self.copy_across(CompareSide::Left),
             123 if opt && !cmd && !ctrl => self.copy_across(CompareSide::Right),
             6 if cmd => self.undo(shift),
@@ -6207,6 +6208,84 @@ mod tests {
         for k in [key(125, false, false), key(126, false, false), key(45, false, false), key(45, true, true)] {
             assert!(!takes_rail_priority(&k));
         }
+    }
+
+    /// APP-BUGS N1: Ctrl+Opt+R / Ctrl+Opt+L copy just the cursor line
+    /// (`copyLine`), while Ctrl+R / Opt+→ keep copying the whole difference
+    /// section (`copyAcross`). Before the fix Ctrl+Opt+R fell into the plain
+    /// Ctrl+R arm and copied the section; Ctrl+Opt+L copied the section too.
+    #[test]
+    fn copy_line_chords_copy_only_the_cursor_row() {
+        let key = |code: u16, ctrl: bool, opt: bool| crate::ui::popup::KeyInput {
+            key_code: code,
+            chars: None,
+            cmd: false,
+            ctrl,
+            opt,
+            shift: false,
+            esc_streak: 0,
+        };
+        let doc = |lines: &[&str]| TextSide {
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+            eols: lines.iter().map(|_| Eol::Lf).collect(),
+            encoding: TextEncodingKind::Utf8,
+        };
+        // `a` matches; `b,c` vs `B,C` is one two-row difference section.
+        let stub = Stub::new();
+        stub.push(
+            "compare.new",
+            json!({
+                "handle": 7,
+                "left": doc(&["a", "b", "c"]).json(),
+                "right": doc(&["a", "B", "C"]).json(),
+                "rows": [[0, 0, 0], [1, 1, 5], [2, 2, 5]],
+                "sections": [[1, 3, 1]],
+                "anchors": [],
+                "undo": [0, 0],
+                "redo": [0, 0],
+                "importance": Importance::default().json(),
+                "ignoreUnimportant": false,
+            }),
+        );
+        let dir = temp_dir("copy-line-keys");
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        model.open_pair(None, None);
+        assert_eq!(model.test_do("cursor:1"), None);
+        let last_copy = || {
+            stub.calls()
+                .into_iter()
+                .rev()
+                .find(|(m, _)| m == "compare.copy_rows")
+                .map(|(_, p)| p)
+                .unwrap()
+        };
+
+        // Ctrl+Opt+R: row 1 only, left → right.
+        assert!(model.handle_key(key(15, true, true), false));
+        let p = last_copy();
+        assert_eq!(p["lo"], 1);
+        assert_eq!(p["hi"], 2);
+        assert_eq!(p["from"], "left");
+        assert_eq!(model.sessions[0].status, "line copied to the right");
+
+        // Ctrl+Opt+L: row 1 only, right → left.
+        assert!(model.handle_key(key(37, true, true), false));
+        let p = last_copy();
+        assert_eq!(p["lo"], 1);
+        assert_eq!(p["hi"], 2);
+        assert_eq!(p["from"], "right");
+
+        // Ctrl+R still copies the whole section (rows 1..3).
+        assert!(model.handle_key(key(15, true, false), false));
+        let p = last_copy();
+        assert_eq!(p["lo"], 1);
+        assert_eq!(p["hi"], 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
