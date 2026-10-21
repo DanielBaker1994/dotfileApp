@@ -52,6 +52,9 @@ RELEASE_BIN = os.path.join(ROOT, ".build", "rust-target", "release", "kitchen-si
 GUI_LOCK = os.path.join(ROOT, ".build", "gui-sandbox.lock")
 CODESIGN_ID = "kitchen-sink codesign"
 BUNDLE_ID = "dev.danielbaker.kitchen-sink"
+# --settle: how long a failing state oracle keeps re-reading state before it fails
+# (0 = read once, as the table's "no retry" contract says; a slower VM needs some).
+SETTLE_MS = 0
 
 
 class StepError(Exception):
@@ -107,7 +110,8 @@ class Sandbox:
             subprocess.run(["pkill", "-f", self.app + "/Contents/MacOS/"], capture_output=True)
             time.sleep(1)
         self._sh("stop", check=False)
-        subprocess.run(["aerospace", "enable", "on"], capture_output=True)
+        if shutil.which("aerospace"):
+            subprocess.run(["aerospace", "enable", "on"], capture_output=True)
         self.running = False
         left = subprocess.run(["pgrep", "-f", self.app + "/Contents/MacOS/"], capture_output=True, text=True).stdout.split()
         if left:
@@ -182,14 +186,18 @@ class Sandbox:
         pid = self.pid()
         if not pid:
             raise StepError("activate: app not answering")
-        r = subprocess.run([KS_INPUT, "activate", "--pid", str(pid)], capture_output=True, text=True)
-        if r.returncode != 0:
-            raise StepError(f"activate: {r.stderr.strip() or 'sandbox app did not become frontmost'}")
-        self.do("input:activate")
-        time.sleep(0.4)
-        st = self.state() or {}
-        if not st.get("active") or not st.get("keyWindow"):
-            raise StepError(f"activate: app active={st.get('active')} keyWindow={st.get('keyWindow')!r}")
+        st: dict = {}
+        for _ in range(4):
+            # ks-input's own frontmost check can time out in a VM where no app yields
+            # activation; the app's `active` / `keyWindow` state is the real test.
+            subprocess.run([KS_INPUT, "activate", "--pid", str(pid)], capture_output=True, text=True)
+            self.do("input:activate")
+            time.sleep(0.4)
+            st = self.state() or {}
+            if st.get("active") and st.get("keyWindow"):
+                return
+            time.sleep(0.5)
+        raise StepError(f"activate: app active={st.get('active')} keyWindow={st.get('keyWindow')!r}")
 
 
 def pgrep_live() -> list[int]:
@@ -427,6 +435,9 @@ def check_visual(o: dict, sb: Sandbox, prefix: str) -> tuple[str, str, list[str]
         absents = [absents]
     if not finds and not absents:
         return "eyes", o.get("expect", ""), shots
+    if not shots:
+        # No capture (no Screen Recording grant, e.g. in the VM): undecidable, not a failure.
+        return "eyes", "no screenshot could be taken (Screen Recording?): " + o.get("expect", ""), shots
     missing = [f for f in finds if f.lower() not in blob]
     present = [a for a in absents if a.lower() in blob]
     if missing or present:
@@ -510,6 +521,11 @@ def run_flow(sb: Sandbox, flow: dict, out: str, tag: str) -> dict:
             where = f"@{cp}" if cp else "@end"
             if kind == "state":
                 ok, why = check_state(expand_expected(o, sb.home), st)
+                deadline = time.time() + SETTLE_MS / 1000
+                while not ok and time.time() < deadline:
+                    time.sleep(0.25)
+                    st = sb.state() or st
+                    ok, why = check_state(expand_expected(o, sb.home), st)
                 if not ok:
                     res["failed"].append(f"state {where}: {why}")
             elif kind == "disk":
@@ -644,12 +660,16 @@ def main() -> int:
     ap.add_argument("--app", default="fresh", help="'fresh' (build the working tree), 'installed', or a bundle path")
     ap.add_argument("--out", help="output dir (default .build/flow-runs/<timestamp>)")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--settle", type=int, default=0, metavar="MS",
+                    help="re-read state for up to MS ms before failing a state oracle (VM: 1500)")
     ap.add_argument("--shared", action="store_true",
                     help="run flows in one app session (faster; flows can leak state into each other)")
     ap.add_argument("--allow-screen-capture", action="store_true",
                     help="also run flows that need 'screen-capture' (they capture the REAL screen)")
     a = ap.parse_args()
 
+    global SETTLE_MS
+    SETTLE_MS = a.settle
     table = json.load(open(a.table, encoding="utf-8"))
     if a.replay:
         flows = [finding_to_flow(json.loads(l)) for l in open(a.replay, encoding="utf-8") if l.strip()]

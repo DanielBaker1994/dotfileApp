@@ -25,7 +25,8 @@
 # build (tests only).
 set -euo pipefail
 
-ROOT=$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)
+# No git needed (a test VM has none): the repo root is this script's parent.
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 SANDBOX="${KS_MCP_SANDBOX:-$ROOT/.build/mcp-sandbox}"
 BIN="$ROOT/.build/rust-target/release/kitchen-sink"
 SOCK="$SANDBOX/tmp/ws-notes.sock"
@@ -113,7 +114,10 @@ cmd_start() {
         ( cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/.build/rust-target" \
             cargo build --release -p ws-rs -p ws-helpers )
     fi
-    [ -x "$BIN" ] || die "missing $BIN (unset KS_MCP_SANDBOX_NO_BUILD to build)"
+    # --gui launches $APP (checked below); only headless runs the cargo binary.
+    if [ "$gui" != 1 ]; then
+        [ -x "$BIN" ] || die "missing $BIN (unset KS_MCP_SANDBOX_NO_BUILD to build)"
+    fi
 
     # The Rust socket layer hard-fails at sun_path >= 104 bytes.
     if [ "${#SOCK}" -ge 104 ]; then
@@ -172,6 +176,9 @@ cmd_start() {
         "WS_LOG_DIR=$SANDBOX/home/logs"
         "WS_DEFAULTS_SUITE=$DEFAULTS_SUITE"
     )
+    # `open` hands the app launchd's PATH, so a Python outside it (the test VM's)
+    # must be named explicitly.
+    [ -n "${WS_PYTHON:-}" ] && envs+=("WS_PYTHON=$WS_PYTHON")
     if [ "$gui" = 1 ]; then
         [ -d "$APP" ] || die "missing $APP (run ./ws build once)"
         aerospace_off

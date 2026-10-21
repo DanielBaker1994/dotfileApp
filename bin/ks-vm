@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# ks-vm — run kitchen-sink GUI tests inside a macOS VM (Tart), so the owner's
+# screen, keyboard and windows are never touched.
+#
+#   bin/ks-vm setup            one-time: clone the image, size the VM, boot, provision
+#   bin/ks-vm test [ARGS…]     build the working tree, copy it in, run Tests/run_flows.py ARGS
+#                              in the VM, copy results to .build/flow-runs/vm-<ts>/
+#   bin/ks-vm up | down | status | ip
+#   bin/ks-vm ssh [CMD…]       shell (or one command) in the VM
+#
+# The VM is headless (`tart run --no-graphics`): its own virtual display and
+# window server, nothing appears on the host. Default guest login admin/admin
+# (Cirrus Labs images). Disk: the image is ~24 GB compressed under ~/.tart.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+TART=${TART:-$(command -v tart || echo "$HOME/.local/bin/tart")}
+VM=${KS_VM:-ks-test}
+IMAGE=${KS_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-vanilla:26.6.2}
+CPUS=${KS_VM_CPUS:-4}
+MEM_MB=${KS_VM_MEM_MB:-4096}
+GUSER=admin
+GPASS=admin
+G_REPO=/Users/$GUSER/ks          # repo copy inside the VM
+G_PY=/Users/$GUSER/py/bin/python3
+STATE=$ROOT/.build/vm
+PY_TGZ=$STATE/dl/cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz
+VM_APP=$STATE/kitchen-sink.app   # host-side build of the bundle for the VM
+SIGN_ID="kitchen-sink codesign"
+BUNDLE_ID=dev.danielbaker.kitchen-sink
+
+die() { printf 'ks-vm: %s\n' "$*" >&2; exit 1; }
+say() { printf 'ks-vm: %s\n' "$*"; }
+
+[ -x "$TART" ] || die "tart not found (expected $HOME/.local/bin/tart)"
+command -v sshpass >/dev/null || die "sshpass not found (brew install sshpass)"
+
+KEY=$STATE/id_ed25519   # a key just for the VM: password logins get rate-limited by sshd
+BASE_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
+PASS_OPTS=("${BASE_OPTS[@]}" -o PubkeyAuthentication=no -o PreferredAuthentications=password)
+SSH_OPTS=("${BASE_OPTS[@]}" -o IdentitiesOnly=yes -o PasswordAuthentication=no -i "$KEY")
+
+vm_exists()  { "$TART" list --format json | python3 -c "import json,sys;sys.exit(0 if any(v['Name']=='$VM' for v in json.load(sys.stdin)) else 1)"; }
+vm_running() { "$TART" list --format json | python3 -c "import json,sys;sys.exit(0 if any(v['Name']=='$VM' and v.get('State')=='running' for v in json.load(sys.stdin)) else 1)"; }
+vm_ip()      { "$TART" ip "$VM" --wait "${1:-5}" 2>/dev/null; }
+
+gssh() {
+    local ip; ip=$(vm_ip) || die "VM not running (bin/ks-vm up)"
+    ssh "${SSH_OPTS[@]}" "$GUSER@$ip" "$@"
+}
+
+# Install $KEY in the guest (password login, once per VM).
+ensure_key() {
+    local ip=$1
+    [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C ks-vm -f "$KEY"
+    ssh "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null && return 0
+    sshpass -p "$GPASS" ssh "${PASS_OPTS[@]}" "$GUSER@$ip" \
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < "$KEY.pub"
+}
+
+grsync() {   # grsync SRC… DEST   (DEST uses :path for the guest)
+    local ip; ip=$(vm_ip) || die "VM not running"
+    local args=() a
+    for a in "$@"; do args+=("${a/#:/$GUSER@$ip:}"); done
+    rsync -a -e "ssh ${SSH_OPTS[*]}" "${args[@]}"
+}
+
+cmd_up() {
+    vm_exists || die "no VM '$VM' (bin/ks-vm setup)"
+    if ! vm_running; then
+        mkdir -p "$STATE"
+        say "booting $VM (headless) …"
+        nohup "$TART" run --no-graphics "$VM" >"$STATE/run.log" 2>&1 &
+    fi
+    local ip i
+    ip=$(vm_ip 180) || die "VM got no IP within 180 s (see $STATE/run.log)"
+    for i in $(seq 1 60); do
+        if ensure_key "$ip" 2>/dev/null && ssh "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null; then
+            say "up at $ip"
+            return 0
+        fi
+        sleep 5
+    done
+    die "ssh to $ip never answered"
+}
+
+cmd_down() {
+    if vm_running; then "$TART" stop "$VM" >/dev/null && say "stopped"; else say "not running"; fi
+}
+
+cmd_status() {
+    if ! vm_exists; then echo "no VM '$VM'"; return; fi
+    if vm_running; then echo "running ($(vm_ip || echo 'no ip'))"; else echo "stopped"; fi
+}
+
+provision() {
+    say "provisioning …"
+    [ -f "$PY_TGZ" ] || die "missing $PY_TGZ (see TESTING.md §VM)"
+    # Python (no CLT in a vanilla image): a standalone build, checksum-verified on the host.
+    if ! gssh "test -x $G_PY"; then
+        grsync "$PY_TGZ" ":/Users/$GUSER/py.tgz"
+        gssh "cd ~ && rm -rf python py && tar -xzf py.tgz && mv python py && rm py.tgz && ~/py/bin/python3 -V"
+    fi
+    # Never sleep, never lock, no screensaver: GUI tests need a live session.
+    gssh "echo $GPASS | sudo -S -p '' pmset -a sleep 0 displaysleep 0 disksleep 0 >/dev/null 2>&1;
+          defaults -currentHost write com.apple.screensaver idleTime 0;
+          defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null || true;
+          mkdir -p $G_REPO; touch ~/.ks-provisioned; echo ok"
+}
+
+cmd_setup() {
+    if ! vm_exists; then
+        # The unpacked image takes ~29 GB of real disk; keep ~10 GB spare for the host.
+        local free_gb; free_gb=$(df -g "$HOME" | awk 'NR==2{print $4}')
+        [ "$free_gb" -ge 40 ] || [ -d "$HOME/.tart/tmp" ] \
+            || die "only ${free_gb} GB free; the VM needs ~29 GB plus headroom (free 40 GB first)"
+        say "cloning $IMAGE → $VM (large download) …"
+        "$TART" clone "$IMAGE" "$VM"
+    fi
+    if vm_running; then "$TART" stop "$VM" >/dev/null || true; fi
+    "$TART" set "$VM" --cpu "$CPUS" --memory "$MEM_MB"
+    cmd_up
+    provision
+    say "setup done — try: bin/ks-vm test --ids switcher-close-esc"
+}
+
+build_vm_app() {
+    say "building release binary …"
+    ( cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/.build/rust-target" \
+        cargo build --release -p ws-rs -p ws-helpers ) >"$STATE/cargo.log" 2>&1 \
+        || { tail -30 "$STATE/cargo.log"; die "cargo build failed"; }
+    rm -rf "$VM_APP"
+    cp -R "$ROOT/kitchen-sink.app" "$VM_APP"
+    cp "$ROOT/.build/rust-target/release/kitchen-sink" "$VM_APP/Contents/MacOS/kitchen-sink"
+    # The bundle asks for the owner's macOS; the binary itself runs on 11+.
+    /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 14.0" "$VM_APP/Contents/Info.plist"
+    codesign --force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$VM_APP" >/dev/null 2>&1 \
+        || codesign --force --sign - --identifier "$BUNDLE_ID" "$VM_APP"
+}
+
+sync_in() {
+    say "copying repo + app into the VM …"
+    grsync --delete \
+        --exclude .git --exclude .build --exclude rust --exclude logs --exclude dist \
+        --exclude kitchen-sink.app --exclude 'Tests/usability/**/shots' --exclude __pycache__ \
+        "$ROOT/" ":$G_REPO/"
+    gssh "mkdir -p $G_REPO/.build/ks-input $G_REPO/.build/ks-ocr $G_REPO/.build/vm-app"
+    grsync "$STATE/bin/ks-input" ":$G_REPO/.build/ks-input/ks-input"
+    grsync "$STATE/bin/ks-ocr" ":$G_REPO/.build/ks-ocr/ks-ocr"
+    grsync --delete "$VM_APP/" ":$G_REPO/.build/vm-app/kitchen-sink.app/"
+    # The bin/ wrappers rebuild when the .swift source is newer; there is no swiftc in the VM.
+    gssh "touch $G_REPO/.build/ks-input/ks-input $G_REPO/.build/ks-ocr/ks-ocr"
+}
+
+cmd_test() {
+    [ -x "$STATE/bin/ks-input" ] && [ -x "$STATE/bin/ks-ocr" ] || die "missing VM helper binaries in $STATE/bin"
+    cmd_up
+    gssh "test -f ~/.ks-provisioned" || provision
+    build_vm_app
+    sync_in
+    local ts out rc=0 extra=""
+    [ $# -gt 0 ] && extra=$(printf '%q ' "$@")
+    ts=$(date +%Y%m%d-%H%M%S)
+    out=".build/flow-runs/vm-$ts"
+    say "running flows in the VM …"
+    gssh "cd $G_REPO && PATH=/Users/$GUSER/py/bin:\$PATH WS_PYTHON=$G_PY $G_PY Tests/run_flows.py \
+          --app $G_REPO/.build/vm-app/kitchen-sink.app --settle 1500 --out $G_REPO/$out $extra" || rc=$?
+    mkdir -p "$ROOT/$out"
+    grsync ":$G_REPO/$out/" "$ROOT/$out/" || true
+    say "results: $out (exit $rc)"
+    return $rc
+}
+
+case "${1:-}" in
+    setup)  cmd_setup ;;
+    up)     cmd_up ;;
+    down)   cmd_down ;;
+    status) cmd_status ;;
+    ip)     vm_ip ;;
+    ssh)    shift; gssh "$@" ;;
+    test)   shift; cmd_test "$@" ;;
+    *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]" ;;
+esac

@@ -241,7 +241,7 @@
       ],
       "oracles": [
         {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "count_min": 3, "after": "three"},
-        {"kind": "independent", "describe": "The three files are distinct names (Untitled-1.md, Untitled-2.md, Untitled-3.md) — no name is reused and none overwrites another; the click-selected tab, the editor and autosave all point at the newest note (UI-TEST-FINDINGS.md S1 fixed)."},
+        {"kind": "independent", "describe": "The three files are distinct names (Untitled-1.md, Untitled-2.md, Untitled-3.md) — no name is reused and none overwrites another; the click-selected tab, the editor and autosave all point at the newest note (UI-TEST-FINDINGS.md S1 fixed).", "cmd": "python3 -c '\nimport glob,json,os,sys\nh=os.environ[\"SBX_HOME\"]\nwant=[\"Untitled-1.md\",\"Untitled-2.md\",\"Untitled-3.md\"]\nfiles=sorted(os.path.basename(p) for p in glob.glob(os.path.join(h,\"notes\",\"Untitled-*.md\")))\nif files!=want: sys.exit(1)\nn=(json.load(open(os.environ[\"STATE_FILE\"])).get(\"views\") or {}).get(\"notes\") or {}\npaths=[os.path.basename(p) for p in (n.get(\"tabPaths\") or [])]\nsel=n.get(\"selectedTab\")\nif not paths or not isinstance(sel,int) or not 0<=sel<len(paths): sys.exit(1)\nif paths[sel]!=\"Untitled-3.md\": sys.exit(1)\nif any(w not in paths for w in want): sys.exit(1)\nsys.exit(0)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": []
@@ -282,7 +282,7 @@
       ],
       "oracles": [
         {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "contains": "日本語 ✓", "after": "saved"},
-        {"kind": "independent", "describe": "The saved file is valid UTF-8 and byte-for-byte contains the exact unicode string typed (no mojibake / dropped surrogate pairs)."},
+        {"kind": "independent", "describe": "The saved file is valid UTF-8 and byte-for-byte contains the exact unicode string typed (no mojibake / dropped surrogate pairs).", "cmd": "python3 -c '\nimport glob,os,sys\nneedle=\"café → 日本語 ✓ Ω\".encode(\"utf-8\")\nfiles=glob.glob(os.path.join(os.environ[\"SBX_HOME\"],\"notes\",\"Untitled-*.md\"))\nok=False\nfor p in files:\n    data=open(p,\"rb\").read()\n    try: data.decode(\"utf-8\")\n    except UnicodeDecodeError: continue\n    if needle in data: ok=True\nsys.exit(0 if ok else 1)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": []
@@ -304,7 +304,7 @@
       "oracles": [
         {"kind": "state", "path": "views.notes.findBar", "equals": true, "after": "openfind"},
         {"kind": "state", "path": "views.notes.findBar", "equals": false, "after": "closed"},
-        {"kind": "visual", "after": "openfind", "expect": "a find bar with a text field is visible at the top of the notes editor"},
+        {"kind": "visual", "after": "openfind", "expect": "a find bar with a text field is visible at the top of the notes editor", "ocr_find": ["Replace", "Done"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": []
@@ -324,7 +324,7 @@
         {"kind": "state", "path": "views.files.cwd", "equals": "$HOME/files", "after": "listed"},
         {"kind": "state", "path": "views.files.rows", "contains_name": "README.txt", "after": "listed"},
         {"kind": "state", "path": "views.files.rows", "contains_name": "docs", "after": "listed"},
-        {"kind": "independent", "describe": "Every name in state.views.files.rows exists on disk under $HOME/files (a direct listing) and no on-disk entry is missing from the list."},
+        {"kind": "independent", "describe": "Every name in state.views.files.rows exists on disk under $HOME/files (a direct listing) and no on-disk entry is missing from the list.", "cmd": "python3 -c '\nimport json,os,sys\ns=json.load(open(os.environ[\"STATE_FILE\"]))\nf=(s.get(\"views\") or {}).get(\"files\") or {}\nrows=[r.get(\"name\") for r in (f.get(\"rows\") or []) if r.get(\"name\") != \"..\"]\ncwd=f.get(\"cwd\") or \"\"\nif cwd.startswith(\"~\"): cwd=os.environ[\"SBX_HOME\"]+cwd[1:]\nif not os.path.isdir(cwd): sys.exit(1)\ndisk=[n for n in os.listdir(cwd) if not n.startswith(\".\")]\nsys.exit(0 if sorted(rows)==sorted(disk) else 1)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]
@@ -343,7 +343,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "views.files.query", "equals": "README", "after": "filtered"},
-        {"kind": "independent", "describe": "After typing README, every row name in state.views.files.rows contains README (case-insensitive) and README.txt is present; the other entries (docs, spaced name.txt, .hidden.txt) are gone."},
+        {"kind": "independent", "describe": "After typing README, every row name in state.views.files.rows contains README (case-insensitive) and README.txt is present; the other entries (docs, spaced name.txt, .hidden.txt) are gone.", "cmd": "python3 -c '\nimport json,os,sys\ns=json.load(open(os.environ[\"STATE_FILE\"]))\nrows=[r.get(\"name\") for r in (((s.get(\"views\") or {}).get(\"files\") or {}).get(\"rows\") or [])]\nif not rows or not all(\"readme\" in n.lower() for n in rows): sys.exit(1)\nif \"README.txt\" not in rows: sys.exit(1)\nif any(n in rows for n in (\"docs\",\"spaced name.txt\",\".hidden.txt\")): sys.exit(1)\nsys.exit(0)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]
@@ -362,7 +362,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "views.files.rows", "contains_name": "deep.txt", "after": "searched"},
-        {"kind": "independent", "describe": "$HOME/files/notes/deep.txt exists on disk under the current root, so the recursive `**` search must list a row for it (commands.toml:477 promises `**` searches every folder below). NOTE: the Rust model currently maps QueryMode::Recursive to an empty list (files.rs:1592) — this flow is expected to FAIL and record that bug."},
+        {"kind": "independent", "describe": "$HOME/files/notes/deep.txt exists on disk under the current root, so the recursive `**` search must list a row for it (commands.toml:477 promises `**` searches every folder below). NOTE: the Rust model currently maps QueryMode::Recursive to an empty list (files.rs:1592) — this flow is expected to FAIL and record that bug.", "cmd": "python3 -c '\nimport json,os,sys\nh=os.environ[\"SBX_HOME\"]\nrows=[r.get(\"name\") for r in (((json.load(open(os.environ[\"STATE_FILE\"])).get(\"views\") or {}).get(\"files\") or {}).get(\"rows\") or [])]\nsys.exit(0 if os.path.isfile(os.path.join(h,\"files\",\"notes\",\"deep.txt\")) and \"deep.txt\" in rows else 1)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]
@@ -479,7 +479,7 @@
         {"input": "wait 600", "checkpoint": "shown"}
       ],
       "oracles": [
-        {"kind": "independent", "describe": "Python difflib.SequenceMatcher over compare/textL.txt vs compare/textR.txt: the changed-line count equals the number of state.compare.current.rows with kind != \"same\", and the number of differing regions equals state.compare.current.sections. (textL = one/two/three/four, textR = one/TWO/three/four/five.)"},
+        {"kind": "independent", "describe": "Python difflib.SequenceMatcher over compare/textL.txt vs compare/textR.txt: the changed-line count equals the number of state.compare.current.rows with kind != \"same\", and the number of differing regions equals state.compare.current.sections. (textL = one/two/three/four, textR = one/TWO/three/four/five.)", "cmd": "python3 -c '\nimport difflib,json,os,sys\nh=os.environ[\"SBX_HOME\"]\nl=open(os.path.join(h,\"compare\",\"textL.txt\"),encoding=\"utf-8\").read().splitlines()\nr=open(os.path.join(h,\"compare\",\"textR.txt\"),encoding=\"utf-8\").read().splitlines()\nops=[o for o in difflib.SequenceMatcher(None,l,r,autojunk=False).get_opcodes() if o[0]!=\"equal\"]\nrows_n=sum(max(o[2]-o[1],o[4]-o[3]) for o in ops)\nc=((json.load(open(os.environ[\"STATE_FILE\"])).get(\"compare\") or {}).get(\"current\") or {})\nstate_rows=sum(1 for x in (c.get(\"rows\") or []) if x.get(\"kind\")!=\"same\")\nsys.exit(0 if rows_n==state_rows and len(ops)==c.get(\"sections\") else 1)\n'"},
         {"kind": "state", "path": "compare.current.sections", "min": 1, "after": "shown"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
@@ -562,7 +562,7 @@
         {"kind": "state", "path": "compare.folder.counts.different", "equals": 1, "after": "scanned"},
         {"kind": "state", "path": "compare.folder.counts.leftOnly", "equals": 1, "after": "scanned"},
         {"kind": "state", "path": "compare.folder.counts.same", "equals": 1, "after": "scanned"},
-        {"kind": "independent", "describe": "Recompute the two fixture trees: compare/left/a.txt differs from compare/right/a.txt, only_left.txt is left-only, common.txt is identical → different==1, leftOnly==1, same==1. These must equal state.compare.folder.counts."},
+        {"kind": "independent", "describe": "Recompute the two fixture trees: compare/left/a.txt differs from compare/right/a.txt, only_left.txt is left-only, common.txt is identical → different==1, leftOnly==1, same==1. These must equal state.compare.folder.counts.", "cmd": "python3 -c '\nimport json,os,sys\nh=os.environ[\"SBX_HOME\"]\ndef walk(root):\n    out={}\n    for d,_,fs in os.walk(root):\n        for f in fs:\n            p=os.path.join(d,f)\n            out[os.path.relpath(p,root)]=open(p,\"rb\").read()\n    return out\nL=walk(os.path.join(h,\"compare\",\"left\")); R=walk(os.path.join(h,\"compare\",\"right\"))\nc={\"different\":0,\"leftOnly\":0,\"rightOnly\":0,\"same\":0}\nfor k in set(L)|set(R):\n    if k in L and k in R: c[\"same\" if L[k]==R[k] else \"different\"]+=1\n    elif k in L: c[\"leftOnly\"]+=1\n    else: c[\"rightOnly\"]+=1\ngot=((json.load(open(os.environ[\"STATE_FILE\"])).get(\"compare\") or {}).get(\"folder\") or {}).get(\"counts\") or {}\nsys.exit(0 if all(got.get(k)==c[k] for k in (\"different\",\"leftOnly\",\"same\")) else 1)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:compare:back"]
@@ -581,7 +581,7 @@
       "oracles": [
         {"kind": "state", "path": "viewSwitcher.shown", "equals": true, "after": "open"},
         {"kind": "state", "path": "viewSwitcher.rows", "min": 1, "after": "open"},
-        {"kind": "independent", "describe": "Each row string is \"Name|location\" (host.rs:3962) and the names are drawn from Files/Notes/Confluence/Jira only (host.rs:3919-3945)."},
+        {"kind": "independent", "describe": "Each row string is \"Name|location\" (host.rs:3962) and the names are drawn from Files/Notes/Confluence/Jira only (host.rs:3919-3945).", "cmd": "python3 -c '\nimport json,os,sys\nrows=((json.load(open(os.environ[\"STATE_FILE\"])).get(\"viewSwitcher\") or {}).get(\"rows\") or [])\nok=bool(rows)\nfor r in rows:\n    if not isinstance(r,str) or \"|\" not in r: ok=False; break\n    if r.split(\"|\",1)[0].strip().lower() not in (\"files\",\"notes\",\"jira\",\"confluence\"): ok=False; break\nsys.exit(0 if ok else 1)\n'"},
         {"kind": "visual", "after": "open", "expect": "the view switcher panel is visible with a search box and a list of window/workspace rows"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
@@ -663,7 +663,7 @@
         {"input": "wait 400", "checkpoint": "open"}
       ],
       "oracles": [
-        {"kind": "visual", "after": "open", "expect": "a shortcuts overlay card is visible listing this view's keys (key caps + descriptions)"},
+        {"kind": "visual", "after": "open", "expect": "a shortcuts overlay card is visible listing this view's keys (key caps + descriptions)", "ocr_find": ["Keyboard Shortcuts", "esc to close"]},
         {"kind": "independent", "describe": "The Cmd+/ sheet is not exposed in `state` (BACKLOG.md:87-90), so a visual oracle is required; after Esc the notes window must still be visible (the sheet owns the keyboard, rule 6)."},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
@@ -744,7 +744,7 @@
         {"kind": "state", "path": "views.notes.terminal", "equals": true, "after": "open"},
         {"kind": "state", "path": "views.notes.drawerInset", "equals": 200, "after": "open"},
         {"kind": "state", "path": "views.notes.terminal", "equals": false, "after": "closed"},
-        {"kind": "visual", "after": "open", "expect": "a terminal drawer is visible at the bottom of the notes window, its first text row fully visible (BACKLOG.md:21-24 records the top-border clipping bug)"},
+        {"kind": "visual", "after": "open", "expect": "a terminal drawer is visible at the bottom of the notes window, its first text row fully visible (BACKLOG.md:21-24 records the top-border clipping bug)", "ocr_find": ["danielbaker$"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]
@@ -844,7 +844,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "tools.prettyprint.shown", "equals": true, "after": "open"},
-        {"kind": "visual", "after": "open", "expect": "a Pretty Print panel window is visible next to the shared window"},
+        {"kind": "visual", "after": "open", "expect": "a Pretty Print panel window is visible next to the shared window", "ocr_find": ["paste JSON or XML below", "copy contents"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:tool-close:prettyprint"]
@@ -862,7 +862,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "tools.text-table.shown", "equals": true, "after": "open"},
-        {"kind": "visual", "after": "open", "expect": "a Text to Table panel is visible with an input text area"},
+        {"kind": "visual", "after": "open", "expect": "a Text to Table panel is visible with an input text area", "ocr_find": ["Copy table for Outlook", "rows from OCR or paste"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:tool-close:text-table"]
@@ -880,7 +880,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "tools.filefast.shown", "equals": true, "after": "open"},
-        {"kind": "visual", "after": "open", "expect": "a Create File panel is visible"},
+        {"kind": "visual", "after": "open", "expect": "a Create File panel is visible", "ocr_find": ["paste output", "file name"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:tool-close:filefast"]
@@ -898,7 +898,7 @@
       ],
       "oracles": [
         {"kind": "state", "path": "tools.health-checks.shown", "equals": true, "after": "open"},
-        {"kind": "visual", "after": "open", "expect": "a Health Checks panel is visible (it may still be running ~/.config/kitchen-sink/jira/jira-doctor.sh)"},
+        {"kind": "visual", "after": "open", "expect": "a Health Checks panel is visible (it may still be running ~/.config/kitchen-sink/jira/jira-doctor.sh)", "ocr_find": ["copy output"]},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:tool-close:health-checks"]
@@ -974,7 +974,7 @@
       "oracles": [
         {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "changed"},
         {"kind": "state", "path": "headerStyle", "equals": "quiet", "after": "reloaded"},
-        {"kind": "independent", "describe": "After the raw `reload` verb re-reads [app] header-style (commands.toml:5 = \"quiet\"), the runtime-only aurora override is gone; headerStyle is the file value again (host.rs:1378-1400)."},
+        {"kind": "independent", "describe": "After the raw `reload` verb re-reads [app] header-style (commands.toml:5 = \"quiet\"), the runtime-only aurora override is gone; headerStyle is the file value again (host.rs:1378-1400).", "cmd": "python3 -c '\nimport json,os,re,sys\ntext=open(os.path.join(os.environ[\"SBX_HOME\"],\"commands.toml\"),encoding=\"utf-8\").read()\nval=None; sec=None\nfor line in text.splitlines():\n    s=line.strip()\n    if s.startswith(\"[\") and s.endswith(\"]\"): sec=s[1:-1].strip()\n    elif sec==\"app\":\n        m=re.match(r\"header-style\\s*=\\s*(.+)$\",s)\n        if m: val=m.group(1).strip().strip(chr(34)).strip(chr(39))\ns=json.load(open(os.environ[\"STATE_FILE\"]))\nsys.exit(0 if val and s.get(\"headerStyle\")==val else 1)\n'"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": []

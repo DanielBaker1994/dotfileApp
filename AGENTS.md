@@ -171,6 +171,8 @@ An agent can drive and verify the app over the socket — no computer control:
   of the binary (not `open`) never answers the socket — always launch via `open`. Use `pane-shot` for captures;
   bare `screenshot`/`-r` may raise the interactive overlay, so `ks_raw` stays disallowed in read-only mode
   except `screenshot-permission`.
+- **`bin/ks-vm`**: GUI test runs happen in a headless macOS VM (Tart `ks-test`), never on the owner's
+  screen: `bin/ks-vm test [Tests/run_flows.py args]`. See `TESTING.md` §3.0.
 - **`bin/ks-mcp`** (+ `bin/ks-mcp.py`): legacy stdio MCP bridge, registered in `opencode.json`
   (`kitchen-sink` live = `KS_MCP_READ_ONLY=1`; `kitchen-sink-sandbox` disabled). Tools: `ks_state`,
   `ks_do` (hidden in read-only), `ks_raw` (`screenshot` | `screenshot-permission` | `compare` |

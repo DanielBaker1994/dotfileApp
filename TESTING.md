@@ -32,9 +32,8 @@ flow table), `Tests/mcp_verbs.json` (socket verb table), `Tests/usability/` (run
    reports "still reproduces / gone" for `re-check` rows.
 7. **Two misses, then stop.** A worker that fails one UI step twice records `BLOCKED` with what it saw
    and moves on. No rebuild/click/retry loops.
-8. **The owner's machine comes first.** The GUI sandbox takes over the screen and turns AeroSpace off.
-   Run GUI lanes only when the owner has agreed to it. Always run the GUI cleanup (§3.8) afterwards, even
-   if the lane crashed.
+8. **GUI tests run in the VM, never on the owner's screen.** `bin/ks-vm test …` (§3.0). The host GUI
+   sandbox (`start --gui`) takes over the owner's laptop: use it only if the owner explicitly asks.
 9. **Small briefs, one lane each.** Cheap models follow short, concrete briefs with exact commands. Put
    long command sequences in a script file and have the brief call the script.
 10. **Convert every verified bug into a deterministic check** (a flow in `Tests/app_flows.json`, a row in
@@ -88,7 +87,7 @@ the real bugs, but they run *scripts and tables*. They don't run on open-ended j
 
 | # | Limit | Effect on testing | Workaround / status |
 |---|---|---|---|
-| L1 | One screen; the sandbox must be the active app to receive keys | GUI lanes cannot run in parallel; while one runs, the test window sits in front and anything the owner types goes into it | Serial GUI lanes; parallel headless. A macOS VM (Tart, at most 2 per host by Apple's licence) would take GUI lanes off the owner's screen |
+| L1 | ~~GUI runs took over the owner's screen~~ | the laptop was unusable during GUI lanes | **fixed 2026-10-20:** GUI runs go to the VM (`bin/ks-vm`, §3.0). Still one GUI lane per VM; Apple's licence allows 2 macOS VMs per host |
 | L2 | ~~`do:key:` is record-only~~ | MCP could not type or press shortcuts | **fixed 2026-10-20:** `do:input:*` (§3.3). `bin/ks-input` stays as the fallback |
 | L3 | Headless has no AppKit | no rendering, no focus, no nvim pane; `screenshot`/`pane-shot`/`window-shot` refused | Headless lanes test state, disk and the cold paths only |
 | L4 | Headless claims `shown:true` for panels that can't exist without AppKit (F0-7) | a headless "shown" is not evidence | Only trust `shown` in GUI lanes |
@@ -107,6 +106,25 @@ the real bugs, but they run *scripts and tables*. They don't run on open-ended j
 ---
 
 ## 3. Toolbox (exact commands)
+
+### 3.0 The test VM (where every GUI run happens)
+
+A headless macOS 26 VM (Tart, `ks-test`, 4 CPU / 4 GB) with its own display and window server:
+nothing appears on the host, the host keyboard and windows are never touched.
+
+```bash
+bin/ks-vm setup                        # once: clone image (~26 GB under ~/.tart), boot, provision (done 2026-10-20)
+bin/ks-vm test                         # build the working tree, copy in, run all flows, results -> .build/flow-runs/vm-<ts>/
+bin/ks-vm test --ids notes-type-save --repeat 3
+bin/ks-vm test --replay .build/hammer/RUN/G-SOAK/findings.jsonl --repeat 3
+bin/ks-vm ssh 'cmd'                    # anything else in the guest (repo copy at ~/ks, Python at ~/py/bin/python3)
+bin/ks-vm down | up | status
+```
+
+Workers that drive the GUI by hand do it **inside the VM** (`bin/ks-vm ssh`, then the §3.1–3.8
+commands with paths under `~/ks`). Tart is at `~/.local/bin/tart` (the Homebrew formula is broken).
+Limits: no Screen Recording grant in the guest yet, so visual oracles may come back without shots;
+no nvim in the guest (the flow fixture uses the plain editor).
 
 All paths are relative to the repo root `~/.config/kitchen-sink`. `$LANE` is the lane id, `$OUT` its
 output folder `.build/hammer/<run>/<lane>/`.
@@ -155,7 +173,7 @@ Silent no-ops still exist (`key:<anything>`, `tool-close:<unknown>`, `hide` when
 **Preferred: `do:input:*`** (real events into the app's own queue, nothing reaches other apps):
 
 ```bash
-ks 'do:input:activate'                 # once at lane start, and after anything that may steal focus
+bin/ks-input activate --pid $SBX_PID && ks 'do:input:activate'   # both: macOS 14+ won't let the app activate itself
 ks 'do:input:key:cmd+n'                # combos, same names as ks-input; several: 'do:input:key:ctrl+b w'
 ks 'do:input:text:Hello, world!'       # literal text into whatever has focus (verified: nvim editor; fields/panels not yet)
 ks 'do:input:click:95,100'             # points from the window's top-left (window-shot --scale 1 pixels = points)
@@ -163,7 +181,10 @@ ks 'do:input:click:95,100,2'           # real double-click;  'do:input:click:95,
 sleep 0.5; ks state | jq .input        # {posted, dropped, lastError}; dropped>0 => run do:input:activate
 ```
 
-Delivery is asynchronous: wait ~0.3–1 s, then check the effect, not just the reply. Limits: code that
+Activation needs both calls: since macOS 14 an app can't make itself frontmost while another app is
+active, so `ks-input activate` (run from the terminal) brings it forward and `do:input:activate` makes a
+window key if none is (it keeps an existing key window, e.g. compare). Delivery is asynchronous: wait
+~0.3–1 s, then check the effect, not just the reply. Limits: code that
 polls the *hardware* modifier state or cursor position (not the event) won't see these; drag and scroll
 are not implemented yet (use `ks-input` for those).
 
@@ -221,6 +242,24 @@ ks 'state' >/dev/null || echo HANG-OR-DEAD                                   # 3
 Notes live in `$SBX_HOME/notes/`, Files root `$SBX_HOME/files/` (with the `cfg-sandbox` fixture from
 `Tests/app_flows.json`). Check with `ls`, `cat`, `shasum` and `python3 -c 'import difflib…'`, never
 through the app.
+
+### 3.7b Flow runner (T0: deterministic, no LLM)
+
+```bash
+python3 Tests/run_flows.py --list                          # the 45 flows
+python3 Tests/run_flows.py                                 # all flows; builds the working tree into a signed sandbox copy
+python3 Tests/run_flows.py --feature compare --repeat 3    # flakiness check
+python3 Tests/run_flows.py --replay $OUT/findings.jsonl    # triage: does each finding reproduce? (k/N)
+```
+
+It owns the GUI sandbox (fixtures, start, cleanup, a lock so only one GUI run exists), gives every flow
+a fresh app and fixtures (`--shared` to skip that), drives steps with `do:input`, and decides state,
+disk, log, `reply`, OCR-visual (`ocr_find`) and `cmd`-independent oracles by machine. What it cannot
+decide comes back as `pending` (agent / eyes, with PNG + OCR text saved): converting those into
+`ocr_find`/`cmd` oracles is a good cheap-worker job. Flows needing `screen-capture` are skipped unless
+`--allow-screen-capture`. Output: `.build/flow-runs/<ts>/results.jsonl`, `summary.md`, `shots/`.
+Baseline 2026-10-20, on the host and in the VM alike: 42 PASS, 2 FAIL (both real bugs, `APP-BUGS.md` #1 and
+#16), about 6 min. In the VM use `bin/ks-vm test` (it passes `--settle 1500`; the guest is slower).
 
 ### 3.8 GUI cleanup (VERBATIM; run even after a failure)
 
@@ -285,10 +324,10 @@ paths shelf, palette tools other than Pretty Print. The orchestrator validates t
 
 ### GUI lanes (serial, one at a time, owner agreed)
 
-**G-FLOW — run flows.** Execute a list of flow ids from `Tests/app_flows.json` exactly as written:
-setup, steps, oracles; one result row per flow. No improvising. If a step can't be done with the
-listed input kinds, mark it `BLOCKED <reason>`. (Until the runner R2 exists, the worker is the runner.
-Give it ≤ 12 flows per brief.)
+**G-FLOW — run flows.** No worker needed: `python3 Tests/run_flows.py` (§3.7b). A worker only
+investigates a FAIL (is the flow's expectation wrong, or the app?) by tracing the steps with state reads,
+and must confirm an app bug with real `ks-input` keys before reporting it (the compare Ctrl+N bug #16
+was confirmed this way).
 
 **G-SOAK — long-session soak of one feature.** A fixed cycle repeated N ≥ 50 times with a perturbation
 every 5th cycle (view round trip, drawer open/close, palette open+Esc, Cmd+0, prose toggle, hide+show,
@@ -371,7 +410,8 @@ The orchestrator, per run:
 1. **Mechanical checks (script, no LLM):** `git status` clean apart from `$OUT`; `findings.jsonl` parses;
    every finding has `trail`, `oracle`, `repeat`.
 2. **Dedupe** against `APP-BUGS.md` and across lanes (same feature + same oracle failure = one bug).
-3. **Replay** each S1/S2 and any S3 with `repeat` ≥ 2/3: an R-MIN lane (flash) or the flow runner. Drop
+3. **Replay** each S1/S2 and any S3 with `repeat` ≥ 2/3: `python3 Tests/run_flows.py --replay findings.jsonl
+   --repeat 3` (no LLM), or an R-MIN lane when the trail needs minimising. Drop
    anything that doesn't reproduce; mark it `not-reproduced` in the ledger below.
 4. **Classify** with the cheap checks: is the "expected" value cited from docs/code (`sources`)? If
    expected was the worker's opinion, it is `by-design?` and goes to the owner, not to a fix.
@@ -429,11 +469,11 @@ tokens are dominated by reading reports, so keep reports to the schema and read 
 | # | Item | Why | Size |
 |---|---|---|---|
 | R1 | ~~Real in-process input verb~~ **done 2026-10-20** (`do:input:*`). Follow-ups: `drag` and `scroll` | drag/scroll flows still need ks-input | S |
-| R2 | **Flow runner** `Tests/run_flows.py`: executes `Tests/app_flows.json` (and finding trails) deterministically with ks-input/R1 + oracles, JSON results | T0 regression lock for every flow and every verified bug; replay for triage step 3 with no LLM | M |
+| R2 | ~~Flow runner~~ **done 2026-10-20** (`Tests/run_flows.py`, §3.7b). Follow-up: convert the remaining pending agent/eyes oracles | every pending oracle is a check nobody runs | S (worker job) |
 | R3 | **State for the blind spots**: `views.notes.query`, Cmd+K picker rows, shortcuts-card shown, the AppKit first responder per window, and the nvim mode/file in `views.notes` | turns the visual-only flows into state oracles; makes bug #5 type disagreements checkable | S–M |
 | R4 | Fill the 7 missing verb-table rows (H-VERB) | the coverage test is red | S |
 | R5 | nvim-mode flow variants + a notes `cfg` fixture with vim-mode on | covers the editor where most real bugs were | S |
-| R6 | One macOS VM (Tart) with the app + TCC grants baked in | GUI lanes stop needing the owner's screen | M–L |
+| R6 | ~~macOS VM~~ **done 2026-10-20** (`bin/ks-vm`). Follow-ups: Screen Recording grant in the guest (visual oracles), nvim in the guest | visual + nvim flows | S–M |
 
 ---
 
