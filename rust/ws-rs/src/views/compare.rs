@@ -4097,6 +4097,21 @@ impl CompareWindowModel {
         st
     }
 
+    /// [`Self::handle_key`] plus the host's `.compareText` push cue: `(used,
+    /// opened_sub)`. Return on a folder file row opens that pair through
+    /// [`Self::open_sub`], so the key router must consume the pending flag just
+    /// like the `do:` and context-menu paths do; otherwise the sub view is
+    /// never pushed and the stale flag fires on the next compare verb
+    /// (APP-BUGS N2).
+    pub fn handle_key_with_sub(
+        &mut self,
+        key: crate::ui::popup::KeyInput,
+        in_text: bool,
+    ) -> (bool, bool) {
+        let used = self.handle_key(key, in_text);
+        (used, self.take_sub_pending())
+    }
+
     /// `CompareWindow.testDo` — the `do:compare:*` hook body. `None` = ok.
     /// `CompareWindow.handleKey` (+ `CompareFolderView.handleKey` for a
     /// folder session) for the keys the model can act on. `in_text`: a text
@@ -6903,6 +6918,60 @@ mod tests {
         model.folder_page.session.as_mut().unwrap().cursor = 0;
         assert_eq!(model.test_do("folder-open"), None);
         assert!(model.folder_page.session.as_ref().unwrap().tree.as_ref().unwrap().node(0).unwrap().expanded);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// APP-BUGS N2: Return on a folder file row opens that pair in the model
+    /// *and* must hand the host a one-shot `.compareText` push (the key router
+    /// consumes it exactly like `do:compare:folder-open`); before the fix the
+    /// router never took the flag, so the sub view was never pushed and the
+    /// flag leaked into the next compare verb.
+    #[test]
+    fn folder_return_hands_the_compare_text_push_to_the_host() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderreturn");
+        let lpath = format!("{dir}/l.txt");
+        let rpath = format!("{dir}/r.txt");
+        std::fs::write(&lpath, "a\n").unwrap();
+        std::fs::write(&rpath, "b\n").unwrap();
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        // A bound folder session is what routes Return to `folder_key`.
+        model.open_folders("/l", "/r");
+        let backend: Arc<dyn HelperBackend> = stub.clone();
+        let tree = FolderScan::tree_from_snapshot(backend, &tree_snapshot(), "/l", "/r");
+        let mut session = FolderSession::new("/l", "/r");
+        session.tree = Some(tree);
+        session.rows = vec![FolderRow { id: 0, depth: 0 }, FolderRow { id: 1, depth: 1 }];
+        session.cursor = 1;
+        model.folder_page.bind(session);
+        stub.push("folder.path", json!({"path": lpath}));
+        stub.push("folder.path", json!({"path": rpath}));
+        stub.push("compare.decode", json!({"side": side("a", "").json()}));
+        stub.push("compare.decode", json!({"side": side("b", "").json()}));
+        stub.push("compare.new", new_snapshot());
+
+        let key = |code: u16| crate::ui::popup::KeyInput {
+            key_code: code,
+            chars: None,
+            cmd: false,
+            ctrl: false,
+            opt: false,
+            shift: false,
+            esc_streak: 0,
+        };
+        let (used, opened_sub) = model.handle_key_with_sub(key(36), false);
+        assert!(used, "Return belongs to the folder page");
+        assert!(opened_sub, "Return on a file row must cue the compareText push");
+        assert!(model.sub, "the row's pair opened as the sub session");
+        assert_eq!(model.current().unwrap().path.get(&CompareSide::Right), Some(&rpath));
+
+        // Taken exactly once: a later key never pushes compareText again.
+        let (_, opened_sub) = model.handle_key_with_sub(key(125), false);
+        assert!(!opened_sub, "the pending push must not leak into the next key");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -5933,10 +5933,8 @@ mod daemon_ui {
             // (APP-BUGS #16).
             if compare_before_rail(self.ivars().controller.current(), &key) {
                 let in_text = self.key_in_text();
-                if let Some(m) = self.ivars().controller.compare_model() {
-                    if m.lock().unwrap().handle_key(key, in_text) {
-                        return true;
-                    }
+                if self.compare_key(key, in_text) {
+                    return true;
                 }
             }
 
@@ -5973,10 +5971,8 @@ mod daemon_ui {
                         }
                     }
                 }
-                if let Some(m) = self.ivars().controller.compare_model() {
-                    if m.lock().unwrap().handle_key(key, in_text) {
-                        return true;
-                    }
+                if self.compare_key(key, in_text) {
+                    return true;
                 }
             }
             if current == Some(SlotView::Files) && self.files_key(&key) {
@@ -7680,6 +7676,27 @@ mod daemon_ui {
                 }
                 _ => {}
             }
+        }
+
+        /// `CompareWindow.handleKey` from the key router: the model's verdict
+        /// plus the host's cue to push `.compareText` when the key opened a sub
+        /// session (Return on a folder file row, like `do:compare:folder-open`).
+        /// The pending flag is taken on every compare key so it can never leak
+        /// into the next compare verb (APP-BUGS N2).
+        fn compare_key(&self, key: crate::ui::popup::KeyInput, in_text: bool) -> bool {
+            let Some(m) = self.ivars().controller.compare_model() else {
+                return false;
+            };
+            // Never hold the compare-model lock across `push_view`: it takes
+            // the controller lock (order is inner → model).
+            let (used, opened_sub) = {
+                let mut model = m.lock().unwrap();
+                model.handle_key_with_sub(key, in_text)
+            };
+            if opened_sub {
+                self.ivars().controller.push_view(SlotView::CompareText);
+            }
+            used
         }
 
         /// Run `f` on the shared compare model, then repaint the surface.
