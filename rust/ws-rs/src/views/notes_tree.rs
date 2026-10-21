@@ -142,6 +142,31 @@ impl NotesTree {
         true
     }
 
+    /// Re-resolve the pinned roots from `[notes] paths` (a rescan), keeping the
+    /// expanded set and the selection. A folder that did not exist when the
+    /// view was built joins the roots now, and opens, so its notes list without
+    /// a click. Rows are always read live from disk by [`NotesTree::rows`], so
+    /// the caller only has to repaint after this. Returns true when the root
+    /// set changed (the caller re-splits the rail then).
+    pub fn rescan(
+        &mut self,
+        raw: &str,
+        is_dir: &dyn Fn(&str) -> bool,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> bool {
+        let (roots, _) = split_roots(raw, is_dir, exists);
+        if roots == self.roots {
+            return false;
+        }
+        for r in &roots {
+            if !self.roots.contains(r) {
+                self.expanded.insert(r.clone());
+            }
+        }
+        self.roots = roots;
+        true
+    }
+
     /// Row index of `path` in `rows` (for scrolling it into view).
     pub fn row_of(rows: &[TreeRow], path: &str) -> Option<usize> {
         rows.iter().position(|r| r.path == path)
@@ -289,5 +314,48 @@ mod tests {
     fn expanded_set_round_trips() {
         let s: BTreeSet<String> = ["/a".to_string(), "/b/c".to_string()].into();
         assert_eq!(decode_expanded(&encode_expanded(&s)), s);
+    }
+
+    /// The Notes sidebar rescan (bug: `.md` files created on disk never showed
+    /// up): a rescan re-resolves `[notes] paths`, so a folder that did not
+    /// exist when the view was built becomes a root and lists its notes.
+    #[test]
+    fn rescan_pins_and_lists_a_folder_created_after_build() {
+        let d = scratch("rescan-root");
+        let later = d.join("later");
+        let raw = later.to_string_lossy().into_owned();
+        let is_dir = |p: &str| Path::new(p).is_dir();
+        let exists = |p: &str| Path::new(p).exists();
+        // Built while the folder is still missing: no root, no tree.
+        let (roots, _) = split_roots(&raw, &is_dir, &exists);
+        let mut t = NotesTree::new(roots, BTreeSet::new(), false);
+        assert!(t.is_empty());
+
+        std::fs::create_dir_all(&later).unwrap();
+        std::fs::write(later.join("on-disk.md"), "x").unwrap();
+        assert!(t.rescan(&raw, &is_dir, &exists));
+        assert_eq!(t.roots, [raw.clone()]);
+        assert!(t.expanded.contains(&raw), "a freshly pinned root opens");
+        let names: Vec<String> = t.rows().into_iter().filter(|r| !r.is_root).map(|r| r.name).collect();
+        assert_eq!(names, ["on-disk.md"]);
+        // Nothing new on the next rescan.
+        assert!(!t.rescan(&raw, &is_dir, &exists));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A note written into an already-expanded root appears after a rescan,
+    /// even though the root set did not change.
+    #[test]
+    fn rescan_lists_a_md_file_written_into_an_expanded_root() {
+        let d = scratch("rescan-file");
+        let root = d.to_string_lossy().into_owned();
+        let mut t = NotesTree::new(vec![root.clone()], [root.clone()].into(), false);
+        assert_eq!(t.rows().len(), 5);
+        std::fs::write(d.join("note-new.md"), "x").unwrap();
+        let is_dir = |p: &str| Path::new(p).is_dir();
+        let exists = |p: &str| Path::new(p).exists();
+        assert!(!t.rescan(&root, &is_dir, &exists));
+        assert!(t.rows().iter().any(|r| r.name == "note-new.md"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

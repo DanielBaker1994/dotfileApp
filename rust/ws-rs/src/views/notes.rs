@@ -3360,6 +3360,9 @@ mod macos {
         /// The rail's width range (`[notes] sidebar-min-width` / `-max-width`).
         sidebar_range: crate::ui::pane_divider::DividerRange,
         tree_model: crate::views::notes_tree::NotesTree,
+        /// The `[notes] paths` text the tree was built from, kept so a rescan
+        /// can re-resolve the roots without another config round trip.
+        tree_paths: String,
         /// The bottom-right "Prose | nvim" capsule (`ProseModeSwitch`).
         prose_switch: Retained<crate::ui::prose_switch::ProseSwitch>,
         /// The editor scroll view (moved when the rail collapses).
@@ -3754,6 +3757,7 @@ mod macos {
             divider,
             sidebar_range,
             tree_model,
+            tree_paths: raw,
             prose_switch,
             editor_scroll: editor,
             rail_expanded_width: sidebar_w,
@@ -4006,9 +4010,31 @@ mod macos {
             self.repaint_tree(false);
         }
 
-        /// Re-read the expanded folders (after a create / rename / trash).
-        pub fn tree_refresh(&mut self) {
+        /// Re-read the pinned roots and the folders on disk: `.md` files
+        /// created in the notes folder after the surface was built (or a
+        /// pinned folder that only appeared later) show up on the next
+        /// repaint. Called from a Files/Notes round trip (`present`) and every
+        /// note open, so the rail never goes stale. Returns whether a root
+        /// appeared.
+        pub fn rescan_tree(&mut self) -> bool {
+            let changed = self.tree_model.rescan(
+                &self.tree_paths,
+                &|p| Path::new(p).is_dir(),
+                &|p| Path::new(p).exists(),
+            );
+            if changed {
+                crate::views::notes_tree::save_expanded(&self.tree_model.expanded);
+                // The "Notes" / "Open" header follows whether a tree shows.
+                self.repaint_rows();
+            }
             self.repaint_tree(false);
+            changed
+        }
+
+        /// Re-read the expanded folders (after a create / rename / trash, or
+        /// the context menu's Refresh).
+        pub fn tree_refresh(&mut self) {
+            self.rescan_tree();
         }
 
         /// The tree row highlighted as the open file.
@@ -4986,6 +5012,10 @@ mod macos {
         /// `openNoteFile(_:)`'s surface subset: the vim pane follows the path,
         /// the plain editor loads the file (used when vim-mode is off).
         pub fn open_note(&mut self, path: &str) {
+            // Re-read `[notes] paths` + the folders first: a note created on
+            // disk (or a pinned folder that appeared later) is only visible to
+            // `tree_reveal` once the roots/rows have been rescanned.
+            self.rescan_tree();
             self.tree_reveal(path);
             // An open tab: keep the rail's selection in step.
             if let Some(i) = self.model.tabs.paths().iter().position(|p| p == path) {

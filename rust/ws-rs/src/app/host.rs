@@ -13265,6 +13265,10 @@ mod daemon_ui {
                 // current, then focus the active editor (vim pane or text).
                 if v == SlotView::Notes {
                     if let Some(surface) = st.notes.as_mut() {
+                        // A cached surface keeps the tree it read when it was
+                        // built: re-read the pinned roots and folders so `.md`
+                        // files created on disk show up on every round trip.
+                        surface.rescan_tree();
                         if let Some(path) = controller.take_pending_note_open() {
                             surface.open_note(&path);
                         }
