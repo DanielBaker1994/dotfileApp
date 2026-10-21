@@ -189,13 +189,12 @@ pub struct SwitchCallbacks {
 pub enum LinkPick {
     /// Jump to the other app's place (herdr: `herdr-pick go-id <id>`).
     Go(LinkRow),
-    /// The header of an offline provider: start it.
+    /// Return on the header: just bring the other app forward (Ghostty),
+    /// no particular place.
+    Focus,
+    /// The header of an offline / unreachable provider: start it.
     Launch,
-    /// The header of an unavailable provider: fetch again.
-    Retry,
-    /// The header opened / closed in place (nothing for the host to run).
-    Toggled,
-    /// The header was clicked (the host toggles it through the model).
+    /// The header was clicked (the host asks the model what that means).
     HeaderClick,
 }
 
@@ -232,7 +231,11 @@ impl std::fmt::Debug for ViewSwitcherPanel {
 
 impl ViewSwitcherPanel {
     pub fn new() -> Self {
-        ViewSwitcherPanel::default()
+        let mut p = ViewSwitcherPanel::default();
+        // No group until a host with a link provider turns it on
+        // (`set_links`); the egui switcher has none.
+        p.links.enabled = false;
+        p
     }
 
     /// `show(_:current:preselect:)` — build the rows, then select the
@@ -260,10 +263,11 @@ impl ViewSwitcherPanel {
             .iter()
             .position(|r| preselect == Some(r.nav_id))
             .unwrap_or(0);
-        // Every fresh open starts collapsed (the last rows stay, stale).
+        // Every fresh open starts collapsed (the last rows stay, stale), the
+        // cursor on the pinned header so Return switches apps.
         self.links.reopen();
-        self.link_cursor = None;
         self.seen_query.clear();
+        self.link_cursor = (self.links.enabled && self.links.start_on_group).then_some(Entry::Header);
         self.shown = true;
     }
 
@@ -373,15 +377,22 @@ impl ViewSwitcherPanel {
             self.links.expanded = false;
         }
         self.seen_query = q;
-        self.link_cursor = None;
-        if let Some(first) = self.entries().first().copied() {
-            self.set_cursor(first);
+        self.place_cursor();
+        self.sync_ui();
+    }
+
+    /// The cursor's start for the current query (`links::start_pos`).
+    fn place_cursor(&mut self) {
+        let list = self.entries();
+        match list.get(links::start_pos(&list, &self.links, &self.live_query())) {
+            Some(e) => self.set_cursor(*e),
+            None => self.link_cursor = None,
         }
     }
 
-    /// Return while the cursor is on the group: the header toggles (or
-    /// launches / retries a dead provider), a row jumps. `None` = the cursor
-    /// is on a local row.
+    /// Return while the cursor is on the group: the header switches to the
+    /// other app (or starts it), a row jumps there. `None` = the cursor is
+    /// on a local row.
     pub fn link_action(&mut self) -> Option<LinkPick> {
         self.reconcile_query();
         if self.command_mode() {
@@ -395,19 +406,10 @@ impl ViewSwitcherPanel {
     }
 
     fn header_action(&mut self) -> LinkPick {
-        match self.links.status {
-            LinkStatus::Offline => LinkPick::Launch,
-            LinkStatus::Unavailable => {
-                self.links.status = LinkStatus::Loading;
-                self.sync_ui();
-                LinkPick::Retry
-            }
-            _ => {
-                self.links.expanded = !self.links.expanded;
-                self.link_cursor = Some(Entry::Header);
-                self.sync_ui();
-                LinkPick::Toggled
-            }
+        if self.links.status.dim() {
+            LinkPick::Launch
+        } else {
+            LinkPick::Focus
         }
     }
 
@@ -450,10 +452,21 @@ impl ViewSwitcherPanel {
 
     /// The provider answered (in the background): new rows / status, the
     /// header texts and the `[links] enabled` gate.
-    pub fn set_links(&mut self, result: Result<Vec<LinkRow>, links::LinkError>, texts: links::LinkTexts, enabled: bool) {
+    pub fn set_links(
+        &mut self,
+        result: Result<Vec<LinkRow>, links::LinkError>,
+        texts: links::LinkTexts,
+        enabled: bool,
+        start_on_group: bool,
+    ) {
+        let was_on = self.links.enabled;
         self.links.apply(result);
         self.links.texts = texts;
         self.links.enabled = enabled;
+        self.links.start_on_group = start_on_group;
+        if enabled && !was_on && self.live_query().trim().is_empty() {
+            self.place_cursor();
+        }
         // A row the cursor sat on may be gone: fall back to the header.
         if let Some(Entry::Link(i)) = self.link_cursor {
             if i >= self.links.rows.len() {
@@ -805,9 +818,11 @@ mod switch_ui {
                     m.entries = links::entries(&tmp.filter(q), &m.links, q);
                 }
                 m.seen = q.to_string();
-                m.len()
+                let sel = if m.command_mode { 0 } else { links::start_pos(&m.entries, &m.links, q) };
+                (m.len(), sel)
             };
-            self.list.set_rows(n, 0);
+            let (n, sel) = n;
+            self.list.set_rows(n, sel);
             self.resize(n);
         }
 
@@ -906,13 +921,17 @@ mod switch_ui {
                 match m.entries.get(pos) {
                     Some(Entry::Local(i)) => *i,
                     Some(Entry::Header) => {
+                        let sep = matches!(m.entries.get(pos + 1), Some(Entry::Local(_)));
                         drop(m);
-                        return self.draw_header(rect, selected, hovered);
+                        self.draw_header(rect, selected, hovered);
+                        return self.draw_group_rule(rect, sep);
                     }
                     Some(Entry::Link(j)) => {
                         let j = *j;
+                        let sep = matches!(m.entries.get(pos + 1), Some(Entry::Local(_)));
                         drop(m);
-                        return self.draw_link(rect, j, selected, hovered);
+                        self.draw_link(rect, j, selected, hovered);
+                        return self.draw_group_rule(rect, sep);
                     }
                     None => return,
                 }
@@ -942,14 +961,22 @@ mod switch_ui {
             );
         }
 
-        /// `▸ Terminal spaces · 6` — the collapsed group's header, dim; a
-        /// hairline above it separates it from the views.
+        /// The hairline under the pinned group, separating it from the views.
+        fn draw_group_rule(&self, rect: crate::ui::chrome::Rect, on: bool) {
+            use crate::ui::chrome::Rect;
+            if on {
+                let c = &self.colors;
+                let y = rect.y + rect.height - 1.0;
+                style::fill_rect(Rect::new(rect.x + 14.0, y, rect.width - 28.0, 1.0), c.over(c.dim, 0.25, c.background));
+            }
+        }
+
+        /// `▸ Terminal spaces · 6` — the pinned group's header, dim.
         fn draw_header(&self, rect: crate::ui::chrome::Rect, selected: bool, hovered: bool) {
             use crate::ui::chrome::Rect;
             let c = &self.colors;
             let m = self.model.borrow();
             let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-            style::fill_rect(Rect::new(inner.x + 8.0, rect.y, inner.width - 16.0, 1.0), c.over(c.dim, 0.25, c.background));
             style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
             let open = m.links.open(&m.seen);
             let x = inner.x + 12.0;
@@ -2626,98 +2653,95 @@ mod tests {
             Ok(vec![herdr("wB", "kitchen-sink", "working"), herdr("wR", "dotfiles", "idle")]),
             links::LinkTexts::default(),
             true,
+            true,
         );
         p
     }
 
     #[test]
-    fn link_group_collapsed_header_at_the_bottom() {
+    fn link_group_pinned_on_top_with_the_cursor_on_it() {
         let p = linked();
-        assert_eq!(p.entries(), vec![Entry::Local(0), Entry::Local(1), Entry::Local(2), Entry::Header]);
+        assert_eq!(p.entries(), vec![Entry::Header, Entry::Local(0), Entry::Local(1), Entry::Local(2)]);
         let st = p.test_state();
         assert_eq!(st["linkGroup"]["expanded"], json!(false));
         assert_eq!(st["linkGroup"]["header"], json!("Terminal spaces · 2"));
-        assert_eq!(st["linkGroup"]["cursor"], json!("local"));
+        assert_eq!(st["linkGroup"]["cursor"], json!("header"));
+        assert_eq!(p.accept(), None, "Return on the header is not a view pick");
         // Rows still list the views only (the Swift shape).
         assert_eq!(st["rows"].as_array().unwrap().len(), 3);
     }
 
     #[test]
-    fn link_group_navigation_toggle_and_go() {
+    fn link_group_return_on_header_focuses_the_terminal() {
         let mut p = linked();
-        for _ in 0..3 {
-            p.move_selection(1);
-        }
-        assert_eq!(p.link_cursor, Some(Entry::Header), "↓ past the last view lands on the header");
-        assert_eq!(p.accept(), None, "Return on the header is not a view pick");
-        assert_eq!(p.link_action(), Some(LinkPick::Toggled));
-        assert!(p.links.expanded);
+        assert_eq!(p.link_action(), Some(LinkPick::Focus), "collapsed: just Ghostty");
+        assert!(p.group_open(true));
+        assert_eq!(p.link_action(), Some(LinkPick::Focus), "expanded too");
+        p.set_links(Err(links::LinkError::Offline), links::LinkTexts::default(), true, true);
+        assert_eq!(p.link_action(), Some(LinkPick::Launch));
+        p.set_links(Err(links::LinkError::Unavailable("x".into())), links::LinkTexts::default(), true, true);
+        assert_eq!(p.link_action(), Some(LinkPick::Launch));
+        assert_eq!(p.header_click(), LinkPick::Launch);
+    }
+
+    #[test]
+    fn link_group_navigation_and_go() {
+        let mut p = linked();
+        assert!(p.group_open(true), "→ on the header expands");
         p.move_selection(1);
         assert_eq!(p.link_action(), Some(LinkPick::Go(herdr("wB", "kitchen-sink", "working"))));
         p.move_selection(1);
         p.move_selection(1);
-        assert_eq!(p.link_cursor, None, "↓ from the bottom wraps to the top");
-        assert_eq!(p.selection, 0);
+        assert_eq!((p.link_cursor, p.selection), (None, 0), "↓ past the group reaches the views");
+        assert_eq!(p.accept(), Some(64));
         p.move_selection(-1);
-        assert_eq!((p.link_cursor, p.selection), (None, 2), "↑ from the top skips the group");
-        // ← on a link row closes the group onto its header; → reopens.
+        p.move_selection(-1);
+        p.move_selection(-1);
+        assert_eq!(p.link_cursor, Some(Entry::Header));
+        p.move_selection(-1);
+        assert_eq!((p.link_cursor, p.selection), (None, 2), "↑ from the top wraps to the last view");
+        assert!(!p.group_open(true), "→ on a view row is the field's");
+        // ← on a link row closes onto the header.
         p.links_jump();
         p.move_selection(1);
         assert!(p.group_open(false));
         assert_eq!((p.link_cursor, p.links.expanded), (Some(Entry::Header), false));
-        assert!(p.group_open(true));
-        assert!(p.links.expanded);
-        // → / ← on a view row are not the group's.
-        p.move_selection(1);
-        p.move_selection(1);
-        p.move_selection(1);
-        assert_eq!(p.link_cursor, None);
-        assert!(!p.group_open(true));
         // Digits jump views only.
         assert_eq!(p.key(19, false, false, false), Some(60));
     }
 
     #[test]
-    fn link_group_query_auto_expands_and_clearing_collapses() {
+    fn link_group_query_prefers_views_and_clearing_collapses() {
         let mut p = linked();
         p.current_query = "dotf".into();
         p.move_selection(0);
         assert_eq!(p.entries(), vec![Entry::Header, Entry::Link(1)], "only the group matches");
-        assert_eq!(p.link_cursor, Some(Entry::Header), "the cursor follows the top entry");
+        assert_eq!(p.link_cursor, Some(Entry::Link(1)), "the match, not the header");
         assert_eq!(p.test_state()["linkGroup"]["expanded"], json!(true));
-        p.move_selection(1);
-        assert_eq!(p.link_action().map(|x| matches!(x, LinkPick::Go(_))), Some(true));
-        p.current_query = "zzzz".into();
-        assert!(p.entries().is_empty());
+        p.current_query = "fil".into();
+        p.move_selection(0);
+        assert_eq!((p.link_cursor, p.selection), (None, 0), "a view match wins the cursor");
         p.current_query.clear();
         p.move_selection(0);
         assert!(!p.links.expanded);
-        assert_eq!(p.entries().last(), Some(&Entry::Header));
-        // `/` command mode has no group.
+        assert_eq!(p.link_cursor, Some(Entry::Header));
         p.current_query = "/".into();
         assert!(p.entries().is_empty());
         assert_eq!(p.link_action(), None);
     }
 
     #[test]
-    fn link_group_dead_providers_and_reopen() {
+    fn link_group_reopen_and_disable() {
         let mut p = linked();
-        p.links_jump();
-        p.set_links(Err(links::LinkError::Offline), links::LinkTexts::default(), true);
-        assert_eq!(p.test_state()["linkGroup"]["header"], json!("Terminal spaces · not running"));
-        assert_eq!(p.link_action(), Some(LinkPick::Launch));
-        p.set_links(Err(links::LinkError::Unavailable("timeout".into())), links::LinkTexts::default(), true);
-        assert_eq!(p.link_action(), Some(LinkPick::Retry));
-        assert_eq!(p.links.status, LinkStatus::Loading);
-        // A fresh open starts collapsed, cursor on the views.
-        p.set_links(Ok(vec![herdr("wB", "k", "idle")]), links::LinkTexts::default(), true);
         p.links.expanded = true;
+        p.move_selection(1);
         p.show(&views(), None, None);
         assert!(!p.links.expanded);
-        assert_eq!(p.link_cursor, None);
-        assert_eq!(p.test_state()["linkGroup"]["header"], json!("Terminal spaces · 1"), "stale rows while loading");
-        // `[links] enabled = false`: no group at all.
-        p.set_links(Ok(vec![]), links::LinkTexts::default(), false);
+        assert_eq!(p.link_cursor, Some(Entry::Header));
+        p.set_links(Ok(vec![]), links::LinkTexts::default(), true, false);
+        p.show(&views(), None, None);
+        assert_eq!(p.link_cursor, None, "start-on-group = false starts on the views");
+        p.set_links(Ok(vec![]), links::LinkTexts::default(), false, true);
         assert_eq!(p.entries().len(), 3);
         assert!(!p.links_jump());
     }

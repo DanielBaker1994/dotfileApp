@@ -192,3 +192,37 @@ switcher closed; typing `dot` auto-expands to the one match, clearing
 re-collapses. herdr prefix+w → `▸ kitchen-sink · 6 places`, `^k` expands,
 Return on Files → kitchen-sink key on Files. Offline header checked in a pty
 against a dead socket.
+
+### Revision (2026-10-20, owner feedback): pinned on top, quick switch
+
+- The group is **pinned on top** of both lists and **the cursor starts on
+  its header** (`[links] start-on-group` / herdr-pick `links.start_on_group`,
+  default true). So Ctrl+B W, Return → Ghostty on whatever herdr workspace
+  it is on (`herdr-pick go-id` with no id); prefix+w, Return → kitchen-sink
+  on its last view (`do:go:app`). Measured ~0.3 s Ctrl+B W → Ghostty.
+- Return on the header no longer toggles; → / l lists the places, ← / h
+  hides them, Ctrl+K jumps to the header opened (herdr-pick: `^e` / `^m` on
+  the header still toggle). ↑ / ↓ wrap through the whole list.
+- A query puts the cursor on the best local match, else the best group
+  match — never on the header.
+
+### Install / availability strategy
+
+The two apps never share code or a build: each repo carries its own small
+copy of the contract (`engines/links.rs`, `herdr-pick/src/links.rs`), kept
+honest by the same fixtures (`Tests/fixtures/links/`, copied into
+herdr-pick's `tests/`) and a `version` field. Either app works alone:
+
+| Situation | kitchen-sink (Ctrl+B W) | herdr-pick (prefix+w) |
+|---|---|---|
+| Other side not installed (no `herdr-pick` binary / no kitchen-sink socket or `kitchen_sink.sh`) | no group at all | no group at all |
+| Installed, not running (herdr server down / daemon down) | `· not running`, Return → `[links] launch` | `· not running`, Return → `ks_launch` |
+| Running but too old / slow / bad reply | `· unavailable`, Return → `launch` | `· unavailable`, Return → `ks_launch` |
+| `[links] enabled = false` | no group | — |
+
+- Every provider call is off the UI thread with a budget (300 ms list,
+  socket timeouts); failures are logged, never shown as errors.
+- `go-id`: no AeroSpace or no Ghostty window → `open -b <bundle>`
+  (`commands.ghostty_open`); herdr down → it only raises Ghostty.
+- The Ctrl+B W group is on from the first frame (cursor on the header);
+  the background fetch hides it if `[links]` says off or herdr-pick is gone.

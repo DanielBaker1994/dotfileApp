@@ -148,6 +148,8 @@ pub struct LinkGroup {
     pub texts: LinkTexts,
     /// False when `[links] enabled = false`: no header at all.
     pub enabled: bool,
+    /// A fresh open puts the cursor on the header, so Return switches apps.
+    pub start_on_group: bool,
 }
 
 impl Default for LinkGroup {
@@ -158,6 +160,7 @@ impl Default for LinkGroup {
             expanded: false,
             texts: LinkTexts::default(),
             enabled: true,
+            start_on_group: true,
         }
     }
 }
@@ -258,42 +261,43 @@ impl Entry {
     }
 }
 
-/// The full list: the local matches, then the header and its visible rows.
+/// The full list: the group pinned on top (its header, then its visible
+/// rows), then the local matches.
 pub fn entries(local: &[usize], group: &LinkGroup, query: &str) -> Vec<Entry> {
-    let mut out: Vec<Entry> = local.iter().map(|i| Entry::Local(*i)).collect();
+    let mut out: Vec<Entry> = Vec::new();
     if group.header_shown(query) {
         out.push(Entry::Header);
         out.extend(group.visible(query).into_iter().map(Entry::Link));
     }
+    out.extend(local.iter().map(|i| Entry::Local(*i)));
     out
 }
 
-/// §3 navigation: ↓ walks local rows → header → link rows; ↓ from the very
-/// bottom wraps to the top of the local list and ↑ from the top wraps to
-/// the last local row (the wrap skips the group). Returns the new position.
+/// Where the cursor starts: no query → the header (when `start_on_group`)
+/// else the first local row; a query → the best local match, else the best
+/// group match (never the header: Return there switches apps).
+pub fn start_pos(list: &[Entry], group: &LinkGroup, query: &str) -> usize {
+    let find = |f: fn(&Entry) -> bool| list.iter().position(f);
+    if query.trim().is_empty() {
+        if group.start_on_group {
+            if let Some(i) = find(|e| *e == Entry::Header) {
+                return i;
+            }
+        }
+        return find(|e| matches!(e, Entry::Local(_))).unwrap_or(0);
+    }
+    find(|e| matches!(e, Entry::Local(_)))
+        .or_else(|| find(|e| matches!(e, Entry::Link(_))))
+        .unwrap_or(0)
+}
+
+/// ↑ / ↓ through the whole list, wrapping at both ends.
 pub fn step(list: &[Entry], pos: usize, delta: i64) -> usize {
     if list.is_empty() {
         return 0;
     }
-    let locals = list.iter().filter(|e| !e.in_group()).count();
-    let pos = pos.min(list.len() - 1);
-    if delta > 0 {
-        if pos + 1 < list.len() {
-            pos + 1
-        } else {
-            0
-        }
-    } else if delta < 0 {
-        if pos > 0 {
-            pos - 1
-        } else if locals > 0 {
-            locals - 1
-        } else {
-            list.len() - 1
-        }
-    } else {
-        pos
-    }
+    let n = list.len() as i64;
+    (pos.min(list.len() - 1) as i64 + delta.signum()).rem_euclid(n) as usize
 }
 
 #[cfg(test)]
@@ -398,33 +402,40 @@ mod tests {
     }
 
     #[test]
-    fn entries_put_the_group_last() {
+    fn entries_pin_the_group_on_top() {
         let mut g = group(2);
-        assert_eq!(entries(&[0, 1], &g, ""), vec![Entry::Local(0), Entry::Local(1), Entry::Header]);
+        assert_eq!(entries(&[0, 1], &g, ""), vec![Entry::Header, Entry::Local(0), Entry::Local(1)]);
         g.expanded = true;
         assert_eq!(
             entries(&[0], &g, ""),
-            vec![Entry::Local(0), Entry::Header, Entry::Link(0), Entry::Link(1)]
+            vec![Entry::Header, Entry::Link(0), Entry::Link(1), Entry::Local(0)]
         );
         g.enabled = false;
         assert_eq!(entries(&[0], &g, ""), vec![Entry::Local(0)]);
     }
 
     #[test]
-    fn step_lands_on_header_and_wrap_skips_the_group() {
+    fn cursor_starts_on_the_header_and_a_query_prefers_local_matches() {
         let mut g = group(2);
         let list = entries(&[0, 1], &g, "");
-        assert_eq!(step(&list, 1, 1), 2, "↓ past the last local row lands on the header");
-        assert_eq!(step(&list, 2, 1), 0, "↓ from the header wraps to the top");
-        assert_eq!(step(&list, 0, -1), 1, "↑ from the top wraps to the last local row");
-        g.expanded = true;
+        assert_eq!(start_pos(&list, &g, ""), 0, "the header: Return switches apps");
+        g.start_on_group = false;
+        assert_eq!(start_pos(&list, &g, ""), 1);
+        g.rows[1].title = "notes-ish".into();
+        let list = entries(&[0], &g, "notes");
+        assert_eq!(list, vec![Entry::Header, Entry::Link(1), Entry::Local(0)]);
+        assert_eq!(start_pos(&list, &g, "notes"), 2, "the local match first");
+        let list = entries(&[], &g, "notes");
+        assert_eq!(start_pos(&list, &g, "notes"), 1, "else the group match, not the header");
+    }
+
+    #[test]
+    fn step_wraps_through_the_whole_list() {
+        let g = group(2);
         let list = entries(&[0, 1], &g, "");
-        assert_eq!(step(&list, 2, 1), 3, "↓ from the header enters the open group");
-        assert_eq!(step(&list, 4, 1), 0);
-        assert_eq!(step(&list, 0, -1), 1);
-        // No local rows (a query only the group matches).
-        let list = vec![Entry::Header, Entry::Link(0)];
-        assert_eq!(step(&list, 0, -1), 1);
+        assert_eq!(step(&list, 0, 1), 1);
+        assert_eq!(step(&list, 2, 1), 0);
+        assert_eq!(step(&list, 0, -1), 2);
         assert_eq!(step(&[], 0, 1), 0);
     }
 }

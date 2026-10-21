@@ -665,6 +665,8 @@ pub struct LinksConfig {
     pub go_timeout_ms: u64,
     /// Shell line run by Return on an offline header (starts the terminal).
     pub launch: String,
+    /// Ctrl+B W opens with the cursor on the pinned header (Return = Ghostty).
+    pub start_on_group: bool,
 }
 
 impl Default for LinksConfig {
@@ -676,6 +678,7 @@ impl Default for LinksConfig {
             timeout_ms: 300,
             go_timeout_ms: 5000,
             launch: "open -a Ghostty".into(),
+            start_on_group: true,
         }
     }
 }
@@ -697,7 +700,23 @@ impl LinksConfig {
             timeout_ms: n("timeout-ms", d.timeout_ms),
             go_timeout_ms: n("go-timeout-ms", d.go_timeout_ms),
             launch: s("launch", &d.launch),
+            start_on_group: e.get("start-on-group").map_or(true, |v| v.trim() != "false"),
         }
+    }
+
+    /// The herdr side is installed: the picker binary is there. Without it
+    /// the group simply isn't shown (no dead header, no failing launch).
+    pub fn herdr_installed(&self) -> bool {
+        std::path::Path::new(&self.herdr_pick).is_file()
+    }
+
+    /// The last `load()`, or a fresh one (Return must not wait on the
+    /// helper: the jump should feel instant).
+    pub fn cached() -> Self {
+        if let Some(c) = LINKS_CONFIG.lock().unwrap().clone() {
+            return c;
+        }
+        LinksConfig::load()
     }
 
     /// Read `[links]` (helper-backed: call off the main thread).
@@ -711,9 +730,14 @@ impl LinksConfig {
                     .collect()
             })
             .unwrap_or_default();
-        LinksConfig::from_entries(&entries)
+        let c = LinksConfig::from_entries(&entries);
+        *LINKS_CONFIG.lock().unwrap() = Some(c.clone());
+        c
     }
 }
+
+/// The last `[links]` read (refreshed on every Ctrl+B W open).
+static LINKS_CONFIG: Mutex<Option<LinksConfig>> = Mutex::new(None);
 
 /// herdr's places for Ctrl+B W: `herdr-pick list --json` within the
 /// `[links] timeout-ms` budget. Blocking: run it off the main thread.
@@ -1243,13 +1267,17 @@ impl SwitcherController {
     }
 
     /// Return on a herdr row in Ctrl+B W: `herdr-pick go-id <id>` raises
-    /// Ghostty (AeroSpace) and focuses the workspace. Off-main; kitchen-sink
+    /// Ghostty (AeroSpace) and focuses the workspace (an empty id = the
+    /// header: Ghostty only, herdr stays where it is). Off-main; kitchen-sink
     /// neither activates nor hands focus back — Ghostty takes it.
     pub fn links_go(&self, id: &str) {
         let id = id.to_string();
         std::thread::spawn(move || {
-            let cfg = LinksConfig::load();
-            let args = vec!["go-id".to_string(), id.clone()];
+            let cfg = LinksConfig::cached();
+            let mut args = vec!["go-id".to_string()];
+            if !id.is_empty() {
+                args.push(id.clone());
+            }
             match crate::app::process_run::run_process_deadline(
                 &cfg.herdr_pick,
                 &args,
@@ -1268,7 +1296,7 @@ impl SwitcherController {
     /// Return on the header while herdr is offline: `[links] launch`.
     pub fn links_launch(&self) {
         std::thread::spawn(|| {
-            let cfg = LinksConfig::load();
+            let cfg = LinksConfig::cached();
             if cfg.launch.trim().is_empty() {
                 return;
             }
@@ -1805,6 +1833,16 @@ impl SwitcherController {
     /// or `folder:<compare session id>`. This is the one link call that may
     /// bring kitchen-sink forward (the herdr picker's Return).
     fn link_go(&self, id: &str) -> Option<Value> {
+        // `app`: herdr-pick's header — bring kitchen-sink up on whatever
+        // view it last showed.
+        if id == "app" {
+            let v = {
+                let inner = self.inner.lock().unwrap();
+                inner.current.unwrap_or(inner.last)
+            };
+            self.open(v);
+            return None;
+        }
         if let Some(v) = id.strip_prefix("view:") {
             return match SlotView::from_raw(v) {
                 Some(view) => {
@@ -1833,7 +1871,7 @@ impl SwitcherController {
             self.open(SlotView::Compare);
             return None;
         }
-        Some(json!({ "error": "go:view:<view>|note:<path>|folder:<id>" }))
+        Some(json!({ "error": "go:app|view:<view>|note:<path>|folder:<id>" }))
     }
 
     // -- socket launch path -------------------------------------------------
@@ -3898,6 +3936,8 @@ mod daemon_ui {
     /// Last `gather_workspaces()` result, so the palette opens instantly.
     static WORKSPACE_CACHE: std::sync::Mutex<Vec<crate::views::switcher::WorkspaceRow>> =
         std::sync::Mutex::new(Vec::new());
+    /// The last `[links] enabled = false` read (Ctrl+B W shows no group).
+    static LINKS_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     thread_local! {
         /// The daemon UI, for main-thread hops from worker threads.
@@ -4964,6 +5004,10 @@ mod daemon_ui {
             let mut state = self.ivars().state.borrow_mut();
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.switcher.take().unwrap_or_else(ViewSwitcherPanel::new);
+            // The herdr group is on from the first frame (cursor on its
+            // header) unless the last `[links]` read said it is off; the
+            // fetch below brings the truth.
+            panel.links.enabled = !LINKS_OFF.load(std::sync::atomic::Ordering::Relaxed);
             // The views' "where it is" (read here: the state is borrowed).
             let wheres = Self::where_texts(st, &controller);
             let rows = self.prepare_panel(
@@ -4995,11 +5039,15 @@ mod daemon_ui {
         fn fetch_switcher_links() {
             std::thread::spawn(|| {
                 let cfg = super::LinksConfig::load();
-                let result = if cfg.enabled { super::fetch_herdr_links(&cfg) } else { Ok(Vec::new()) };
+                // Not installed (no herdr-pick) reads like `enabled = false`:
+                // the group just isn't there.
+                let on = cfg.enabled && cfg.herdr_installed();
+                LINKS_OFF.store(!on, std::sync::atomic::Ordering::Relaxed);
+                let result = if on { super::fetch_herdr_links(&cfg) } else { Ok(Vec::new()) };
                 if let Err(e) = &result {
                     crate::app::logging::ws_log(&format!("links: herdr list: {e:?}"));
                 }
-                on_ui(move |ui| ui.refresh_switcher_links(result, cfg.texts, cfg.enabled));
+                on_ui(move |ui| ui.refresh_switcher_links(result, cfg.texts, on, cfg.start_on_group));
             });
         }
 
@@ -5008,11 +5056,12 @@ mod daemon_ui {
             result: Result<Vec<crate::engines::links::LinkRow>, crate::engines::links::LinkError>,
             texts: crate::engines::links::LinkTexts,
             enabled: bool,
+            start_on_group: bool,
         ) {
             {
                 let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
                 let Some(sw) = state.as_mut().and_then(|st| st.switcher.as_mut()) else { return };
-                sw.set_links(result, texts, enabled);
+                sw.set_links(result, texts, enabled, start_on_group);
             }
             self.push_link_state();
         }
@@ -5035,12 +5084,16 @@ mod daemon_ui {
                     self.hide_switcher_for_link();
                     c.links_go(&row.id);
                 }
+                // The header: just Ghostty, whatever workspace it is on.
+                LinkPick::Focus => {
+                    self.hide_switcher_for_link();
+                    c.links_go("");
+                }
                 LinkPick::Launch => {
                     self.hide_switcher_for_link();
                     c.links_launch();
                 }
-                LinkPick::Retry => Self::fetch_switcher_links(),
-                LinkPick::Toggled | LinkPick::HeaderClick => {}
+                LinkPick::HeaderClick => {}
             }
             self.push_link_state();
         }
@@ -5170,6 +5223,10 @@ mod daemon_ui {
                         LinkPick::Launch => {
                             c.set_view_switcher(false);
                             c.links_launch();
+                        }
+                        LinkPick::Focus => {
+                            c.set_view_switcher(false);
+                            c.links_go("");
                         }
                         // Toggled in place through the model (it is borrowed
                         // by the click right now, so after this returns).
@@ -15149,6 +15206,7 @@ label = \"Assistant\"
         assert_eq!(c.texts.offline, "not running");
         // A missing binary is "unavailable", never a hang or a panic.
         let missing = LinksConfig { herdr_pick: "/nonexistent/herdr-pick".into(), ..d };
+        assert!(!missing.herdr_installed(), "no herdr-pick = no group");
         assert!(matches!(fetch_herdr_links(&missing), Err(LinkError::Unavailable(_))));
         assert!(COMMAND_SECTION_SKIPS.contains(&"links"), "[links] enabled is not a palette command");
     }
@@ -15156,8 +15214,13 @@ label = \"Assistant\"
     #[test]
     fn go_presents_views_and_notes_and_refuses_junk() {
         let c = controller();
+        assert!(c.do_action("go:app").is_none());
+        assert_eq!(c.current(), Some(SlotView::Notes), "app = the last view (cold: notes)");
         assert!(c.do_action("go:view:files").is_none());
         assert_eq!(c.current(), Some(SlotView::Files));
+        c.hide("test");
+        assert!(c.do_action("go:app").is_none());
+        assert_eq!(c.current(), Some(SlotView::Files), "app = the last view shown");
         assert!(c.do_action("go:note:/tmp/x.md").is_none());
         assert_eq!(c.current(), Some(SlotView::Notes));
         assert_eq!(c.take_pending_note_open().as_deref(), Some("/tmp/x.md"));

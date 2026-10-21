@@ -754,7 +754,8 @@ window-title = "ws-settings"
 undo-limit = 20
 
 # The link bank (PLAN-link-bank.md): herdr's workspaces as a collapsed group
-# at the bottom of Ctrl+B W. Return on a row runs `herdr-pick go-id`, which
+# pinned on top of Ctrl+B W. Return on the header raises Ghostty as it is;
+# → / l lists the workspaces, Return on one runs `herdr-pick go-id`, which
 # raises Ghostty through AeroSpace; herdr-pick reads our places over the
 # socket (`links` / `do:go:<id>`) for its own prefix+w.
 [links]
@@ -767,3 +768,6 @@ herdr-pick = "~/.dotfiles/sesh/bin/herdr-pick"
 timeout-ms = 300
 go-timeout-ms = 5000
 launch = "open -a Ghostty"
+# The group is pinned on top; open with the cursor on it so Ctrl+B W, Return
+# jumps straight to Ghostty (false = start on the first view).
+start-on-group = true
