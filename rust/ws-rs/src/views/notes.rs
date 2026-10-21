@@ -3268,11 +3268,16 @@ mod macos {
     /// null, stderr on `prose.log`, `PYTHONDONTWRITEBYTECODE=1`), tracking
     /// the child per path; a spawn failure falls back to the in-process
     /// [`ProseWindow::show`].
+    ///
+    /// A pop-out is a snapshot: the child renders the note once at launch and
+    /// the daemon has no channel into it to re-render. Clicking the pop-out
+    /// control again therefore means "show me the note as it is on disk now",
+    /// so a live child for this note is retired and replaced. (It used to
+    /// return here, so a note edited on disk never refreshed and the second
+    /// click did nothing at all — APP-BUGS #8.)
     pub fn launch(path: &str) {
         let opts = ProseLaunchOptions::for_path(path);
-        if child_running(path) {
-            return;
-        }
+        replace_live_child(path);
         let exe = match std::env::current_exe() {
             Ok(e) => e,
             Err(_) => {
@@ -3304,6 +3309,31 @@ mod macos {
         }
     }
 
+    /// Kill and reap the tracked `prose` child for `path`, forgetting it, so a
+    /// relaunch replaces the old pop-out instead of leaving two windows.
+    /// Returns whether there was one to retire.
+    fn retire_child(children: &mut HashMap<String, std::process::Child>, path: &str) -> bool {
+        match children.remove(path) {
+            Some(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The `launch` preamble: a still-running pop-out for `path` is retired so
+    /// the fresh child re-renders the note as it is on disk now (APP-BUGS #8:
+    /// this used to be a bare `return`). An already-exited child is just
+    /// reaped. Returns whether a live pop-out was replaced.
+    fn replace_live_child(path: &str) -> bool {
+        if !child_running(path) {
+            return false;
+        }
+        PROSE_CHILDREN.with(|m| retire_child(&mut m.borrow_mut(), path))
+    }
+
     /// Whether the tracked `prose` child for `path` is still alive (reaping it
     /// once it has exited).
     fn child_running(path: &str) -> bool {
@@ -3325,6 +3355,59 @@ mod macos {
             }
             running
         })
+    }
+
+    #[cfg(test)]
+    mod prose_child_tests {
+        use super::*;
+
+        /// APP-BUGS #8: a second pop-out click must refresh the note, which
+        /// means replacing the live child (it renders the file once at launch)
+        /// instead of returning early while one is alive.
+        #[test]
+        fn retiring_a_tracked_child_kills_it_so_a_relaunch_replaces_the_popout() {
+            let mut children: HashMap<String, std::process::Child> = HashMap::new();
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn a stand-in pop-out child");
+            let pid = child.id() as i32;
+            children.insert("/notes/a.md".to_string(), child);
+
+            assert!(retire_child(&mut children, "/notes/a.md"));
+            assert!(
+                !children.contains_key("/notes/a.md"),
+                "the retired child must be forgotten, or the relaunch no-ops again"
+            );
+            // Reaped, so the pid is gone: no zombie and no live pop-out left
+            // behind when `launch` spawns the fresh child.
+            let gone = unsafe { libc::kill(pid, 0) } != 0;
+            assert!(gone, "the old pop-out child {pid} is still alive");
+            // A path with no child is a no-op, not an error.
+            assert!(!retire_child(&mut children, "/notes/a.md"));
+        }
+
+        /// The same through the real launch path (`replace_live_child` and the
+        /// live-pop-out map `launch` consults): a live child for the note is
+        /// killed and forgotten, so the new child re-reads the file.
+        #[test]
+        fn a_live_popout_for_the_same_note_is_replaced_on_relaunch() {
+            let path = "/notes/relaunch.md";
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn a stand-in pop-out child");
+            let pid = child.id() as i32;
+            PROSE_CHILDREN.with(|m| {
+                m.borrow_mut().insert(path.to_string(), child);
+            });
+            assert!(child_running(path));
+
+            assert!(replace_live_child(path), "the second click must not no-op");
+            assert!(!child_running(path));
+            assert!(!replace_live_child(path), "nothing left to replace");
+            assert!(unsafe { libc::kill(pid, 0) } != 0, "the old child {pid} survived");
+        }
     }
 
     /// The stateful notes surface the shared host embeds: the sidebar + editor
