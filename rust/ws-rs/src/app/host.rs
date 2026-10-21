@@ -2970,6 +2970,17 @@ fn pane_sidebar_default(view: &str) -> f64 {
     }
 }
 
+/// Router precedence: the compare window's own diff-jump chords (Ctrl+N /
+/// Ctrl+P) get first refusal even when the session rail holds the keyboard.
+/// Swift's `CardWindowController.routeKey` ran the card's `handleKey` before
+/// the focused view's `keyDown`; the Rust router checks the rail first, so
+/// without this a compare whose sidebar is focused never jumps (APP-BUGS #16).
+#[cfg(target_os = "macos")]
+fn compare_before_rail(view: Option<SlotView>, key: &crate::ui::popup::KeyInput) -> bool {
+    matches!(view, Some(SlotView::Compare) | Some(SlotView::CompareText))
+        && crate::views::compare::takes_rail_priority(key)
+}
+
 /// A `DividerRange` from an already-parsed `[section]` map.
 #[cfg(target_os = "macos")]
 fn divider_range_from(
@@ -3584,7 +3595,10 @@ pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, Str
 #[cfg(target_os = "macos")]
 mod daemon_ui {
     mod host_vim;
-    use super::{DrawerSide, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue, DEFAULT_VIEW};
+    use super::{
+        compare_before_rail, DrawerSide, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue,
+        DEFAULT_VIEW,
+    };
     use crate::app::registry::{RectI, SlotView};
     use crate::panes::pane_geometry::PaneDir;
     use crate::ui::chrome::{ChromeConfig, NavIcon, PopupChrome};
@@ -5735,6 +5749,17 @@ mod daemon_ui {
             true
         }
 
+        /// True when the window's first responder is a text field / editor
+        /// (the compare window's own keys stand down there).
+        fn key_in_text(&self) -> bool {
+            self.ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .and_then(|st| st.window.firstResponder())
+                .is_some_and(|r| as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some())
+        }
+
         /// The local keyDown guard (mirrors `PopupWindow.installMonitors`'
         /// handler, scaled to the shared host): route the ported
         /// [`popup::route_key`] decision, execute Esc-hide and edit keys, and
@@ -5901,6 +5926,20 @@ mod daemon_ui {
                 }
             }
 
+            // Ctrl+N / Ctrl+P ("next / previous difference") are the compare
+            // window's own chords and the session sidebar's list nav claims
+            // them too (`ui::sidebar::nav_key`); give the model first refusal
+            // so a compare whose sidebar holds the keyboard still jumps
+            // (APP-BUGS #16).
+            if compare_before_rail(self.ivars().controller.current(), &key) {
+                let in_text = self.key_in_text();
+                if let Some(m) = self.ivars().controller.compare_model() {
+                    if m.lock().unwrap().handle_key(key, in_text) {
+                        return true;
+                    }
+                }
+            }
+
             // `(w.firstResponder as? PopupTabsBar)?.handleNavKey(e)`: a rail
             // with the keyboard owns ↑↓ / Return / Esc / letters.
             let rail = self.ivars().state.borrow().as_ref().and_then(|st| st.window.firstResponder());
@@ -5923,13 +5962,7 @@ mod daemon_ui {
                 return true;
             }
             if matches!(current, Some(SlotView::Compare) | Some(SlotView::CompareText)) {
-                let in_text = self
-                    .ivars()
-                    .state
-                    .borrow()
-                    .as_ref()
-                    .and_then(|st| st.window.firstResponder())
-                    .is_some_and(|r| as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some());
+                let in_text = self.key_in_text();
                 // Folder copy / move chords ask Replace / Keep Both / Skip first.
                 if !in_text {
                     if let Some((from, move_)) = crate::views::compare::folder_transfer_key(&key) {
@@ -14020,6 +14053,34 @@ mod tests {
     /// run concurrently, or each sees the other's config. Hold this lock for
     /// the whole test body.
     static CONF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// APP-BUGS #16: with the compare session sidebar focused, Ctrl+N / Ctrl+P
+    /// must reach the compare model (next / previous difference) instead of
+    /// the rail's own list keys. This pins the view gate + key class the
+    /// router consults before `SidebarView::handle_nav_key`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compare_jump_chords_route_before_the_rail() {
+        let key = |code: u16, ctrl: bool, cmd: bool| crate::ui::popup::KeyInput {
+            key_code: code,
+            chars: None,
+            cmd,
+            ctrl,
+            opt: false,
+            shift: false,
+            esc_streak: 0,
+        };
+        assert!(compare_before_rail(Some(SlotView::Compare), &key(45, true, false)));
+        assert!(compare_before_rail(Some(SlotView::CompareText), &key(35, true, false)));
+        // Only the compare views, and only the diff-jump chords: arrows (and
+        // modified forms the model does not claim) stay with the focused rail.
+        assert!(!compare_before_rail(Some(SlotView::Jira), &key(45, true, false)));
+        assert!(!compare_before_rail(Some(SlotView::Notes), &key(35, true, false)));
+        assert!(!compare_before_rail(None, &key(45, true, false)));
+        assert!(!compare_before_rail(Some(SlotView::Compare), &key(125, false, false)));
+        assert!(!compare_before_rail(Some(SlotView::Compare), &key(45, false, false)));
+        assert!(!compare_before_rail(Some(SlotView::Compare), &key(45, true, true)));
+    }
 
     /// Take `CONF_ENV_LOCK`, surviving a poisoned mutex (a panicking test
     /// leaves no inconsistent state — the lock guards nothing but ordering).

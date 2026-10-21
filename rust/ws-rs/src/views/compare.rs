@@ -6176,6 +6176,39 @@ mod tests {
         assert_eq!(tc.prev_section(3), Some(0));
     }
 
+    /// APP-BUGS #16: with the compare session sidebar (`WSSidebarView`)
+    /// focused, Ctrl+N / Ctrl+P must still jump to the next / previous
+    /// difference. The rail's list nav claims those chords (`↑` / `↓`), so the
+    /// router asks [`takes_rail_priority`] before it hands the key to the
+    /// focused pane; this pins both halves of that contract.
+    #[test]
+    fn jump_diff_chords_outrank_the_session_rail() {
+        let key = |code: u16, ctrl: bool, cmd: bool| crate::ui::popup::KeyInput {
+            key_code: code,
+            chars: None,
+            cmd,
+            ctrl,
+            opt: false,
+            shift: false,
+            esc_streak: 0,
+        };
+        // Ctrl+N / Ctrl+P are the compare window's diff-jump commands…
+        assert!(takes_rail_priority(&key(45, true, false)));
+        assert!(takes_rail_priority(&key(35, true, false)));
+        // …and the rail would otherwise eat them as ↓ / ↑ for its own cursor.
+        let titles = |_: usize| "row".to_string();
+        for code in [45u16, 35] {
+            let (res, _) =
+                crate::ui::sidebar::nav_key(code, true, false, false, false, None, 1, 3, 2, &titles);
+            assert!(matches!(res, crate::ui::sidebar::NavKeyResult::Moved));
+        }
+        // Everything else keeps the rail's precedence: plain ↑↓ / Home / End
+        // and modified forms the model does not claim.
+        for k in [key(125, false, false), key(126, false, false), key(45, false, false), key(45, true, true)] {
+            assert!(!takes_rail_priority(&k));
+        }
+    }
+
     #[test]
     fn binary_first_difference_matches_engine() {
         assert_eq!(BinaryCompare::first_difference(&[1, 2, 3], &[1, 2, 3]), None);
@@ -7147,6 +7180,18 @@ mod tests {
             Some(crate::engines::text_edit_keys::EditAction::Paste)
         );
     }
+}
+
+/// The compare window's own chords that must win over a focused rail's list
+/// keys: Ctrl+N / Ctrl+P ("next / previous difference", a compare-window
+/// command) are also `ui::sidebar::nav_key`'s ↓ / ↑. Swift's
+/// `CardWindowController.routeKey` ran the card's `handleKey` before the
+/// focused view's `keyDown`, so the diff won there; the Rust router consults
+/// the rail first, which left a compare whose session sidebar holds the
+/// keyboard unable to jump (APP-BUGS #16). Everything else stays with the
+/// focused pane — the rail keeps ↑↓ / Home / End / Return / letters.
+pub fn takes_rail_priority(key: &crate::ui::popup::KeyInput) -> bool {
+    (key.key_code == 45 || key.key_code == 35) && key.ctrl && !key.cmd
 }
 
 /// The folder page's copy / move chords: Ctrl+R / Alt+→ copy from the left,
