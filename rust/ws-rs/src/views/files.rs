@@ -387,6 +387,176 @@ pub fn name_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
+/// A recursive-search glob over a path *relative to the search base*
+/// (Swift `pathGlobRegex(_:)`): `**` crosses folders (`**/` may match none),
+/// `*` / `?` stay inside one name, and a glob with no `/` matches the file
+/// name at any depth. Case-insensitive, like the name filter.
+pub fn path_glob_match(pattern: &str, rel: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let t: Vec<char> = rel.to_lowercase().chars().collect();
+    if pattern.contains('/') {
+        return path_glob_here(&p, &t);
+    }
+    // No `/`: Swift prefixes `^(?:.*/)?`, i.e. try every path suffix.
+    let mut start = 0;
+    loop {
+        if path_glob_here(&p, &t[start..]) {
+            return true;
+        }
+        match t[start..].iter().position(|c| *c == '/') {
+            Some(i) => start += i + 1,
+            None => return false,
+        }
+    }
+}
+
+fn path_glob_here(p: &[char], t: &[char]) -> bool {
+    if p.is_empty() {
+        return t.is_empty();
+    }
+    if p.len() >= 2 && p[0] == '*' && p[1] == '*' {
+        if p.len() >= 3 && p[2] == '/' {
+            // `**/` = zero or more whole folders.
+            for i in 0..=t.len() {
+                if (i == 0 || t[i - 1] == '/') && path_glob_here(&p[3..], &t[i..]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // A bare `**` = anything at all, `/` included.
+        return (0..=t.len()).any(|i| path_glob_here(&p[2..], &t[i..]));
+    }
+    match p[0] {
+        '*' => {
+            let mut i = 0;
+            loop {
+                if path_glob_here(&p[1..], &t[i..]) {
+                    return true;
+                }
+                if i >= t.len() || t[i] == '/' {
+                    return false;
+                }
+                i += 1;
+            }
+        }
+        '?' => !t.is_empty() && t[0] != '/' && path_glob_here(&p[1..], &t[1..]),
+        '[' => {
+            let Some(close) = p.iter().position(|c| *c == ']') else {
+                return !t.is_empty() && p[0] == t[0] && path_glob_here(&p[1..], &t[1..]);
+            };
+            if t.is_empty() || t[0] == '/' {
+                return false;
+            }
+            let set = &p[1..close];
+            let negate = set.first() == Some(&'!') || set.first() == Some(&'^');
+            let body = if negate { &set[1..] } else { set };
+            if set_contains(body, t[0]) == negate {
+                return false;
+            }
+            path_glob_here(&p[close + 1..], &t[1..])
+        }
+        c => !t.is_empty() && c == t[0] && path_glob_here(&p[1..], &t[1..]),
+    }
+}
+
+/// `startSearch`'s glob fix-up: a last component with no wildcard becomes a
+/// substring match (`**/name` → `**/*name*`), like the local filter.
+pub fn widen_recursive_glob(glob: &str) -> String {
+    let last = glob.rsplit('/').next().unwrap_or("");
+    if last.is_empty() || has_glob(last) {
+        glob.to_string()
+    } else {
+        format!("{}*{last}*", &glob[..glob.len() - last.len()])
+    }
+}
+
+/// `browserSearchLimit` (the Swift default).
+pub const RECURSIVE_SEARCH_LIMIT: usize = 2000;
+/// `browserSearchExcludes` — folder names never searched into.
+pub const RECURSIVE_SEARCH_EXCLUDES: [&str; 3] = ["Library", "node_modules", ".Trash"];
+
+/// The recursive listing (`scheduleSearch` / `walk`): files below `base`
+/// whose path relative to it matches `glob`, at most `limit` of them.
+/// Directories are not rows, hidden names are skipped unless `hidden`, and the
+/// shared search excludes are never descended into.
+pub fn recursive_search(base: &str, glob: &str, hidden: bool, limit: usize) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    let root = Path::new(base);
+    walk_tree(root, root, glob, hidden, limit, &mut out);
+    out
+}
+
+fn walk_tree(
+    dir: &Path,
+    base: &Path,
+    glob: &str,
+    hidden: bool,
+    limit: usize,
+    out: &mut Vec<Entry>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<std::fs::DirEntry> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for ent in entries {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if !hidden && name.starts_with('.') {
+            continue;
+        }
+        let Ok(ft) = ent.file_type() else { continue };
+        let path = ent.path();
+        if ft.is_dir() {
+            if RECURSIVE_SEARCH_EXCLUDES.contains(&name.as_str()) {
+                continue;
+            }
+            walk_tree(&path, base, glob, hidden, limit, out);
+            if out.len() >= limit {
+                return;
+            }
+            continue;
+        }
+        let rel = match path.strip_prefix(base) {
+            Ok(r) => r.to_string_lossy().into_owned(),
+            Err(_) => name.clone(),
+        };
+        if !path_glob_match(glob, &rel) {
+            continue;
+        }
+        let md = ent.metadata().ok();
+        let mut e = Entry::new(
+            &name,
+            path.to_string_lossy(),
+            false,
+            md.as_ref().map_or(0, |m| m.len() as i64),
+        );
+        if let Some(md) = &md {
+            if let Ok(t) = md.modified() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    e.modified = d.as_secs_f64();
+                }
+            }
+            if let Ok(t) = md.created() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    e.created = d.as_secs_f64();
+                }
+            }
+        }
+        // The folder the match sits in, so rows far below `base` stay readable.
+        if let Some((parent, _)) = rel.rsplit_once('/') {
+            e.trailing_text = parent.to_string();
+        }
+        out.push(e);
+        if out.len() >= limit {
+            return;
+        }
+    }
+}
+
 /// `parseQuery(_:)` — with an explicit `cwd` / terminal words so it is testable.
 pub fn parse_query(raw: &str, cwd: &str, terminal_words: &[String]) -> QueryMode {
     let q = raw.trim();
@@ -1423,7 +1593,11 @@ impl FileBrowser {
                     format!("{count} in {} · ⇥ complete · ↵ open", display_path(dir))
                 }
             }
-            QueryMode::Recursive { .. } => String::new(),
+            QueryMode::Recursive { base, .. } => format!(
+                "{items} match{} below {}",
+                if items == 1 { "" } else { "es" },
+                display_path(base)
+            ),
         }
     }
 
@@ -1724,8 +1898,8 @@ impl FileBrowser {
         self.set_all(entries);
     }
 
-    /// `refilter()` for All / Local / Terminal / Dir (the live app's search
-    /// scheduling is out of scope).
+    /// `refilter()` for All / Local / Terminal / Dir / Recursive (the live
+    /// app's search scheduling is out of scope — the walk runs inline).
     pub fn refilter(&mut self) {
         self.mode = parse_query(&self.query, &self.cwd, &self.terminal_words);
         let rows: Vec<Entry> = match &self.mode {
@@ -1747,7 +1921,12 @@ impl FileBrowser {
                     .filter(|e| name_matches(pat, &e.name))
                     .collect()
             }
-            QueryMode::Recursive { .. } => Vec::new(),
+            QueryMode::Recursive { base, glob } => {
+                let glob = widen_recursive_glob(glob);
+                let hidden = self.show_hidden || glob.starts_with('.') || glob.contains("/.");
+                let rows = recursive_search(base, &glob, hidden, RECURSIVE_SEARCH_LIMIT);
+                sort_entries(&rows, self.sort_key, self.sort_descending)
+            }
         };
         self.list.set_rows(rows);
     }
@@ -2609,6 +2788,56 @@ mod tests {
             }
             other => panic!("expected recursive, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recursive_glob_matches_across_folders() {
+        assert!(path_glob_match("**deep**", "notes/deep.txt"));
+        assert!(path_glob_match("**deep**", "deep.txt"));
+        assert!(path_glob_match("**deep**", "a/b/deep.txt"));
+        assert!(!path_glob_match("**deep**", "notes/shallow.txt"));
+        // `**/` matches no folder at all, `*` stays inside one name.
+        assert!(path_glob_match("**/*.rs", "foo.rs"));
+        assert!(path_glob_match("**/*.rs", "src/ui/foo.rs"));
+        assert!(!path_glob_match("sub/*.rs", "sub/ui/foo.rs"), "`*` never crosses a folder");
+        assert!(path_glob_match("sub/*.rs", "sub/foo.rs"));
+        // No `/`: the name matches at any depth (Swift's `^(?:.*/)?`).
+        assert!(path_glob_match("deep.txt", "a/b/deep.txt"));
+        assert!(path_glob_match("*deep*", "a/b/deep.txt"));
+        assert!(!path_glob_match("*deep*", "a/b/shallow.txt"));
+        assert!(path_glob_match("src/**", "src/a/b.txt"));
+        assert!(!path_glob_match("src/**", "other/a.txt"));
+        // A last component with no wildcard becomes a substring match.
+        assert_eq!(widen_recursive_glob("**deep**"), "**deep**");
+        assert_eq!(widen_recursive_glob("**/deep.txt"), "**/*deep.txt*");
+    }
+
+    #[test]
+    fn browser_recursive_filter_lists_matches() {
+        let root = std::env::temp_dir().join(format!("ws-rs-fbrec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("files/notes")).unwrap();
+        std::fs::create_dir_all(root.join("files/docs")).unwrap();
+        std::fs::write(root.join("files/notes/deep.txt"), "far below").unwrap();
+        std::fs::write(root.join("files/docs/shallow.txt"), "near").unwrap();
+
+        let mut b = FileBrowser::new(&root.to_string_lossy());
+        b.reload();
+        b.set_query("**deep**");
+        let names: Vec<&str> = b.visible_rows().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["deep.txt"], "the `**` filter lists matches below the root");
+        assert_eq!(
+            b.visible_rows()[0].path,
+            root.join("files/notes/deep.txt").to_string_lossy()
+        );
+        assert_eq!(b.visible_rows()[0].trailing_text, "files/notes");
+
+        // A non-matching recursive query lists nothing; clearing restores all.
+        b.set_query("**missing**");
+        assert!(b.visible_rows().is_empty());
+        b.set_query("");
+        assert!(b.visible_rows().iter().any(|e| e.name == "files"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
