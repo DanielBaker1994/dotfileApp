@@ -498,6 +498,7 @@ impl KsApp {
             UiCommand::InspectorWidth(_) => "InspectorWidth",
             UiCommand::JiraInspector(_) => "JiraInspector",
             UiCommand::SidebarRail(..) => "SidebarRail",
+            UiCommand::Input(_) => "Input",
         };
         self.log_once(name);
     }

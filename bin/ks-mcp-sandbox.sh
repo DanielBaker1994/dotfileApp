@@ -41,6 +41,10 @@ AERO_MARK="$SANDBOX/aerospace-disabled"
 # 103-byte AF_UNIX limit: nvim RPC then fails every time and the notes editor
 # misbehaves in ways the real app doesn't (2026-10-20 hammer, G1).
 HOME_ALIAS="/tmp/ksb-$(printf '%s' "$SANDBOX" | shasum | cut -c1-8)"
+# Preferences live in NSUserDefaults keyed by bundle id, not under HOME: a GUI
+# sandbox (same bundle id) would read and write the LIVE app's settings.
+# WS_DEFAULTS_SUITE (platform/settings.rs) gives the sandbox its own domain.
+DEFAULTS_SUITE="dev.danielbaker.kitchen-sink.sandbox-${HOME_ALIAS##*/ksb-}"
 LOG="$SANDBOX/daemon.log"
 
 die() { printf 'ks-mcp-sandbox: %s\n' "$*" >&2; exit 1; }
@@ -166,6 +170,7 @@ cmd_start() {
         "NOTIFY_CACHE_DIR=$SANDBOX/home/notifications"
         "WS_SETTINGS_CACHE=$SANDBOX/home/settings-cache"
         "WS_LOG_DIR=$SANDBOX/home/logs"
+        "WS_DEFAULTS_SUITE=$DEFAULTS_SUITE"
     )
     if [ "$gui" = 1 ]; then
         [ -d "$APP" ] || die "missing $APP (run ./ws build once)"
@@ -243,6 +248,7 @@ cmd_status() {
 cmd_reset() {
     cmd_stop >/dev/null
     rm -rf "$SANDBOX/home" "$SANDBOX/tmp"
+    defaults delete "$DEFAULTS_SUITE" >/dev/null 2>&1 || true
     echo "reset (home/ reseeds from the repo commands.toml on next start)"
 }
 

@@ -14,6 +14,7 @@ pub mod process_run;
 pub mod python_helper;
 pub mod registry;
 pub mod socket;
+pub mod synth_input;
 
 /// Entry point. Phase 0 scaffold: no AppKit yet.
 pub fn run() {

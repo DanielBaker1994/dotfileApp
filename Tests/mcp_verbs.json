@@ -78,6 +78,16 @@
       "note": "record-only: the spec is stored in last_key and exposed in state as top-level `lastKey`; an empty spec is an error instead of a silent no-op."
     },
     {
+      "verb": "input:",
+      "grammar": "input:key:<combo> [<combo>…] | input:text:<text> | input:click:<x>,<y>[,<count>][,right] | input:activate",
+      "happy": ["input:key:esc"],
+      "bad": ["input:key:"],
+      "bad_error": "input:key:",
+      "headless": "refused",
+      "expect": {},
+      "note": "real NSEvents posted into the app's own event queue (app/synth_input.rs); needs_window refuses every input: verb headless. Delivery is async: read state.input {posted, dropped, lastError} afterwards."
+    },
+    {
       "verb": "paths:",
       "grammar": "paths:show|hide|return|select:N",
       "happy": ["paths:hide", "paths:return"],

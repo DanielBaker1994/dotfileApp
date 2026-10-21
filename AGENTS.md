@@ -177,8 +177,11 @@ An agent can drive and verify the app over the socket — no computer control:
   `pane-shot` | `window-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
 - Limits: headless proves model/state, **not rendering** — verify visuals with `screenshot -r` /
   `pane-shot` / `window-shot` (the daemon's own shared window straight to a PNG, no overlay);
-  `do:key:` is record-only, so Cmd+K, Cmd+/, find bars and jira `board:*` have no
-  entry; `do:ai:*`/`do:confluence:*` registers are dead code. Unknown `do:` verbs, `tool:<unknown>` and
+  `do:key:` is record-only, but **`do:input:key:|text:|click:|activate`** (GUI only,
+  `app/synth_input.rs`) posts real `NSEvent`s into the app's own queue, so keys and clicks take
+  the normal path (key monitor, responder, nvim) with no global HID input; delivery is async
+  (`state.input`). A GUI sandbox stores preferences in its own `WS_DEFAULTS_SUITE`, never the live
+  app's defaults domain; `do:ai:*`/`do:confluence:*` registers are dead code. Unknown `do:` verbs, `tool:<unknown>` and
   bad `paths:select:` now return `{"error":…}` (→ `isError` in `ks_do`); still silent no-ops:
   `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty, `compare:select:<out of range>`. Headless
   still reports `shown: true` for panels/tools that cannot exist without AppKit (F0-7, undecided).

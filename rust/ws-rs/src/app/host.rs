@@ -164,6 +164,9 @@ pub enum UiCommand {
     /// `do:rail:<view>:on|off` / Ctrl+B B — collapse / expand the view's
     /// left sidebar rail (every `SidebarView`-backed pane).
     SidebarRail(SlotView, bool),
+    /// `do:input:*` — real key / mouse events posted into the app's own
+    /// event queue (`app::synth_input`).
+    Input(crate::app::synth_input::InputCmd),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -637,6 +640,7 @@ impl ControllerInner {
             "frontmostPid": self.frontmost_pid,
             "tools": Value::Object(self.tools.clone()),
             "lastKey": self.last_key.clone(),
+            "input": crate::app::synth_input::state(),
             "headerStyle": self.settings.header_style.raw(),
             "terminalPanel": self
                 .terminal_panel_state
@@ -798,6 +802,7 @@ fn needs_window(action: &str) -> bool {
         || action == "reset-size"
         || action.starts_with("tool:")
         || action.starts_with("board:")
+        || action.starts_with("input:")
 }
 
 /// Parse `board:<sub>` into a [`BoardCmd`], mirroring Swift's `onTestAction`
@@ -2239,6 +2244,15 @@ impl SwitcherController {
                 self.inner.lock().unwrap().ui_push(UiCommand::SidebarRail(sv, on));
             }
             return Some(json!({ "view": view, "rail": on }));
+        }
+        if let Some(rest) = action.strip_prefix("input:") {
+            return match crate::app::synth_input::parse(rest) {
+                Ok(cmd) => {
+                    self.inner.lock().unwrap().ui_push(UiCommand::Input(cmd));
+                    None
+                }
+                Err(e) => Some(json!({ "error": e })),
+            };
         }
         if let Some(spec) = action.strip_prefix("key:") {
             if spec.is_empty() {
@@ -4593,6 +4607,13 @@ mod daemon_ui {
                         }
                         UiCommand::JiraInspector(on) => self.jira_toggle_inspector(on),
                         UiCommand::SidebarRail(v, on) => self.apply_rail(v, on),
+                        UiCommand::Input(cmd) => {
+                            if let Some(mtm) = MainThreadMarker::new() {
+                                let shared = self.ivars().state.borrow().as_ref().map(|st| st.window.clone());
+                                let win: Option<&objc2_app_kit::NSWindow> = shared.as_ref().map(|w| &***w);
+                                crate::app::synth_input::appkit::deliver(mtm, &cmd, win);
+                            }
+                        }
                     }
                 }
             }

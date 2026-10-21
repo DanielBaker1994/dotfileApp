@@ -68,15 +68,19 @@ the real bugs, but they run *scripts and tables*. They don't run on open-ended j
 - **What MCP/socket gives you:** a typed, safe surface for *reading* state (`ks_state`) and reaching
   start states (`ks_do`), with read-only enforcement for the live app. That is the oracle backbone, and
   it is the reason a non-vision model can test a GUI at all.
-- **What it cannot give you today:** `do:key:<spec>` is **record-only** (it stores the spec and sends no
-  key). `do:` verbs call the model directly and skip the event path where the real bugs were (focus,
-  responder, nvim RPC). A lane driven only by `do:` verbs proves the model, not the feature.
+- **What plain `do:` verbs cannot give you:** they call the model directly and skip the event path where
+  the real bugs were (focus, responder, nvim RPC). A lane driven only by them proves the model, not the
+  feature. (`do:key:<spec>` is record-only and sends nothing.)
+- **`do:input:*` closes that gap (added 2026-10-20, §3.3):** real key and click events posted into the
+  app's own event queue, so they go through the same code as typing. Verified in the GUI sandbox: Cmd+N
+  made a note, typed text landed in nvim and on disk after Cmd+S, Ctrl+B W opened the switcher, Cmd+/
+  opened the shortcuts sheet, and an OCR-located click switched notes.
 - **For opencode workers, bash is as good as MCP.** `printf 'state\n' | nc -U -w3 "$KS_SOCKET"` works
   with any number of sandboxes. The MCP server config in `opencode.json` points at one fixed socket.
   Use MCP for interactive agents, and bash plus the socket for hammer lanes.
-- **The biggest single coverage gain** is a real in-process input verb (§10 R1). It would let workers
-  drive features through the real event path without global HID input, which removes rule 2's
-  bottleneck and most `ks-input` flakiness.
+- **Still one GUI lane at a time:** events go to the app's key window, so the sandbox must be the active
+  app. What `do:input` removes is the flakiness: no global keyboard, no stuck Cmd, real click counts, no
+  frontmost race, and it works from MCP (`ks_do`) as well as bash.
 
 ---
 
@@ -84,8 +88,8 @@ the real bugs, but they run *scripts and tables*. They don't run on open-ended j
 
 | # | Limit | Effect on testing | Workaround / status |
 |---|---|---|---|
-| L1 | One physical screen and one global input stream | GUI lanes cannot run in parallel; the owner can't use the Mac during them | Serial GUI lanes; parallel headless. A macOS VM (Tart, at most 2 macOS VMs per host by Apple's licence) would give 2 GUI lanes; in-process input (R1) would remove the limit |
-| L2 | `do:key:` is record-only | MCP alone cannot type or press shortcuts | `bin/ks-input` (real CGEvents) for GUI; R1 to fix properly |
+| L1 | One screen; the sandbox must be the active app to receive keys | GUI lanes cannot run in parallel; while one runs, the test window sits in front and anything the owner types goes into it | Serial GUI lanes; parallel headless. A macOS VM (Tart, at most 2 per host by Apple's licence) would take GUI lanes off the owner's screen |
+| L2 | ~~`do:key:` is record-only~~ | MCP could not type or press shortcuts | **fixed 2026-10-20:** `do:input:*` (§3.3). `bin/ks-input` stays as the fallback |
 | L3 | Headless has no AppKit | no rendering, no focus, no nvim pane; `screenshot`/`pane-shot`/`window-shot` refused | Headless lanes test state, disk and the cold paths only |
 | L4 | Headless claims `shown:true` for panels that can't exist without AppKit (F0-7) | a headless "shown" is not evidence | Only trust `shown` in GUI lanes |
 | L5 | Headless never drains `pending_note_open` | `do:open:<path>` is a no-op headless | open notes in GUI lanes, or use helper fileops for disk tests |
@@ -97,6 +101,7 @@ the real bugs, but they run *scripts and tables*. They don't run on open-ended j
 | L11 | ~~sandbox nvim socket path 105 bytes > AF_UNIX 103~~ | nvim RPC failed on every call in the GUI sandbox, so editing behaved differently from the real app | **fixed 2026-10-20:** the sandbox HOME is a short alias `/tmp/ksb-<hash>` (`bin/ks-mcp-sandbox.sh home`) |
 | L12 | GUI sandbox runs the *installed* bundle | it tests the last `./ws build`, not your working tree | fresh code: copy the bundle to `.build/sandbox-app/`, swap in `.build/rust-target/release/kitchen-sink`, codesign, `KS_MCP_SANDBOX_APP=<copy>` (§3.1) |
 | L13 | The flow table's `cfg-sandbox` sets `[notes] vim-mode = false` | the nvim editor, where most notes bugs were, is not covered by flows | add nvim-mode variants of the notes flows (backlog item for the A-FLOW lane) |
+| L15 | ~~the GUI sandbox shared the live app's preferences~~ (same bundle id; HOME does not move NSUserDefaults) | every sandbox run wrote into the owner's live settings (tree state, rails, header style …) | **fixed 2026-10-20:** the sandbox sets `WS_DEFAULTS_SUITE`; verified the live domain stays byte-identical across a run |
 | L14 | `Tests/mcp_verbs.json` lags `host.rs` | 7 verbs uncovered (`go:`, `inspector-width:`, `jira-config`, `jira-dashboard`, `jira-inspector:`, `rail:`, …); the coverage test fails | H-VERB lane fills the rows |
 
 ---
@@ -146,6 +151,23 @@ Silent no-ops still exist (`key:<anything>`, `tool-close:<unknown>`, `hide` when
 **never treat a plain success reply as proof that something happened.** Compare the state before and after.
 
 ### 3.3 Real input (GUI lanes only)
+
+**Preferred: `do:input:*`** (real events into the app's own queue, nothing reaches other apps):
+
+```bash
+ks 'do:input:activate'                 # once at lane start, and after anything that may steal focus
+ks 'do:input:key:cmd+n'                # combos, same names as ks-input; several: 'do:input:key:ctrl+b w'
+ks 'do:input:text:Hello, world!'       # literal text into whatever has focus (verified: nvim editor; fields/panels not yet)
+ks 'do:input:click:95,100'             # points from the window's top-left (window-shot --scale 1 pixels = points)
+ks 'do:input:click:95,100,2'           # real double-click;  'do:input:click:95,100,right' = right-click
+sleep 0.5; ks state | jq .input        # {posted, dropped, lastError}; dropped>0 => run do:input:activate
+```
+
+Delivery is asynchronous: wait ~0.3–1 s, then check the effect, not just the reply. Limits: code that
+polls the *hardware* modifier state or cursor position (not the event) won't see these; drag and scroll
+are not implemented yet (use `ks-input` for those).
+
+**Fallback: `bin/ks-input`** (global CGEvents; the quirks in L9 apply):
 
 ```bash
 bin/ks-input activate --pid $SBX_PID || echo NOT-FRONT       # before every input burst; exit 0 = frontmost
@@ -406,7 +428,7 @@ tokens are dominated by reading reports, so keep reports to the schema and read 
 
 | # | Item | Why | Size |
 |---|---|---|---|
-| R1 | **Real in-process input verb**: `do:input:key:<combo>` / `do:input:text:<s>` that builds an `NSEvent` and posts it into the app's own event queue (`NSApp.postEvent`), so it goes through the local key monitor (`host.rs` `route_key_event`), the responder chain and the terminal views exactly like typing | MCP becomes a real driver; no global HID, no stuck Cmd, no frontmost race; more than one GUI sandbox could run at once. **Spike first:** confirm that local monitors see posted events and how an inactive app's key window behaves | M |
+| R1 | ~~Real in-process input verb~~ **done 2026-10-20** (`do:input:*`). Follow-ups: `drag` and `scroll` | drag/scroll flows still need ks-input | S |
 | R2 | **Flow runner** `Tests/run_flows.py`: executes `Tests/app_flows.json` (and finding trails) deterministically with ks-input/R1 + oracles, JSON results | T0 regression lock for every flow and every verified bug; replay for triage step 3 with no LLM | M |
 | R3 | **State for the blind spots**: `views.notes.query`, Cmd+K picker rows, shortcuts-card shown, the AppKit first responder per window, and the nvim mode/file in `views.notes` | turns the visual-only flows into state oracles; makes bug #5 type disagreements checkable | S–M |
 | R4 | Fill the 7 missing verb-table rows (H-VERB) | the coverage test is red | S |
