@@ -15060,8 +15060,8 @@ label = \"Compare\"
         assert_eq!(
             titles,
             vec![
-                "Create File",
                 "Find Recent Files",
+                "Create File",
                 "Pretty Print",
                 "Notes",
                 "Jira",

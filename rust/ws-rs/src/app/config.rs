@@ -294,8 +294,8 @@ impl Default for AppSettings {
             margin_bottom: 0.0,
             switcher_width: 760.0,
             palette_first: vec![
-                "filefast".to_string(),
                 "paths".to_string(),
+                "filefast".to_string(),
                 "text-table".to_string(),
                 "prettyprint".to_string(),
             ],

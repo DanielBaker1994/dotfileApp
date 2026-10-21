@@ -29,7 +29,7 @@ focus-file = "kitchen-sink-focus"
 focus-bridge = "ws-aerospace-focus"
 switcher-name = "kitchen-sink"
 
-palette-first = "filefast, paths, text-table, prettyprint"
+palette-first = "paths, filefast, text-table, prettyprint"
 switcher-width = 760
 detail-name = "jira-detail"
 
@@ -69,17 +69,6 @@ info = "63CDCF"
 
 [themes]
 
-[filefast]
-enabled = true
-sticky = true
-float = true
-type = "shell"
-label = "Create File"
-icon = "notes"
-save-dir = "/tmp/filefast"
-script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
-aliases = "quickfiles, quick files"
-
 [paths]
 enabled = true
 type = "shell"
@@ -103,6 +92,19 @@ save-dir = "/tmp/text-table"
 close-on-copy = true
 width = 900
 height = 600
+
+
+[filefast]
+enabled = true
+sticky = true
+float = true
+type = "shell"
+label = "Create File"
+icon = "notes"
+save-dir = "/tmp/filefast"
+script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
+aliases = "quickfiles, quick files"
+
 
 [notes-find]
 rows = 12
