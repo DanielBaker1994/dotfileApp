@@ -10,6 +10,7 @@
       "raw VERB — a raw socket verb (e.g. `reload`)"
     ],
     "oracle_kinds": [
+      "reply   {verb, error?, why?} — the reply a `do:` step in `steps` got: with `error`, it must be an error containing that text (\"\" = any error); without, it must not be an error",
       "state   {path, after?, equals?, not_equals?, min?, contains?, contains_name?, length?, every_name_contains?} — read the daemon `state` JSON",
       "disk    {path, glob?, contains?, exists?, is_dir?, count_min?} — a path (or glob) relative to the sandbox HOME",
       "independent {describe} — a non-state recomputation the runner performs (ls / Python difflib / do: reply body)",
@@ -400,14 +401,14 @@
         {"input": "wait 300"},
         {"input": "key cmd+r"},
         {"input": "wait 250"},
-        {"input": "type Rénamed file.txt"},
+        {"input": "type Rénamed file"},
         {"input": "key return"},
         {"input": "wait 400", "checkpoint": "renamed"}
       ],
       "oracles": [
         {"kind": "disk", "path": "files/Rénamed file.txt", "exists": true, "after": "renamed"},
         {"kind": "disk", "path": "files/README.txt", "exists": false, "after": "renamed"},
-        {"kind": "state", "path": "views.files.rows", "contains_name": "Rénamed file.txt", "after": "renamed"},
+        {"kind": "disk", "path": "files/Rénamed file.txt.txt", "exists": false, "after": "renamed", "why": "inline rename selects only the stem and keeps the extension (Finder-style), so typing the stem must give exactly one .txt; the old row check could not pass because the README filter hides the renamed row"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]
@@ -499,8 +500,8 @@
         {"input": "wait 300", "checkpoint": "prev"}
       ],
       "oracles": [
-        {"kind": "state", "path": "compare.current.cursorRow", "min": 1, "after": "next"},
-        {"kind": "state", "path": "compare.current.cursorRow", "equals": 0, "after": "prev"},
+        {"kind": "state", "path": "compare.current.cursorRow", "equals": 4, "after": "next", "why": "a text compare opens on the first difference (row 1, two/TWO); Ctrl+N moves to the next one, row 4 (five, added)"},
+        {"kind": "state", "path": "compare.current.cursorRow", "equals": 1, "after": "prev", "why": "Ctrl+P moves back to the previous difference, row 1 (there is none before it)"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:compare:back"]
@@ -644,7 +645,7 @@
       "oracles": [
         {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "set"},
         {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "afterbad"},
-        {"kind": "independent", "describe": "do:header-style:bogus is refused with {\"error\":\"unknown header style\"} (host.rs:1743) and does not change headerStyle; valid values are quiet|flat|edge|stripe|tinted|glow|aurora (theme.rs:623-633)."},
+        {"kind": "reply", "verb": "do:header-style:bogus", "error": "unknown header style", "why": "do:header-style:bogus is refused with {\"error\":\"unknown header style\"} (host.rs:1743) and does not change headerStyle; valid values are quiet|flat|edge|stripe|tinted|glow|aurora (theme.rs:623-633)."},
         {"kind": "visual", "after": "set", "expect": "the window header is drawn in the aurora style (an accent→accent2 left-to-right band), not the flat default"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
@@ -932,7 +933,7 @@
         {"input": "do:paths:select:9999"}
       ],
       "oracles": [
-        {"kind": "independent", "describe": "do:paths:select:9999 returns {\"error\":\"paths:select: out of range\"} (host.rs:1725-1727) rather than succeeding; a valid in-range select:N (N < rows) succeeds and sets paths.selection == N."},
+        {"kind": "reply", "verb": "do:paths:select:9999", "error": "out of range", "why": "do:paths:select:9999 returns {\"error\":\"paths:select: out of range\"} (host.rs:1725-1727) rather than succeeding; a valid in-range select:N (N < rows) succeeds and sets paths.selection == N."},
         {"kind": "state", "path": "paths.shown", "equals": true},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
@@ -1027,7 +1028,7 @@
         {"input": "do:board:mywork"}
       ],
       "oracles": [
-        {"kind": "independent", "describe": "do:board:mywork returns {\"error\":\"board:mywork not implemented in the Rust port yet\"} (host.rs:1915-1918), matching BACKLOG.md:72-75; it must NOT return ok/null. (This flow locks the known gap.)"},
+        {"kind": "reply", "verb": "do:board:mywork", "error": "", "why": "do:board:mywork returns {\"error\":\"board:mywork not implemented in the Rust port yet\"} (host.rs:1915-1918), matching BACKLOG.md:72-75; it must NOT return ok/null. (This flow locks the known gap.)"},
         {"kind": "log", "none_of": ["panic", "ERROR"]}
       ],
       "teardown": ["do:hide"]

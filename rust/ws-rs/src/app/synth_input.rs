@@ -15,7 +15,7 @@
 //! - `text:<text>` — literal text, one key event per character.
 //! - `click:<x>,<y>[,<count>][,right]` — points from the top-left of the key
 //!   window's content view; `count` 2 is a real double-click.
-//! - `activate` — activate the app and make the shared window key.
+//! - `activate` — activate the app; if no window is key, make the shared window key.
 //!
 //! Events go to the app's key window, so the app must be active (the verbs
 //! never activate it on their own: `activate` is explicit). Delivery happens on
@@ -329,8 +329,12 @@ pub mod appkit {
         if let InputCmd::Activate = cmd {
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
-            if let Some(w) = shared {
-                w.makeKeyAndOrderFront(None);
+            // Keep whichever window is key (compare, a panel …); fall back to the
+            // shared window only when none is.
+            if app.keyWindow().is_none() {
+                if let Some(w) = shared {
+                    w.makeKeyAndOrderFront(None);
+                }
             }
             record(0, 0, None);
             return;
