@@ -473,6 +473,9 @@ pub fn widen_recursive_glob(glob: &str) -> String {
 
 /// `browserSearchLimit` (the Swift default).
 pub const RECURSIVE_SEARCH_LIMIT: usize = 2000;
+/// Wall-clock budget for one recursive search: it runs on the main thread per
+/// keystroke, and the Files root can be the whole home folder.
+pub const RECURSIVE_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
 /// `browserSearchExcludes` — folder names never searched into.
 pub const RECURSIVE_SEARCH_EXCLUDES: [&str; 3] = ["Library", "node_modules", ".Trash"];
 
@@ -483,7 +486,8 @@ pub const RECURSIVE_SEARCH_EXCLUDES: [&str; 3] = ["Library", "node_modules", ".T
 pub fn recursive_search(base: &str, glob: &str, hidden: bool, limit: usize) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     let root = Path::new(base);
-    walk_tree(root, root, glob, hidden, limit, &mut out);
+    let deadline = std::time::Instant::now() + RECURSIVE_SEARCH_BUDGET;
+    walk_tree(root, root, glob, hidden, limit, deadline, &mut out);
     out
 }
 
@@ -493,9 +497,10 @@ fn walk_tree(
     glob: &str,
     hidden: bool,
     limit: usize,
+    deadline: std::time::Instant,
     out: &mut Vec<Entry>,
 ) {
-    if out.len() >= limit {
+    if out.len() >= limit || std::time::Instant::now() >= deadline {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -514,7 +519,7 @@ fn walk_tree(
             if RECURSIVE_SEARCH_EXCLUDES.contains(&name.as_str()) {
                 continue;
             }
-            walk_tree(&path, base, glob, hidden, limit, out);
+            walk_tree(&path, base, glob, hidden, limit, deadline, out);
             if out.len() >= limit {
                 return;
             }

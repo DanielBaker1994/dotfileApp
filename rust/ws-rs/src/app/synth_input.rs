@@ -45,6 +45,11 @@ pub struct KeyStroke {
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputCmd {
     Keys(Vec<KeyStroke>),
+    /// Text with characters that have no US-layout key (é, 日, emoji): macOS
+    /// delivers those as one text insertion (emoji picker, input methods), not
+    /// as key presses, so the whole string goes to the first responder's
+    /// `insertText:` in one piece (keeps the order).
+    Insert(String),
     Click { x: f64, y: f64, count: u8, right: bool },
     Activate,
 }
@@ -52,7 +57,9 @@ pub enum InputCmd {
 /// Key code used for text characters that have no key on the US layout
 /// (é, 日, ✓): unassigned on ANSI keyboards, so no key handler matches it and
 /// only `characters` matters — like the unicode events `ks-input type` sends.
-const UNMAPPED_CODE: u16 = 0x34;
+// 0x34 is not safe: AppKit maps it to Enter for some characters (emoji were
+// typed as newlines, night run 2026-10-20). 0x44 is unassigned in Events.h.
+const UNMAPPED_CODE: u16 = 0x44;
 
 /// (name, kVK code, unshifted char, shifted char).
 const KEYS: &[(&str, u16, char, char)] = &[
@@ -222,7 +229,11 @@ pub fn parse(rest: &str) -> Result<InputCmd, String> {
         if text.is_empty() {
             return Err("input:text:<text>".into());
         }
-        return Ok(InputCmd::Keys(text_strokes(text)));
+        let strokes = text_strokes(text);
+        if strokes.iter().any(|k| k.code == UNMAPPED_CODE) {
+            return Ok(InputCmd::Insert(text.to_string()));
+        }
+        return Ok(InputCmd::Keys(strokes));
     }
     if let Some(args) = rest.strip_prefix("click:") {
         let usage = || "input:click:<x>,<y>[,<count>][,right]".to_string();
@@ -361,6 +372,20 @@ pub mod appkit {
                 }
                 record(posted, 0, None);
             }
+            InputCmd::Insert(text) => {
+                let Some(r) = win.firstResponder() else {
+                    record(0, 1, Some("key window has no first responder".into()));
+                    return;
+                };
+                let sel = objc2::sel!(insertText:);
+                if !objc2_foundation::NSObjectProtocol::respondsToSelector(&*r, sel) {
+                    record(0, 1, Some("first responder does not accept text".into()));
+                    return;
+                }
+                let ns = NSString::from_str(text);
+                let _: () = unsafe { objc2::msg_send![&*r, insertText: &*ns] };
+                record(text.chars().count() as u64, 0, None);
+            }
             InputCmd::Click { x, y, count, right } => {
                 let Some(view) = win.contentView() else {
                     record(0, 1, Some("key window has no content view".into()));
@@ -440,6 +465,8 @@ mod tests {
         assert_eq!(parse("activate"), Ok(InputCmd::Activate));
         assert!(matches!(parse("key:cmd+k"), Ok(InputCmd::Keys(k)) if k.len() == 1));
         assert!(matches!(parse("text:hi"), Ok(InputCmd::Keys(k)) if k.len() == 2));
+        assert_eq!(parse("text:tube 🧪 ok"), Ok(InputCmd::Insert("tube 🧪 ok".into())));
+        assert_eq!(parse("text:café"), Ok(InputCmd::Insert("café".into())));
         assert_eq!(parse("click:10,20"), Ok(InputCmd::Click { x: 10.0, y: 20.0, count: 1, right: false }));
         assert_eq!(parse("click:10,20,2"), Ok(InputCmd::Click { x: 10.0, y: 20.0, count: 2, right: false }));
         assert_eq!(parse("click:1,2,right"), Ok(InputCmd::Click { x: 1.0, y: 2.0, count: 1, right: true }));
