@@ -55,6 +55,7 @@ BUNDLE_ID = "dev.danielbaker.kitchen-sink"
 # --settle: how long a failing state oracle keeps re-reading state before it fails
 # (0 = read once, as the table's "no retry" contract says; a slower VM needs some).
 SETTLE_MS = 0
+WARMUP_S = 2.0
 
 
 class StepError(Exception):
@@ -100,9 +101,17 @@ class Sandbox:
         deadline = time.time() + 20
         while time.time() < deadline:
             if self.state(quiet=True) is not None:
-                return
+                break
             time.sleep(0.5)
-        raise SystemExit("sandbox never answered `state` within 20 s")
+        else:
+            raise SystemExit("sandbox never answered `state` within 20 s")
+        # Warm-up: the first do: after launch is slow (and holds its connection, APP-BUGS #17);
+        # let it settle so the first flow doesn't race a still-starting app.
+        try:
+            self.send("do:open:notes", timeout=30)
+        except Exception:
+            pass
+        time.sleep(WARMUP_S)
 
     def stop(self) -> None:
         if self.app.startswith(os.path.join(ROOT, ".build")):

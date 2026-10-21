@@ -153,6 +153,11 @@ sync_in() {
 }
 
 cmd_test() {
+    # One `test` at a time on this host (several workers may call it): queue on a lock.
+    if [ -z "${KS_VM_LOCKED:-}" ]; then
+        mkdir -p "$STATE"
+        KS_VM_LOCKED=1 exec lockf -k "$STATE/test.lock" "$0" test "$@"
+    fi
     [ -x "$STATE/bin/ks-input" ] && [ -x "$STATE/bin/ks-ocr" ] || die "missing VM helper binaries in $STATE/bin"
     cmd_up
     gssh "test -f ~/.ks-provisioned" || provision
