@@ -3439,14 +3439,20 @@ impl CommandHandler for SwitcherController {
             inner.state_with_registry(&self.registry)
         };
         // `screenshot` / `compare` report their real controllers when enabled
-        // (the inner placeholder only covers a disabled/detached tool).
+        // (the inner placeholder only covers a disabled/detached tool). Both are
+        // read with `try_lock`: the main thread holds these mutexes while it
+        // runs long AppKit work (the OCR prewarm, a capture, a compare load) and
+        // this reply is served on the single socket thread — blocking here
+        // wedged every later socket verb until that work finished (APP-BUGS #21).
         if let Some(c) = &self.screenshot_controller {
-            let c = c.lock().unwrap();
-            v["screenshot"] = c.test_state();
-            v["paneShot"] = c.pane_shot_last.clone();
+            if let Ok(c) = c.try_lock() {
+                v["screenshot"] = c.test_state();
+                v["paneShot"] = c.pane_shot_last.clone();
+            }
         }
         if let Some(m) = &self.compare_model {
-            let mut st = m.lock().unwrap().test_state();
+            let Ok(mut m) = m.try_lock() else { return v };
+            let mut st = m.test_state();
             if let Some(o) = st.as_object_mut() {
                 o.entry("shown").or_insert(json!(false));
                 o.entry("key").or_insert(json!(false));
@@ -4432,11 +4438,20 @@ mod daemon_ui {
             .after(dispatch2::DispatchTime::NOW.time(2_000_000_000), configure_recent_and_shelf)
             .ok();
         // `ScreenshotController.prewarm()` ~1.5 s after launch: SCK + OCR warm
-        // so the first capture / first OCR does not pay the cold cost.
+        // so the first capture / first OCR does not pay the cold cost. The OCR
+        // pass runs outside the controller mutex (a cold Vision load takes
+        // seconds; holding it wedged `state` and every `do:` behind the single
+        // socket thread — APP-BUGS #21).
         if let Some(shot) = shot_prewarm {
             dispatch2::DispatchQueue::main()
                 .after(dispatch2::DispatchTime::NOW.time(1_500_000_000), move || {
-                    shot.lock().unwrap().prewarm();
+                    let plan = shot.lock().unwrap().prewarm_plan();
+                    #[cfg(target_os = "macos")]
+                    if let Some(cfg) = plan {
+                        let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = plan;
                 })
                 .ok();
         }
@@ -14195,6 +14210,48 @@ mod tests {
         assert_eq!(s["viewSwitcher"]["shown"], json!(false));
         assert!(s["viewSwitcher"]["rows"].is_array());
         assert_eq!(s["paths"]["shown"], json!(false));
+    }
+
+    /// The socket serves one request per connection on a single thread, so a
+    /// `state` reply that blocks on a tool controller mutex stalls *every*
+    /// later verb until it is let go. The main thread holds the screenshot
+    /// controller across long AppKit work (the OCR prewarm ran Vision while
+    /// holding it), and that is how the notes find-bar flow's next verb timed
+    /// out for 20 s with the app looking wedged (APP-BUGS #21). `state` must
+    /// therefore read the controller with `try_lock`.
+    #[test]
+    fn state_does_not_block_on_a_busy_controller_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut c = controller();
+        c.register_views_from_text("[screenshot]\nenabled = true\n");
+        let c = std::sync::Arc::new(c);
+        let _queue = install_gui(&c);
+        let shot = c.screenshot_controller().expect("screenshot controller");
+
+        // Stand in for main being inside the prewarm / a capture: the tool's
+        // mutex is held while the reply is produced.
+        let busy = shot.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let worker = c.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(worker.state_json());
+        });
+        let got = rx.recv_timeout(Duration::from_secs(2));
+        drop(busy);
+        let state = got.expect("state_json blocked on the screenshot controller mutex");
+        assert!(state["screenshot"].is_object() || state["screenshot"].is_null(),
+                "state still carries the screenshot section");
+    }
+
+    #[test]
+    fn prewarm_plan_marks_the_controller_warm() {
+        let mut shot = crate::views::screenshot::ScreenshotController::new();
+        assert!(!shot.prewarmed);
+        let _ = shot.prewarm_plan();
+        assert!(shot.prewarmed, "prewarm_plan marks the controller warm");
+        assert!(shot.prewarm_plan().is_none(), "the OCR warm-up runs at most once");
     }
 
     #[test]

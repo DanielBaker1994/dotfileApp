@@ -7133,23 +7133,37 @@ impl ScreenshotController {
         self.log.push(line.into());
     }
 
-    pub fn prewarm(&mut self) {
+    /// `ScreenshotController.prewarm()`: mark the controller warm and hand the
+    /// caller the `ShotOCR.warmUp` inputs the first time.
+    ///
+    /// The warm-up itself (a synchronous Vision recognition, seconds on a cold
+    /// VM) deliberately runs *outside* this mutex: holding it across the OCR
+    /// made `state` / `do:` replies — served on the single socket thread, which
+    /// reads this controller — wait for the whole recognition (APP-BUGS #21).
+    /// `None` when it already ran or off main (the AppKit bitmap context and
+    /// Vision are main-thread only; `deliver_text` warm-starts lazily off main).
+    pub fn prewarm_plan(&mut self) -> Option<crate::engines::screenshot_text::ShotOCRConfig> {
         self.prewarmed = true;
         if self.ocr_warm {
-            return;
+            return None;
         }
         self.ocr_warm = true;
-        // `ShotOCR.warmUp`: build a small bitmap and run a recognition pass so
-        // the first real OCR does not pay the model-load cost. The AppKit
-        // bitmap context and Vision are main-thread only; off-main this is
-        // skipped (the next `deliver_text` warm-starts lazily).
+        let cfg = crate::engines::screenshot_text::ShotOCRConfig {
+            languages: self.config.ocr.languages.clone(),
+            correction: self.config.ocr.correction,
+        };
+        // The AppKit bitmap context and Vision are main-thread only.
         #[cfg(target_os = "macos")]
-        if objc2::MainThreadMarker::new().is_some() {
-            let cfg = crate::engines::screenshot_text::ShotOCRConfig {
-                languages: self.config.ocr.languages.clone(),
-                correction: self.config.ocr.correction,
-            };
-            let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
+        {
+            if objc2::MainThreadMarker::new().is_some() {
+                return Some(cfg);
+            }
+            None
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cfg;
+            None
         }
     }
 
