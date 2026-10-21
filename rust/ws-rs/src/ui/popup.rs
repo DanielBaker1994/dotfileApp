@@ -501,6 +501,15 @@ fn pane_resize_key(_config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     None
 }
 
+/// Key code 0 is the A key *and* what a unicode text event reports (IME text,
+/// `do:input:text:`, `ks-input type`), so a chord on it only fires when the
+/// event's character is that key: otherwise typed text carrying Command (a
+/// modifier left down after `Cmd+=`) became Cmd+A → `VimOp::SelectAll`
+/// (`ggVG`), swallowing the character and leaving nvim in Visual-line mode.
+fn char_is(key: KeyInput, ch: char) -> bool {
+    key.chars.map_or(true, |c| c.eq_ignore_ascii_case(&ch))
+}
+
 fn vim_pane_key(key: KeyInput) -> Option<KeyAction> {
     let cmd = key.cmd;
     let ctrl = key.ctrl;
@@ -508,7 +517,7 @@ fn vim_pane_key(key: KeyInput) -> Option<KeyAction> {
         8 if cmd || ctrl => VimOp::Copy,
         9 if cmd || ctrl => VimOp::Paste,
         7 if cmd => VimOp::Cut,
-        0 if cmd => VimOp::SelectAll,
+        0 if cmd && char_is(key, 'a') => VimOp::SelectAll,
         6 if cmd => VimOp::Undo,
         1 if cmd => VimOp::Save,
         3 if cmd => VimOp::Search,
@@ -1058,6 +1067,47 @@ mod tests {
         let mut esc = key(KEY_ESC);
         esc.esc_streak = 1;
         assert_eq!(route_key(&c, esc), KeyAction::Escape(EscapeOutcome::Close));
+    }
+
+    #[test]
+    fn typed_text_is_not_select_all_in_the_vim_pane() {
+        // A unicode text event (IME text / `do:input:text:` / `ks-input type`)
+        // reports key code 0 — the A key — with the typed character in `chars`.
+        // With Command left down from `Cmd+=` (the zoom) this used to be taken
+        // as Cmd+A: `ggVG` in nvim, which ate the character and left
+        // Visual-line mode (APP-BUGS #7).
+        let c = PopupConfig { vim_focus: true, ..Default::default() };
+        let mut typed_g = key(KEY_A);
+        typed_g.cmd = true;
+        typed_g.chars = Some('G');
+        assert_eq!(route_key(&c, typed_g), KeyAction::Pass);
+        let mut typed_o = key(KEY_A);
+        typed_o.cmd = true;
+        typed_o.chars = Some('o');
+        assert_eq!(route_key(&c, typed_o), KeyAction::Pass);
+
+        // The real chord still selects all, with or without a reported
+        // character (a key event with no text at all keeps the old behaviour).
+        let mut cmd_a = key(KEY_A);
+        cmd_a.cmd = true;
+        cmd_a.chars = Some('a');
+        assert_eq!(route_key(&c, cmd_a), KeyAction::Vim(VimOp::SelectAll));
+        let mut bare_a = key(KEY_A);
+        bare_a.cmd = true;
+        assert_eq!(route_key(&c, bare_a), KeyAction::Vim(VimOp::SelectAll));
+        let mut cmd_shift_a = key(KEY_A);
+        cmd_shift_a.cmd = true;
+        cmd_shift_a.shift = true;
+        cmd_shift_a.chars = Some('A');
+        assert_eq!(route_key(&c, cmd_shift_a), KeyAction::Vim(VimOp::SelectAll));
+
+        // Cmd+= / Cmd+- stay the zoom chords in the vim pane.
+        let mut cmd_plus = key(KEY_PLUS);
+        cmd_plus.cmd = true;
+        assert_eq!(route_key(&c, cmd_plus), KeyAction::FontStep(1));
+        let mut cmd_minus = key(KEY_MINUS);
+        cmd_minus.cmd = true;
+        assert_eq!(route_key(&c, cmd_minus), KeyAction::FontStep(-1));
     }
 
     #[test]

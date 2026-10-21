@@ -17,7 +17,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 4 | S2 | Notes sidebar | With ~10+ notes, clicking a sidebar row stopped switching notes (Return read `clickCount` on a key event) | `hammer-2026-10-20/G3-2-bisect.md` | fixed ceb8a53 · verified 2026-10-20 (`FINAL-soak.md` 2e, 85/85) |
 | 5 | S3 | Notes drawer focus | After opening the drawer, Ctrl+J then Ctrl+K: state says `vimFocus:true`, but unicode text events reach neither nvim nor the shell until one real key event arrives; the responder stays the drawer's terminal view | `FINAL-soak.md` S-1 (5/5), `G3.md` G3-1 | open (impact on real typing unconfirmed) |
 | 6 | S3 | Notes sidebar | `.md` files created on disk in the notes folder never appear in the Notes sidebar; Cmd+N and a view round trip don't rescan | `FINAL-soak.md` S-2, `G2.md` | fixed 89dca62: rescan on Notes re-open / note open · unit test |
-| 7 | S3 | Notes / nvim | Cmd+= / Cmd+- (zoom) leaves nvim in Visual-line mode | `RUN-2026-10-20.md` item 5 (3/3) | open |
+| 7 | S3 | Notes / nvim | Cmd+= / Cmd+- (zoom) leaves nvim in Visual-line mode | `RUN-2026-10-20.md` item 5 (3/3) | fixed (uncommitted): a text event's key code 0 is no longer Cmd+A in the vim pane (`ui/popup.rs` `vim_pane_key` + `char_is`) · unit test `typed_text_is_not_select_all_in_the_vim_pane` |
 | 8 | S3 | Prose pop-out | The pop-out never refreshes when the note changes on disk; clicking pop-out again is a no-op | `RUN-2026-10-20.md` item 5 | open |
 | 9 | S3 | Notes | Renaming a note to an existing name silently does nothing (no error shown) | `RUN-2026-10-20.md` item 5 | open |
 | 10 | S3 | Notes | There is no way to delete a note from the app | `RUN-2026-10-20.md` item 5 | by-design? |
