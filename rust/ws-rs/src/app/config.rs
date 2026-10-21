@@ -1620,6 +1620,12 @@ pub fn write_config_text_at(path: &Path, text: &str) -> bool {
         return false;
     }
     if let Some(cur) = read_config_text_at(path) {
+        // Refuse to rewrite a broken file: the codec would reduce it to a
+        // one-section stub, and backing the broken text up would clobber the
+        // last-known-good `.bak`. The broken file stays put for inspection.
+        if validate_config(&cur).iter().any(|i| i.fatal) {
+            return false;
+        }
         if cur != text {
             let backup = PathBuf::from(format!("{}.bak", path.display()));
             let _ = std::fs::write(&backup, &cur);
@@ -2079,6 +2085,56 @@ mod tests {
     fn escape_decision() {
         assert_eq!(handle_escape(false), EscapeAction::ClearQuery);
         assert_eq!(handle_escape(true), EscapeAction::HideRestore);
+    }
+
+    #[test]
+    fn write_refuses_to_stub_a_broken_config() {
+        if !helper_ready() {
+            eprintln!("skipping: no python helper");
+            return;
+        }
+        let path =
+            std::env::temp_dir().join(format!("ws-config-broken-{}.toml", std::process::id()));
+        let bak = std::path::PathBuf::from(format!("{}.bak", path.display()));
+        let _ = std::fs::remove_file(&bak);
+        let good = "[app]\nvim-keys = true\n[notes]\nsidebar-width = 299\n";
+        std::fs::write(&path, good).unwrap();
+
+        // A normal write lands and leaves the previous file as the backup.
+        assert!(write_config_text_at(&path, "[app]\nvim-keys = false\n"));
+        assert!(!std::fs::read_to_string(&bak).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), good);
+
+        // Now the live file is broken (truncated): a setting write must refuse
+        // instead of reducing it to a one-section stub and clobbering the
+        // last-good .bak with the 0-byte file.
+        std::fs::write(&path, "").unwrap();
+        assert!(!write_config_text_at(
+            &path,
+            "\n[notes]\nsidebar-width = 333\n"
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            good,
+            "last-good backup preserved"
+        );
+
+        // The reported path: save_config_values against the broken file.
+        assert!(!save_config_values_at(
+            &path,
+            "notes",
+            &[("sidebar-width".to_string(), Some("333".to_string()))]
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            good,
+            "last-good backup preserved"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&bak);
     }
 
     #[test]
