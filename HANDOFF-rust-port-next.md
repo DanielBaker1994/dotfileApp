@@ -114,10 +114,9 @@ two sessions; this section wins.
      isn't ported.
 4. Theme menu extras: live preview on hover, Custom Color…, Transparency ▸,
    per-view card theme menu. Jira list text zoom (toasts).
-5. Small: `state.paths` (`selection`, `rowCount`) is stale between pushes. The
-   files listing doesn't watch the disk. Compare `Return` begin-edit, Cmd+C
-   copy-rows and Cmd+F/G find aren't routed; the text-pane menu toasts for
-   them.
+5. Small: the files listing doesn't watch the disk. Compare `Return`
+   begin-edit, Cmd+C copy-rows and Cmd+F/G find aren't routed; the text-pane
+   menu toasts for them.
 6. Older items further down this file: hide-on-focus-loss bridge, nvim `:q`
    relaunch, AeroSpace re-show (ask the owner), screenshot/compare gaps.
 7. **Terminal / nvim right-click menus and the SwiftTerm replacement are

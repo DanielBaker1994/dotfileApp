@@ -1324,6 +1324,21 @@ impl SwitcherController {
         self.inner.lock().unwrap().paths_state = state;
     }
 
+    /// Publish the shelf's live document: `state.paths` plus the
+    /// `state.tools.paths` mirror (`testState` + `wid`). The daemon UI calls
+    /// this on every drain (and after each `do:paths:*`) so a key-driven close
+    /// — Esc / Return / click-off, all through `PathsWindow::hide_window` —
+    /// can never leave the doc reading `shown: true`.
+    pub fn set_paths_docs(&self, doc: Value, wid: i64) {
+        let mut tool_doc = doc.clone();
+        if let Some(o) = tool_doc.as_object_mut() {
+            o.insert("wid".into(), json!(wid));
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.paths_state = doc;
+        inner.tools.insert("paths".to_string(), tool_doc);
+    }
+
     /// `state.tools.<name>` — a tool panel's `testState` + `wid`/`level`,
     /// pushed by the daemon UI on every drain (`subWindows` mirror).
     pub fn set_tool_state(&self, name: &str, state: Value) {
@@ -5491,15 +5506,10 @@ mod daemon_ui {
                 },
                 PathsCmd::Select(n) => win.test_select(n),
             }
-            let doc = win.test_state();
-            let mut tool_doc = doc.clone();
-            if let Some(o) = tool_doc.as_object_mut() {
-                o.insert("wid".into(), json!(win.window_number()));
-            }
+            let (doc, wid) = (win.test_state(), win.window_number());
             st.paths = Some(win);
             drop(state);
-            controller.set_paths_state(doc);
-            controller.set_tool_state("paths", tool_doc);
+            controller.set_paths_docs(doc, wid);
             controller.set_window_count(visible_window_count(mtm));
         }
 
@@ -5686,6 +5696,7 @@ mod daemon_ui {
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
             let mut docs: Vec<(String, serde_json::Value)> = Vec::new();
+            let mut paths_doc: Option<(serde_json::Value, i64)> = None;
             {
                 let mut state = self.ivars().state.borrow_mut();
                 if let Some(st) = state.as_mut() {
@@ -5718,10 +5729,20 @@ mod daemon_ui {
                         panel.poll();
                         docs.push((name.clone(), panel.test_state()));
                     }
+                    // The shelf is its own window, not a `ToolPanel`: mirror its
+                    // live document too, so a key-driven close (Esc / Return /
+                    // click-off → `PathsWindow::hide_window`) is reflected in
+                    // `state.paths` on the next drain instead of staying stale.
+                    if let Some(p) = st.paths.as_ref() {
+                        paths_doc = Some((p.test_state(), p.window_number()));
+                    }
                 }
             }
             for (name, doc) in docs {
                 self.ivars().controller.set_tool_state(&name, doc);
+            }
+            if let Some((doc, wid)) = paths_doc {
+                self.ivars().controller.set_paths_docs(doc, wid);
             }
             if let Some(st) = self.ivars().state.borrow_mut().as_mut() {
                 if st.terminal_opened_at.is_some_and(|t| t.elapsed().as_secs_f64() >= 0.25) {
@@ -14519,6 +14540,28 @@ mod tests {
                 UiCommand::Paths(PathsCmd::Hide),
             ]
         );
+    }
+
+    #[test]
+    fn paths_docs_republish_after_a_key_driven_close() {
+        // N2: Esc / Return / click-off close the shelf through
+        // `PathsWindow::hide_window` (not `do:paths:hide`). The daemon UI
+        // republishes `state.paths` + `state.tools.paths` every drain, so the
+        // live (hidden) doc must land in one publish.
+        use crate::views::paths::{PathsWindow, ReturnAction};
+        let c = controller();
+        let mut w = PathsWindow::new(ReturnAction::File);
+        w.show();
+        c.set_paths_docs(w.test_state(), 4316);
+        assert_eq!(c.state_json()["paths"]["shown"], json!(true));
+        assert_eq!(c.state_json()["tools"]["paths"]["wid"], json!(4316));
+        w.hide_window();
+        c.set_paths_docs(w.test_state(), 4316);
+        let s = c.state_json();
+        assert_eq!(s["paths"]["shown"], json!(false));
+        assert_eq!(s["paths"]["key"], json!(false));
+        assert_eq!(s["tools"]["paths"]["shown"], json!(false));
+        assert_eq!(s["tools"]["paths"]["wid"], json!(4316));
     }
 
     #[test]
