@@ -3521,6 +3521,10 @@ mod macos {
         text.setEditable(true);
         text.setSelectable(true);
         text.setRichText(true);
+        // Rule 1: Cmd+Z undoes typing in the notes buffer. The key router
+        // forwards `undo:` to this view (`perform_edit_op`), so the editor
+        // needs AppKit's undo stack on (`CompareEditor` does the same).
+        text.setAllowsUndo(true);
         text.setDrawsBackground(true);
         text.setBackgroundColor(&colors.base().to_nscolor());
         text.setTextColor(Some(&colors.text.to_nscolor()));
