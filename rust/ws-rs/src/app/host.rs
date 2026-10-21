@@ -1702,35 +1702,97 @@ impl SwitcherController {
 
     /// `reloadConfig()`: re-read `[app]`, the esc-close map and the section
     /// count; return the `reload` reply (`ok` / `commands` / `usingBackup` /
-    /// `issues`).
+    /// `issues` / `parked`).
+    ///
+    /// A config with a fatal issue (or one that cannot be read / is not UTF-8)
+    /// is **rejected**: nothing is applied (no half-applied syntax error), the
+    /// file is parked as `commands.toml.broken-<epoch>` and the reply carries
+    /// `ok: false`; the last-known-good settings stay in force.
     pub fn reload_config(&self) -> Value {
-        let mut inner = self.inner.lock().unwrap();
-        let path = inner.settings.commands_conf_path();
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let mut shot_cfg: Option<ScreenshotConfig> = None;
-        if !text.is_empty() {
-            config::apply_app_config_from_settings_text(&mut inner.settings, &text);
-            inner.esc_app = inner.settings.esc_close;
-            inner.esc_sections = parse_esc_close(&text);
-            let sections = parse_sections(&text);
-            shot_cfg =
-                Some(ScreenshotConfig::from_entries(&sections.get("screenshot").cloned().unwrap_or_default()));
-        }
-        let commands = count_commands(&text);
+        let path = self.inner.lock().unwrap().settings.commands_conf_path();
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.logs.push(format!("config reload failed: {}: {e}", path.display()));
+                return json!({
+                    "ok": false,
+                    "commands": 0,
+                    "usingBackup": inner.using_backup,
+                    "issues": [{
+                        "line": 0,
+                        "message": format!("cannot read {}: {e}", path.display()),
+                        "fatal": true,
+                    }],
+                });
+            }
+        };
+        let text = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let parked = config::park_broken_config(&path, e.as_bytes());
+                let mut inner = self.inner.lock().unwrap();
+                inner.logs.push(format!(
+                    "config rejected: {} is not valid UTF-8",
+                    path.display()
+                ));
+                return json!({
+                    "ok": false,
+                    "commands": 0,
+                    "usingBackup": inner.using_backup,
+                    "issues": [{
+                        "line": 0,
+                        "message": format!("{}: not valid UTF-8", path.display()),
+                        "fatal": true,
+                    }],
+                    "parked": parked.map(|p| p.display().to_string()),
+                });
+            }
+        };
         let issues: Vec<Value> = config::validate_config(&text)
             .into_iter()
             .map(|i| {
                 json!({ "line": i.line, "message": i.message, "fatal": i.fatal })
             })
             .collect();
+        let commands = count_commands(&text);
+        let mut inner = self.inner.lock().unwrap();
+        if issues.iter().any(|i| i["fatal"] == json!(true)) {
+            let parked = config::park_broken_config(&path, text.as_bytes());
+            inner.logs.push(format!(
+                "config rejected ({commands} commands); nothing applied, parked as {}",
+                parked
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(failed)".to_string())
+            ));
+            return json!({
+                "ok": false,
+                "commands": commands,
+                "usingBackup": inner.using_backup,
+                "issues": issues,
+                "parked": parked.map(|p| p.display().to_string()),
+            });
+        }
+        // Parse into fresh defaults so a key deleted from the file does not
+        // keep its previous (stale) value — `reload` matches a restart.
+        let mut settings = AppSettings::default();
+        config::apply_app_config_from_settings_text(&mut settings, &text);
+        inner.settings = settings;
+        inner.esc_app = inner.settings.esc_close;
+        inner.esc_sections = parse_esc_close(&text);
+        let sections = parse_sections(&text);
+        let shot_cfg = ScreenshotConfig::from_entries(
+            &sections.get("screenshot").cloned().unwrap_or_default(),
+        );
         let using_backup = inner.using_backup;
         inner.logs.push(format!("config reloaded ({commands} commands)"));
         // Drop the `inner` borrow before locking the screenshot controller
         // (startup builds it without holding `inner`; inner → controller is the
         // fallback order).
         drop(inner);
-        if let (Some(cfg), Some(controller)) = (shot_cfg, self.screenshot_controller.clone()) {
-            controller.lock().unwrap().set_config(cfg);
+        if let Some(controller) = self.screenshot_controller.clone() {
+            controller.lock().unwrap().set_config(shot_cfg);
         }
         json!({
             "ok": !using_backup,
@@ -14591,6 +14653,93 @@ mod tests {
         assert_eq!(count_sections(&text), 2);
 
         let _ = c;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L2: an invalid config is rejected (`ok: false`), parked as
+    /// `commands.toml.broken-<epoch>` and **not** partly applied; a key deleted
+    /// from a valid config goes back to its default instead of keeping a stale
+    /// value.
+    #[test]
+    fn reload_rejects_and_parks_a_fatal_config() {
+        if !helper_ready() {
+            eprintln!("skipping: no python helper");
+            return;
+        }
+        let _lock = lock_conf_env();
+        let dir = std::env::temp_dir().join(format!("ws-host-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("commands.toml");
+        let old_conf = std::env::var_os("WS_COMMANDS_CONF");
+        std::env::set_var("WS_COMMANDS_CONF", &conf);
+
+        let c = controller();
+        // A valid file applies its `[app]` values.
+        std::fs::write(
+            &conf,
+            "[app]\nheader-style = aurora\nesc-close = 2\n\n[notes]\nesc-close = 1\n",
+        )
+        .unwrap();
+        let ok = c.reload_config();
+        assert_eq!(ok["ok"], json!(true), "{ok}");
+        assert_eq!(c.state_json()["headerStyle"], json!("aurora"));
+
+        // A fatal syntax error (an unclosed section header): nothing may be
+        // applied, the reply must say so, and the file gets parked.
+        let broken = "[app\nheader-style = quiet\n";
+        std::fs::write(&conf, broken).unwrap();
+        let r = c.reload_config();
+        assert_eq!(r["ok"], json!(false), "a fatal config must be rejected: {r}");
+        assert!(
+            r["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["fatal"] == json!(true)),
+            "{r}"
+        );
+        assert_eq!(
+            c.state_json()["headerStyle"],
+            json!("aurora"),
+            "a rejected config must not be partly applied"
+        );
+        let parked: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.starts_with("commands.toml.broken-"))
+            })
+            .collect();
+        assert_eq!(parked.len(), 1, "parked files: {parked:?}");
+        assert_eq!(std::fs::read_to_string(&parked[0]).unwrap(), broken);
+        assert_eq!(
+            std::fs::read_to_string(&conf).unwrap(),
+            broken,
+            "the live file is left in place for inspection"
+        );
+
+        // A valid file that drops a key: the deleted key falls back to its
+        // default instead of keeping the stale value (restart parity).
+        std::fs::write(&conf, "[app]\nesc-close = 2\n\n[notes]\nesc-close = 1\n").unwrap();
+        let ok = c.reload_config();
+        assert_eq!(ok["ok"], json!(true), "{ok}");
+        assert_eq!(c.state_json()["headerStyle"], json!("flat"));
+
+        // Invalid UTF-8 can be neither decoded nor validated: reject + park the
+        // raw bytes instead of folding the read error into an empty config.
+        std::fs::write(&conf, b"[app]\nesc-close = 3\n\xff\n").unwrap();
+        let r = c.reload_config();
+        assert_eq!(r["ok"], json!(false), "{r}");
+        assert!(r["parked"].is_string(), "{r}");
+
+        match old_conf {
+            Some(v) => std::env::set_var("WS_COMMANDS_CONF", v),
+            None => std::env::remove_var("WS_COMMANDS_CONF"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

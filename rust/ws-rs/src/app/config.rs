@@ -1490,7 +1490,15 @@ fn columns_json_problem(value: &str) -> Option<String> {
 
 
 pub fn validate_config(text: &str) -> Vec<ConfigIssue> {
-    validate_config_lines(&config_text::config_decoded_lines(text))
+    let lines = config_text::config_decoded_lines(text);
+    // A helper failure yields no decoded lines (a successful decode returns one
+    // record per source line, blanks and comments included). Do not report a
+    // good file as "no `key = value` entries": `reload` rejects + parks on
+    // fatal issues, so a flaky helper must not disable the user's config.
+    if lines.is_empty() && !text.is_empty() {
+        return Vec::new();
+    }
+    validate_config_lines(&lines)
 }
 
 /// The decoder is injected so validation is testable without the Python helper.
@@ -1636,6 +1644,19 @@ pub fn write_config_text_at(path: &Path, text: &str) -> bool {
 
 pub fn write_config_text(text: &str) -> bool {
     write_config_text_at(&commands_conf_path(), text)
+}
+
+/// Park a config file whose text failed validation (or was not valid UTF-8)
+/// beside itself as `<name>.broken-<epoch>`. The live file is left in place so
+/// it can still be inspected/fixed; the caller keeps the last-known-good
+/// settings in force. Returns the parked path.
+pub fn park_broken_config(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let parked = PathBuf::from(format!("{}.broken-{epoch}", path.display()));
+    std::fs::write(&parked, bytes).ok().map(|_| parked)
 }
 
 /// `saveConfigValues(section:_:)` against an explicit file (testable).
