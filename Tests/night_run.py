@@ -369,26 +369,32 @@ def promote_flows() -> list[str]:
 
 # ---------------------------------------------------------------- phase: fix
 
-KNOWN_BUGS = [
-    {"id": "#16", "flow": "compare-next-diff", "title": "Right after a text compare opens, Ctrl+N / Ctrl+P "
-     "(next / previous difference) do nothing: focus is on the sidebar (WSSidebarView), so host.rs "
-     "route_key_event never reaches CompareModel::handle_key's 45/35 arms (compare.rs ~4105-4125), or the "
-     "sidebar consumes them. Real HID keys behave the same."},
-    {"id": "#1", "flow": "files-recursive-search", "title": "Typing **deep** in the Files filter "
-     "(recursive search, commands.toml:477) lists no rows although files/notes/deep.txt exists: "
-     "QueryMode::Recursive (views/files.rs) has no working listing."},
-    {"id": "#17", "flow": None, "title": "The first do: verb after a GUI launch replies at once but keeps the "
-     "socket connection open ~25 s (later verbs close immediately). Find what holds the Reply (socket.rs "
-     "Reply / host.rs raw_deferred / a first-launch path) and close the connection right after the reply. "
-     "Add a Rust unit test if feasible."},
-    {"id": "#6", "flow": None, "title": ".md files created on disk in the notes folder never appear in the "
-     "Notes sidebar; Cmd+N and a view round trip don't rescan. The owner wants them to appear (at least "
-     "after re-opening the Notes view). Add a Rust unit test for the rescan."},
-]
+def open_bugs(max_leads: int = 4, max_total: int = 8) -> list[dict]:
+    """What the fix phase works on, read from APP-BUGS.md (nothing hard-coded):
+    every ledger row whose status starts with "open", then the S2 (then S3) bullets
+    under "## Leads" (unverified: the worker must reproduce them first)."""
+    text = open(os.path.join(ROOT, "APP-BUGS.md"), encoding="utf-8").read()
+    bugs = []
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) == 6 and cells[0].isdigit() and cells[5].lower().startswith("open"):
+            flow = re.search(r"flow `([\w-]+)`", cells[4])
+            bugs.append({"id": f"#{cells[0]}", "sev": cells[1], "flow": flow.group(1) if flow else None,
+                         "title": f"{cells[2]}: {cells[3]} (evidence: {cells[4]})", "lead": False})
+    leads_part = text.split("## Leads", 1)[1] if "## Leads" in text else ""
+    leads = [l[2:].strip() for l in leads_part.splitlines() if l.startswith("- S")]
+    leads.sort(key=lambda l: l[:2])  # S2 before S3
+    for i, l in enumerate(leads[:max_leads]):
+        bugs.append({"id": f"L{i + 1}", "sev": l[:2], "flow": None, "lead": True,
+                     "title": l + " (repro: .build/night/*/find/h-*/findings.jsonl)"})
+    # Most severe first (confirmed bugs before leads at the same severity); one night fits ~8.
+    bugs.sort(key=lambda b: (b["sev"], b.get("lead", False)))
+    return bugs[:max_total]
+
 
 FIX_BRIEF = """TASK: fix one bug in the kitchen-sink app (Rust, rust/ws-rs). Smallest correct change.
 Bug {bid}: {title}
-{flow_line}
+{flow_line}{lead_line}
 Repo {root}. Read AGENTS.md (build/test, gotchas) and rule.md first.
 GATES you must run and pass before finishing (exact commands):
   cd {root}/rust && CARGO_TARGET_DIR={root}/.build/rust-target cargo test --release -p ws-rs
@@ -407,7 +413,7 @@ def full_vm_failures() -> set:
 
 
 def phase_fix(new_bugs: list[dict]) -> list[str]:
-    bugs = KNOWN_BUGS + [{"id": f"N{i + 1}", "flow": b["flow"], "title": f"{b.get('bug_title')} — evidence: "
+    bugs = open_bugs() + [{"id": f"N{i + 1}", "flow": b["flow"], "lead": False, "title": f"{b.get('bug_title')} — evidence: "
                           f"{b.get('evidence')}"} for i, b in enumerate(new_bugs[:3])]
     log(f"phase fix: {len(bugs)} bugs, serial")
     base_fail = full_vm_failures()
@@ -419,7 +425,9 @@ def phase_fix(new_bugs: list[dict]) -> list[str]:
         flow_line = f"Failing flow: {b['flow']} (Tests/app_flows.json)." if b["flow"] else ""
         vm_gate = (f"  bin/ks-vm test --ids {b['flow']}      # must PASS (runs in the VM, nothing on screen)"
                    if b["flow"] else "")
-        worker(f"fix-{b['id'].strip('#')}", FIX_BRIEF.format(bid=b["id"], title=b["title"], flow_line=flow_line,
+        worker(f"fix-{b['id'].strip('#')}", FIX_BRIEF.format(bid=b["id"], title=b["title"], flow_line=flow_line, lead_line=(
+            "\nThis is an UNVERIFIED lead. First reproduce it with a unit test (or a flow run in the VM) that "
+            "fails. If it does not reproduce, change nothing and report 'not reproduced'.\n" if b.get("lead") else ""),
                                                                    root=ROOT, vm_gate=vm_gate), 60)
         if not git_dirty():
             log(f"  {b['id']}: no change")
