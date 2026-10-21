@@ -1,0 +1,5 @@
+{"version":1,"rows":[
+ {"source":"herdr","kind":"workspace","id":"wB","title":"kitchen-sink","subtitle":"5 tabs · working","status":"working","cwd":"~/.config/kitchen-sink","recent":0,"preview":null},
+ {"source":"herdr","kind":"workspace","id":"wA","title":"dotfiles","subtitle":"2 tabs · idle","status":"idle","cwd":"~/.dotfiles","recent":1,"preview":null},
+ {"source":"herdr","kind":"workspace","id":"wC","title":"scratch","subtitle":"1 tab","status":"unknown","cwd":"/tmp/scratch","recent":2,"preview":null}
+]}

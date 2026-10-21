@@ -5,6 +5,7 @@
 //! tested; [`ViewSwitcherPanel::build`] constructs the floating `PopupPanel`
 //! with its search field and row buttons on macOS.
 
+use crate::engines::links::{self, Entry, LinkGroup, LinkRow, LinkStatus};
 use crate::engines::list_filter::FuzzyIndex;
 use crate::engines::switcher_status::SwitcherStatus;
 use crate::ui::chrome::Rect;
@@ -177,6 +178,25 @@ pub struct SwitchCallbacks {
     pub on_command: Option<Box<dyn FnMut(String)>>,
     /// Called (alongside hiding) when Esc cancels the panel.
     pub on_close: Option<Box<dyn FnMut()>>,
+    /// A click on the link group (its header, or a row to jump to).
+    pub on_link: Option<Box<dyn FnMut(LinkPick)>>,
+    /// The search text changed (the host re-reads the group's state).
+    pub on_query: Option<Box<dyn FnMut()>>,
+}
+
+/// What the link group asks the host to do (PLAN-link-bank §3/§4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum LinkPick {
+    /// Jump to the other app's place (herdr: `herdr-pick go-id <id>`).
+    Go(LinkRow),
+    /// The header of an offline provider: start it.
+    Launch,
+    /// The header of an unavailable provider: fetch again.
+    Retry,
+    /// The header opened / closed in place (nothing for the host to run).
+    Toggled,
+    /// The header was clicked (the host toggles it through the model).
+    HeaderClick,
 }
 
 #[derive(Default)]
@@ -188,6 +208,13 @@ pub struct ViewSwitcherPanel {
     /// Palette commands for `/` command mode as `(name, title)` pairs.
     pub commands: Vec<(String, String)>,
     pub callbacks: std::rc::Rc<std::cell::RefCell<SwitchCallbacks>>,
+    /// The other app's places, collapsed under the views (herdr workspaces).
+    pub links: LinkGroup,
+    /// The cursor when it is on the group (`Header` / `Link(i)`); `None` =
+    /// on the local row at `selection`.
+    pub link_cursor: Option<Entry>,
+    /// The query the cursor was last placed for (a change resets it).
+    seen_query: String,
     #[cfg(target_os = "macos")]
     ui: Option<std::rc::Rc<switch_ui::SwitchUi>>,
 }
@@ -233,6 +260,10 @@ impl ViewSwitcherPanel {
             .iter()
             .position(|r| preselect == Some(r.nav_id))
             .unwrap_or(0);
+        // Every fresh open starts collapsed (the last rows stay, stale).
+        self.links.reopen();
+        self.link_cursor = None;
+        self.seen_query.clear();
         self.shown = true;
     }
 
@@ -268,28 +299,171 @@ impl ViewSwitcherPanel {
     /// Up/Down (`ViewSwitcher.key`): move the selection inside the filtered
     /// list, wrapping.
     pub fn move_selection(&mut self, delta: i64) {
-        let idx = self.filter(&self.live_query());
-        if idx.is_empty() {
+        self.reconcile_query();
+        let list = self.entries();
+        if list.is_empty() {
             return;
         }
-        match idx.iter().position(|i| *i == self.selection) {
-            Some(pos) => {
-                let next = (pos as i64 + delta).rem_euclid(idx.len() as i64) as usize;
-                self.selection = idx[next];
-            }
-            None => self.selection = idx[0],
-        }
+        let pos = self.cursor_pos(&list);
+        let next = links::step(&list, pos, delta);
+        self.set_cursor(list[next]);
         self.sync_ui();
     }
 
-    /// Return: the selected row's nav id (the filtered list's selection index).
+    /// Return: the selected row's nav id (the filtered list's selection
+    /// index); `None` while the cursor is on the link group.
     pub fn accept(&self) -> Option<i64> {
+        if self.link_cursor.is_some() && !self.command_mode() {
+            return None;
+        }
         let idx = self.filter(&self.live_query());
         let i = idx
             .iter()
             .position(|j| *j == self.selection)
             .unwrap_or(0);
         idx.get(i).map(|j| self.rows[*j].nav_id)
+    }
+
+    /// The full list in view mode: the matching views, then the link
+    /// group's header and visible rows (`/` command mode has no group).
+    pub fn entries(&self) -> Vec<Entry> {
+        let q = self.live_query();
+        if is_command_query(&q) {
+            return Vec::new();
+        }
+        links::entries(&self.filter(&q), &self.links, &q)
+    }
+
+    /// The cursor's position in `list`.
+    fn cursor_pos(&self, list: &[Entry]) -> usize {
+        let want = self.link_cursor.unwrap_or(Entry::Local(self.selection));
+        list.iter().position(|e| *e == want).unwrap_or(0)
+    }
+
+    fn set_cursor(&mut self, e: Entry) {
+        match e {
+            Entry::Local(i) => {
+                self.selection = i;
+                self.link_cursor = None;
+            }
+            other => self.link_cursor = Some(other),
+        }
+    }
+
+    /// Catch the model up with the search field (after typing).
+    pub fn sync_query(&mut self) {
+        self.reconcile_query();
+    }
+
+    /// Wire the link group's click / typing callbacks.
+    pub fn set_link_callbacks(&mut self, on_link: Box<dyn FnMut(LinkPick)>, on_query: Box<dyn FnMut()>) {
+        let mut cb = self.callbacks.borrow_mut();
+        cb.on_link = Some(on_link);
+        cb.on_query = Some(on_query);
+    }
+
+    /// Typing moved on: clearing the query re-collapses the group, and the
+    /// cursor goes to the top like the drawn list (`SwitchUi::refilter`).
+    fn reconcile_query(&mut self) {
+        let q = self.live_query();
+        if q == self.seen_query {
+            return;
+        }
+        if q.trim().is_empty() && !self.seen_query.trim().is_empty() {
+            self.links.expanded = false;
+        }
+        self.seen_query = q;
+        self.link_cursor = None;
+        if let Some(first) = self.entries().first().copied() {
+            self.set_cursor(first);
+        }
+    }
+
+    /// Return while the cursor is on the group: the header toggles (or
+    /// launches / retries a dead provider), a row jumps. `None` = the cursor
+    /// is on a local row.
+    pub fn link_action(&mut self) -> Option<LinkPick> {
+        self.reconcile_query();
+        if self.command_mode() {
+            return None;
+        }
+        match self.link_cursor? {
+            Entry::Header => Some(self.header_action()),
+            Entry::Link(i) => self.links.rows.get(i).cloned().map(LinkPick::Go),
+            Entry::Local(_) => None,
+        }
+    }
+
+    fn header_action(&mut self) -> LinkPick {
+        match self.links.status {
+            LinkStatus::Offline => LinkPick::Launch,
+            LinkStatus::Unavailable => {
+                self.links.status = LinkStatus::Loading;
+                self.sync_ui();
+                LinkPick::Retry
+            }
+            _ => {
+                self.links.expanded = !self.links.expanded;
+                self.link_cursor = Some(Entry::Header);
+                self.sync_ui();
+                LinkPick::Toggled
+            }
+        }
+    }
+
+    /// A click on the header: put the cursor there and act like Return.
+    pub fn header_click(&mut self) -> LinkPick {
+        self.reconcile_query();
+        self.link_cursor = Some(Entry::Header);
+        self.header_action()
+    }
+
+    /// → / l open the group from its header; ← / h close it from the header
+    /// or one of its rows (the cursor lands on the header). False = not on
+    /// the group (the key goes to the search field).
+    pub fn group_open(&mut self, open: bool) -> bool {
+        self.reconcile_query();
+        let ok = match self.link_cursor {
+            Some(Entry::Header) => true,
+            Some(Entry::Link(_)) => !open,
+            _ => false,
+        };
+        if ok && !self.command_mode() {
+            self.links.expanded = open;
+            self.link_cursor = Some(Entry::Header);
+            self.sync_ui();
+        }
+        ok
+    }
+
+    /// Ctrl+K: jump to the header and open the group.
+    pub fn links_jump(&mut self) -> bool {
+        self.reconcile_query();
+        if self.command_mode() || !self.links.header_shown(&self.live_query()) {
+            return false;
+        }
+        self.links.expanded = true;
+        self.link_cursor = Some(Entry::Header);
+        self.sync_ui();
+        true
+    }
+
+    /// The provider answered (in the background): new rows / status, the
+    /// header texts and the `[links] enabled` gate.
+    pub fn set_links(&mut self, result: Result<Vec<LinkRow>, links::LinkError>, texts: links::LinkTexts, enabled: bool) {
+        self.links.apply(result);
+        self.links.texts = texts;
+        self.links.enabled = enabled;
+        // A row the cursor sat on may be gone: fall back to the header.
+        if let Some(Entry::Link(i)) = self.link_cursor {
+            if i >= self.links.rows.len() {
+                self.link_cursor = Some(Entry::Header);
+            }
+        }
+        if !self.entries().contains(&self.link_cursor.unwrap_or(Entry::Local(self.selection))) {
+            self.link_cursor = None;
+        }
+        self.sync_ui();
     }
 
     /// Hide the panel: `orderOut` the window (if built) and clear `shown`.
@@ -389,11 +563,20 @@ impl ViewSwitcherPanel {
     /// (`shown` / `selection` / `rows` of `"Name|location"` strings) and adding
     /// the live `query`.
     pub fn test_state(&self) -> Value {
+        let q = self.live_query();
+        let cursor = match self.link_cursor {
+            Some(Entry::Header) => "header".to_string(),
+            Some(Entry::Link(i)) => format!("link:{}", self.links.rows.get(i).map(|r| r.id.as_str()).unwrap_or("")),
+            _ => "local".to_string(),
+        };
+        let mut group = self.links.test_state(&q);
+        group["cursor"] = json!(cursor);
         json!({
             "shown": self.shown,
             "selection": self.selection,
             "rows": self.display_rows(),
-            "query": self.live_query(),
+            "query": q,
+            "linkGroup": group,
         })
     }
 
@@ -460,9 +643,20 @@ mod switch_ui {
     struct DrawModel {
         rows: Vec<SwitchRow>,
         commands: Vec<(String, String)>,
-        /// Indices into `rows` (view mode) or `commands` (`/` mode).
+        /// Indices into `commands` (`/` mode).
         visible: Vec<usize>,
+        /// View mode: the views, then the link group's header + rows.
+        entries: Vec<Entry>,
         command_mode: bool,
+        links: LinkGroup,
+        /// The query `entries` was built for (clearing it re-collapses).
+        seen: String,
+    }
+
+    impl DrawModel {
+        fn len(&self) -> usize {
+            if self.command_mode { self.visible.len() } else { self.entries.len() }
+        }
     }
 
     pub struct SwitchUi {
@@ -536,6 +730,11 @@ mod switch_ui {
                 Box::new(move |q: String| {
                     if let Some(ui) = weak.upgrade() {
                         ui.refilter(&q);
+                        if let Ok(mut cb) = ui.callbacks.try_borrow_mut() {
+                            if let Some(f) = cb.on_query.as_mut() {
+                                f();
+                            }
+                        }
                     }
                 }),
                 Box::new(move |cmd| {
@@ -574,19 +773,19 @@ mod switch_ui {
         pub fn sync(&self, p: &ViewSwitcherPanel) {
             let q = self.query();
             let command_mode = is_command_query(&q);
-            let visible = if command_mode { filter_commands(&p.commands, &q) } else { p.filter(&q) };
-            let sel = if command_mode {
-                0
-            } else {
-                visible.iter().position(|i| *i == p.selection).unwrap_or(0)
-            };
-            let n = visible.len();
+            let visible = if command_mode { filter_commands(&p.commands, &q) } else { Vec::new() };
+            let entries = p.entries();
+            let sel = if command_mode { 0 } else { p.cursor_pos(&entries) };
             *self.model.borrow_mut() = DrawModel {
                 rows: p.rows.clone(),
                 commands: p.commands.clone(),
                 visible,
+                entries,
                 command_mode,
+                links: p.links.clone(),
+                seen: q,
             };
+            let n = self.model.borrow().len();
             self.list.set_rows(n, sel);
             self.resize(n);
         }
@@ -596,13 +795,17 @@ mod switch_ui {
             let n = {
                 let mut m = self.model.borrow_mut();
                 m.command_mode = is_command_query(q);
-                m.visible = if m.command_mode {
-                    filter_commands(&m.commands, q)
+                if m.command_mode {
+                    m.visible = filter_commands(&m.commands, q);
                 } else {
+                    if q.trim().is_empty() && !m.seen.trim().is_empty() {
+                        m.links.expanded = false;
+                    }
                     let tmp = ViewSwitcherPanel { rows: m.rows.clone(), ..ViewSwitcherPanel::new() };
-                    tmp.filter(q)
-                };
-                m.visible.len()
+                    m.entries = links::entries(&tmp.filter(q), &m.links, q);
+                }
+                m.seen = q.to_string();
+                m.len()
             };
             self.list.set_rows(n, 0);
             self.resize(n);
@@ -612,9 +815,23 @@ mod switch_ui {
         /// padding (no icon / location / "here" mark).
         fn fit_width(&self) -> f64 {
             let font = style::system_font(13.0, Weight::Medium);
+            let small = style::system_font(12.0, Weight::Regular);
             let m = self.model.borrow();
             let longest = m.rows.iter().map(|r| style::text_size(&r.name, &font).0).fold(0.0, f64::max);
-            (longest.ceil() + 64.0).max(150.0)
+            // The link group widens the panel to its header / rows, capped.
+            let mut group: f64 = 0.0;
+            if m.entries.contains(&Entry::Header) {
+                group = style::text_size(&format!("▾ {}", m.links.header_text()), &font).0;
+            }
+            for e in &m.entries {
+                if let Entry::Link(i) = e {
+                    if let Some(r) = m.links.rows.get(*i) {
+                        let w = style::text_size(&r.title, &font).0 + 14.0 + style::text_size(&r.subtitle, &small).0 + 16.0;
+                        group = group.max(w);
+                    }
+                }
+            }
+            (longest.max(group).ceil() + 64.0).clamp(150.0, PANEL_WIDTH)
         }
 
         fn resize(&self, n: usize) {
@@ -634,18 +851,36 @@ mod switch_ui {
 
         /// The row at visible position `pos` was clicked / accepted.
         fn pick_visible(&self, pos: usize) {
-            let (command, nav) = {
+            let (command, nav, link) = {
                 let m = self.model.borrow();
-                let Some(&i) = m.visible.get(pos) else { return };
                 if m.command_mode {
-                    (m.commands.get(i).map(|c| c.0.clone()), None)
+                    let Some(&i) = m.visible.get(pos) else { return };
+                    (m.commands.get(i).map(|c| c.0.clone()), None, None)
                 } else {
-                    (None, m.rows.get(i).map(|r| r.nav_id))
+                    match m.entries.get(pos) {
+                        Some(Entry::Local(i)) => (None, m.rows.get(*i).map(|r| r.nav_id), None),
+                        Some(Entry::Header) => (None, None, Some(LinkPick::HeaderClick)),
+                        Some(Entry::Link(j)) => (None, None, m.links.rows.get(*j).cloned().map(LinkPick::Go)),
+                        None => return,
+                    }
                 }
             };
+            // A header click opens / closes the group in place.
+            if link == Some(LinkPick::HeaderClick) {
+                if let Ok(mut cb) = self.callbacks.try_borrow_mut() {
+                    if let Some(f) = cb.on_link.as_mut() {
+                        f(LinkPick::HeaderClick);
+                    }
+                }
+                return;
+            }
             self.panel.orderOut(None);
             let mut cb = self.callbacks.borrow_mut();
-            if let Some(name) = command {
+            if let Some(pick) = link {
+                if let Some(f) = cb.on_link.as_mut() {
+                    f(pick);
+                }
+            } else if let Some(name) = command {
                 if let Some(f) = cb.on_command.as_mut() {
                     f(name);
                 }
@@ -664,7 +899,24 @@ mod switch_ui {
             use crate::ui::chrome::Rect;
             let c = &self.colors;
             let m = self.model.borrow();
-            let Some(&i) = m.visible.get(pos) else { return };
+            let i = if m.command_mode {
+                let Some(&i) = m.visible.get(pos) else { return };
+                i
+            } else {
+                match m.entries.get(pos) {
+                    Some(Entry::Local(i)) => *i,
+                    Some(Entry::Header) => {
+                        drop(m);
+                        return self.draw_header(rect, selected, hovered);
+                    }
+                    Some(Entry::Link(j)) => {
+                        let j = *j;
+                        drop(m);
+                        return self.draw_link(rect, j, selected, hovered);
+                    }
+                    None => return,
+                }
+            };
             let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
             // Mouse feedback parity with the files/jira lists.
             style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
@@ -688,6 +940,54 @@ mod switch_ui {
                 &style::system_font(13.0, Weight::Medium),
                 c.text,
             );
+        }
+
+        /// `▸ Terminal spaces · 6` — the collapsed group's header, dim; a
+        /// hairline above it separates it from the views.
+        fn draw_header(&self, rect: crate::ui::chrome::Rect, selected: bool, hovered: bool) {
+            use crate::ui::chrome::Rect;
+            let c = &self.colors;
+            let m = self.model.borrow();
+            let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
+            style::fill_rect(Rect::new(inner.x + 8.0, rect.y, inner.width - 16.0, 1.0), c.over(c.dim, 0.25, c.background));
+            style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
+            let open = m.links.open(&m.seen);
+            let x = inner.x + 12.0;
+            let band = Rect::new(x, inner.y, (inner.max_x() - x - 6.0).max(0.0), inner.height);
+            let text = format!("{} {}", if open { "▾" } else { "▸" }, m.links.header_text());
+            let color = if m.links.status.dim() { c.over(c.dim, 0.6, c.background) } else { c.dim };
+            style::draw_text_left(&text, band, &style::system_font(12.0, Weight::Medium), color);
+        }
+
+        /// One place of the other app: status dot (theme status tokens),
+        /// title, dim subtitle (`5 tabs · working`).
+        fn draw_link(&self, rect: crate::ui::chrome::Rect, j: usize, selected: bool, hovered: bool) {
+            use crate::ui::chrome::Rect;
+            use crate::ui::theme::PopupTone;
+            let c = &self.colors;
+            let m = self.model.borrow();
+            let Some(r) = m.links.rows.get(j) else { return };
+            let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
+            style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
+            let mut x = inner.x + 26.0;
+            let tone = match r.status.as_deref() {
+                Some("working") => Some(PopupTone::Warning),
+                Some("waiting") => Some(PopupTone::Danger),
+                Some("idle") => Some(PopupTone::Success),
+                _ => None,
+            };
+            if let Some(t) = tone {
+                let d = 7.0;
+                style::fill_rounded(Rect::new(x, inner.mid_y() - d / 2.0, d, d), d / 2.0, c.tone(t));
+            }
+            x += 14.0;
+            let font = style::system_font(13.0, Weight::Medium);
+            let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
+            let tw = style::draw_text_left(&r.title, band(x, inner.max_x() - x - 6.0), &font, c.text);
+            x += tw + 10.0;
+            if !r.subtitle.is_empty() && x < inner.max_x() - 20.0 {
+                style::draw_text_left(&r.subtitle, band(x, inner.max_x() - x - 6.0), &style::system_font(12.0, Weight::Regular), c.dim);
+            }
         }
     }
 }
@@ -2309,6 +2609,118 @@ mod tests {
     }
 
     // -- the switcher / palette snapshot contract ---------------------------
+
+    fn herdr(id: &str, title: &str, status: &str) -> LinkRow {
+        LinkRow {
+            status: Some(status.into()),
+            subtitle: "2 tabs".into(),
+            ..LinkRow::new("herdr", "workspace", id, title)
+        }
+    }
+
+    /// A shown switcher (3 views) with two herdr rows loaded.
+    fn linked() -> ViewSwitcherPanel {
+        let mut p = ViewSwitcherPanel::new();
+        p.show(&views(), None, None);
+        p.set_links(
+            Ok(vec![herdr("wB", "kitchen-sink", "working"), herdr("wR", "dotfiles", "idle")]),
+            links::LinkTexts::default(),
+            true,
+        );
+        p
+    }
+
+    #[test]
+    fn link_group_collapsed_header_at_the_bottom() {
+        let p = linked();
+        assert_eq!(p.entries(), vec![Entry::Local(0), Entry::Local(1), Entry::Local(2), Entry::Header]);
+        let st = p.test_state();
+        assert_eq!(st["linkGroup"]["expanded"], json!(false));
+        assert_eq!(st["linkGroup"]["header"], json!("Terminal spaces · 2"));
+        assert_eq!(st["linkGroup"]["cursor"], json!("local"));
+        // Rows still list the views only (the Swift shape).
+        assert_eq!(st["rows"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn link_group_navigation_toggle_and_go() {
+        let mut p = linked();
+        for _ in 0..3 {
+            p.move_selection(1);
+        }
+        assert_eq!(p.link_cursor, Some(Entry::Header), "↓ past the last view lands on the header");
+        assert_eq!(p.accept(), None, "Return on the header is not a view pick");
+        assert_eq!(p.link_action(), Some(LinkPick::Toggled));
+        assert!(p.links.expanded);
+        p.move_selection(1);
+        assert_eq!(p.link_action(), Some(LinkPick::Go(herdr("wB", "kitchen-sink", "working"))));
+        p.move_selection(1);
+        p.move_selection(1);
+        assert_eq!(p.link_cursor, None, "↓ from the bottom wraps to the top");
+        assert_eq!(p.selection, 0);
+        p.move_selection(-1);
+        assert_eq!((p.link_cursor, p.selection), (None, 2), "↑ from the top skips the group");
+        // ← on a link row closes the group onto its header; → reopens.
+        p.links_jump();
+        p.move_selection(1);
+        assert!(p.group_open(false));
+        assert_eq!((p.link_cursor, p.links.expanded), (Some(Entry::Header), false));
+        assert!(p.group_open(true));
+        assert!(p.links.expanded);
+        // → / ← on a view row are not the group's.
+        p.move_selection(1);
+        p.move_selection(1);
+        p.move_selection(1);
+        assert_eq!(p.link_cursor, None);
+        assert!(!p.group_open(true));
+        // Digits jump views only.
+        assert_eq!(p.key(19, false, false, false), Some(60));
+    }
+
+    #[test]
+    fn link_group_query_auto_expands_and_clearing_collapses() {
+        let mut p = linked();
+        p.current_query = "dotf".into();
+        p.move_selection(0);
+        assert_eq!(p.entries(), vec![Entry::Header, Entry::Link(1)], "only the group matches");
+        assert_eq!(p.link_cursor, Some(Entry::Header), "the cursor follows the top entry");
+        assert_eq!(p.test_state()["linkGroup"]["expanded"], json!(true));
+        p.move_selection(1);
+        assert_eq!(p.link_action().map(|x| matches!(x, LinkPick::Go(_))), Some(true));
+        p.current_query = "zzzz".into();
+        assert!(p.entries().is_empty());
+        p.current_query.clear();
+        p.move_selection(0);
+        assert!(!p.links.expanded);
+        assert_eq!(p.entries().last(), Some(&Entry::Header));
+        // `/` command mode has no group.
+        p.current_query = "/".into();
+        assert!(p.entries().is_empty());
+        assert_eq!(p.link_action(), None);
+    }
+
+    #[test]
+    fn link_group_dead_providers_and_reopen() {
+        let mut p = linked();
+        p.links_jump();
+        p.set_links(Err(links::LinkError::Offline), links::LinkTexts::default(), true);
+        assert_eq!(p.test_state()["linkGroup"]["header"], json!("Terminal spaces · not running"));
+        assert_eq!(p.link_action(), Some(LinkPick::Launch));
+        p.set_links(Err(links::LinkError::Unavailable("timeout".into())), links::LinkTexts::default(), true);
+        assert_eq!(p.link_action(), Some(LinkPick::Retry));
+        assert_eq!(p.links.status, LinkStatus::Loading);
+        // A fresh open starts collapsed, cursor on the views.
+        p.set_links(Ok(vec![herdr("wB", "k", "idle")]), links::LinkTexts::default(), true);
+        p.links.expanded = true;
+        p.show(&views(), None, None);
+        assert!(!p.links.expanded);
+        assert_eq!(p.link_cursor, None);
+        assert_eq!(p.test_state()["linkGroup"]["header"], json!("Terminal spaces · 1"), "stale rows while loading");
+        // `[links] enabled = false`: no group at all.
+        p.set_links(Ok(vec![]), links::LinkTexts::default(), false);
+        assert_eq!(p.entries().len(), 3);
+        assert!(!p.links_jump());
+    }
 
     #[test]
     fn switcher_snapshot_and_events() {

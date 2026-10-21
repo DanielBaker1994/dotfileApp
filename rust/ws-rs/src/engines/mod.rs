@@ -5,6 +5,7 @@ pub mod ai_format;
 pub mod ansi_render;
 pub mod config_text;
 pub mod file_ops;
+pub mod links;
 pub mod list_filter;
 pub mod nvim_rpc;
 pub mod pane_shot;

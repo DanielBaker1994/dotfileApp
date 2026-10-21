@@ -752,3 +752,18 @@ layers = "app, aerospace, herdr, ghostty, vim"
 colors = "theme"
 window-title = "ws-settings"
 undo-limit = 20
+
+# The link bank (PLAN-link-bank.md): herdr's workspaces as a collapsed group
+# at the bottom of Ctrl+B W. Return on a row runs `herdr-pick go-id`, which
+# raises Ghostty through AeroSpace; herdr-pick reads our places over the
+# socket (`links` / `do:go:<id>`) for its own prefix+w.
+[links]
+enabled = true
+label = "Terminal spaces"
+loading = "…"
+offline = "not running"
+unavailable = "unavailable"
+herdr-pick = "~/.dotfiles/sesh/bin/herdr-pick"
+timeout-ms = 300
+go-timeout-ms = 5000
+launch = "open -a Ghostty"

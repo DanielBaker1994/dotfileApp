@@ -3442,6 +3442,44 @@ impl CompareWindowModel {
         }
     }
 
+    /// The open folder sessions as `(session id, label, left, right)` — the
+    /// link bank's `folder` rows.
+    pub fn folder_links(&self) -> Vec<(i64, String, String, String)> {
+        self.sessions
+            .iter()
+            .filter(|s| s.folder.is_some() || self.folder_bound == Some(s.id))
+            .map(|s| {
+                // The bound one's `FolderSession` sits on the page (s.folder
+                // is None while bound), so its label comes from there.
+                let bound = self.folder_bound == Some(s.id);
+                let label = match (bound, &self.folder_page.session) {
+                    (true, Some(fs)) => format!("{}{}", if s.git { "(git) " } else { "" }, fs.label()),
+                    _ => s.label(),
+                };
+                let fs = if bound { self.folder_page.session.as_ref() } else { s.folder.as_ref() };
+                let side = |x, root: Option<&String>| {
+                    s.path.get(&x).cloned().or_else(|| root.cloned()).unwrap_or_default()
+                };
+                (
+                    s.id,
+                    label,
+                    side(CompareSide::Left, fs.map(|f| &f.left_root)),
+                    side(CompareSide::Right, fs.map(|f| &f.right_root)),
+                )
+            })
+            .collect()
+    }
+
+    /// Show the session with `id` (rebinding its folder page). False when no
+    /// such session is open.
+    pub fn select_session(&mut self, id: i64) -> bool {
+        let Some(i) = self.sessions.iter().position(|s| s.id == id) else { return false };
+        self.unbind_folder();
+        self.selected = Some(i);
+        self.bind_selected_folder();
+        true
+    }
+
     /// `CompareWindow.openFolders`: a folder session, scanned and bound.
     pub fn open_folders(&mut self, left: &str, right: &str) -> usize {
         self.unbind_folder();
@@ -6792,6 +6830,29 @@ mod tests {
         }
         // A bare side drags the selection across to the other side.
         assert_eq!(model.test_do("folder-drop:right"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_links_list_parked_and_bound_sessions_and_select_rebinds() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderlinks");
+        let mut model =
+            CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_folders("/x/A", "/x/B");
+        model.open_folders("/y/C", "/y/D");
+        let links = model.folder_links();
+        assert_eq!(links.len(), 2, "the parked and the bound session both list");
+        assert_eq!((links[0].2.as_str(), links[0].3.as_str()), ("/x/A", "/x/B"));
+        assert_eq!(links[0].1, "A ⇆ B/");
+        assert_eq!(links[1].1, "C ⇆ D/");
+        let first = links[0].0;
+        assert!(model.select_session(first));
+        assert_eq!(model.current().map(|s| s.id), Some(first));
+        assert_eq!(model.folder_page.session.as_ref().map(|f| f.left_root.as_str()), Some("/x/A"));
+        // Both still list after the swap; an unknown id is refused.
+        assert_eq!(model.folder_links().len(), 2);
+        assert!(!model.select_session(-42));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

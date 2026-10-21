@@ -1,0 +1,6 @@
+{"version":1,"rows":[
+ {"source":"kitchen-sink","kind":"view","id":"view:files","title":"Files","subtitle":"~/.config/kitchen-sink","status":null,"cwd":"~/.config/kitchen-sink","recent":0,"preview":null},
+ {"source":"kitchen-sink","kind":"view","id":"view:notes","title":"Notes","subtitle":"todo.md","status":null,"cwd":null,"recent":1,"preview":null},
+ {"source":"kitchen-sink","kind":"note","id":"note:/Users/me/notes/todo.md","title":"todo.md","subtitle":"~/notes","status":null,"cwd":"~/notes","recent":2,"preview":null},
+ {"source":"kitchen-sink","kind":"folder","id":"folder:3","title":"src ↔ src.bak","subtitle":"folder compare","status":null,"cwd":"~/code/src","recent":3,"preview":"~/code/src\n~/code/src.bak"}
+]}

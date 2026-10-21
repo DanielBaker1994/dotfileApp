@@ -25,6 +25,7 @@ use crate::app::hotkey::{self, HotkeyPrep};
 use crate::app::paths::Paths;
 use crate::app::registry::{PaletteCommand, RectI, Registry, SlotView};
 use crate::app::socket::{CommandHandler, Reply};
+use crate::engines::links::{LinkError, LinkRow, LinkTexts};
 use crate::panes::pane_geometry::{PaneDir, Rect};
 use crate::panes::pane_nav::{NavPane, PaneNav, ViewId};
 use crate::panes::vim_keys::VimKeys;
@@ -33,7 +34,7 @@ use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
 use crate::views::tools::ToolKind;
 
 /// The sections `loadCommands` never turns into commands.
-const COMMAND_SECTION_SKIPS: [&str; 11] = [
+const COMMAND_SECTION_SKIPS: [&str; 12] = [
     "icons",
     "shortcuts",
     "app",
@@ -45,6 +46,7 @@ const COMMAND_SECTION_SKIPS: [&str; 11] = [
     "notes-find",
     "setup",
     "settings-hub",
+    "links",
 ];
 
 /// Every `SlotView`, in `testQuery`'s order (`kitchen_sink.swift:3111`).
@@ -258,6 +260,9 @@ struct ControllerInner {
     /// The rows `state.viewSwitcher.rows` reports (pushed by the daemon UI
     /// when the palette is built; empty until then).
     switcher_rows: Vec<String>,
+    /// `state.viewSwitcher.linkGroup` — the switcher's herdr group (pushed
+    /// by the daemon UI on every change; `{}` until the switcher is built).
+    link_group: Value,
     /// `state.paths` — the live PathsWindow document pushed by the daemon UI
     /// (`{"shown": false, "rows": [...]}` until it is built).
     paths_state: Value,
@@ -640,11 +645,106 @@ impl ControllerInner {
             "viewSwitcher": {
                 "shown": self.view_switcher,
                 "rows": self.switcher_rows,
-                "selection": 0
+                "selection": 0,
+                "linkGroup": self.link_group,
             },
             "paths": self.paths_state,
         })
     }
+}
+
+/// `[links]` in commands.toml — the link bank's herdr side of Ctrl+B W.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinksConfig {
+    pub enabled: bool,
+    pub texts: LinkTexts,
+    /// The herdr picker binary (`list --json` / `go-id`).
+    pub herdr_pick: String,
+    /// The list call's budget; past it the group reads "unavailable".
+    pub timeout_ms: u64,
+    pub go_timeout_ms: u64,
+    /// Shell line run by Return on an offline header (starts the terminal).
+    pub launch: String,
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        LinksConfig {
+            enabled: true,
+            texts: LinkTexts::default(),
+            herdr_pick: config::expand_tilde("~/.dotfiles/sesh/bin/herdr-pick"),
+            timeout_ms: 300,
+            go_timeout_ms: 5000,
+            launch: "open -a Ghostty".into(),
+        }
+    }
+}
+
+impl LinksConfig {
+    pub fn from_entries(e: &HashMap<String, String>) -> Self {
+        let d = LinksConfig::default();
+        let s = |k: &str, def: &str| e.get(k).filter(|v| !v.trim().is_empty()).cloned().unwrap_or_else(|| def.to_string());
+        let n = |k: &str, def: u64| e.get(k).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(def);
+        LinksConfig {
+            enabled: e.get("enabled").map_or(true, |v| v.trim() != "false"),
+            texts: LinkTexts {
+                label: s("label", &d.texts.label),
+                loading: s("loading", &d.texts.loading),
+                offline: s("offline", &d.texts.offline),
+                unavailable: s("unavailable", &d.texts.unavailable),
+            },
+            herdr_pick: config::expand_tilde(&s("herdr-pick", &d.herdr_pick)),
+            timeout_ms: n("timeout-ms", d.timeout_ms),
+            go_timeout_ms: n("go-timeout-ms", d.go_timeout_ms),
+            launch: s("launch", &d.launch),
+        }
+    }
+
+    /// Read `[links]` (helper-backed: call off the main thread).
+    pub fn load() -> Self {
+        let entries: HashMap<String, String> = config::read_config_text()
+            .map(|t| {
+                let lines = crate::engines::config_text::config_lines(&t);
+                crate::engines::config_text::config_section_entries(&lines, "links")
+                    .into_iter()
+                    .map(|(_, k, v)| (k, v))
+                    .collect()
+            })
+            .unwrap_or_default();
+        LinksConfig::from_entries(&entries)
+    }
+}
+
+/// herdr's places for Ctrl+B W: `herdr-pick list --json` within the
+/// `[links] timeout-ms` budget. Blocking: run it off the main thread.
+pub fn fetch_herdr_links(cfg: &LinksConfig) -> Result<Vec<LinkRow>, LinkError> {
+    if !std::path::Path::new(&cfg.herdr_pick).is_file() {
+        return Err(LinkError::Unavailable(format!("{} not found", cfg.herdr_pick)));
+    }
+    let args = vec!["list".to_string(), "--json".to_string()];
+    let out = crate::app::process_run::run_process_deadline(
+        &cfg.herdr_pick,
+        &args,
+        None,
+        None,
+        false,
+        Some(std::time::Duration::from_millis(cfg.timeout_ms)),
+    )
+    .map_err(|e| LinkError::Unavailable(e.to_string()))?;
+    if out.code == -1 && out.err.contains("timed out") {
+        return Err(LinkError::Unavailable("timeout".into()));
+    }
+    crate::engines::links::parse_envelope(&out.out)
+}
+
+/// The first few non-blank lines of a note (a `links` row's `preview`).
+fn note_excerpt(path: &str) -> Option<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 2048];
+    let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)).ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(6).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Mirrors `SwitcherController`: owns the registry, the shared-window state,
@@ -741,6 +841,7 @@ impl SwitcherController {
             terminal_panel_state: None,
             view_switcher: false,
             switcher_rows: Vec::new(),
+            link_group: json!({}),
             paths_state: json!({ "shown": false, "rows": [] }),
             paths_enabled: false,
             notes_terminal: false,
@@ -873,7 +974,7 @@ impl SwitcherController {
         text: &str,
         sections: &HashMap<String, HashMap<String, String>>,
     ) -> Vec<PaletteCommand> {
-        const SKIP: [&str; 11] = COMMAND_SECTION_SKIPS;
+        const SKIP: [&str; 12] = COMMAND_SECTION_SKIPS;
         let settings = self.inner.lock().unwrap().settings.clone();
         let jira = section_flag(sections, "jira", false);
         let label_of = label_of(sections);
@@ -1134,6 +1235,55 @@ impl SwitcherController {
     /// `state.viewSwitcher.rows` — `["Name|location"]`, pushed on palette build.
     pub fn set_switcher_rows(&self, rows: Vec<String>) {
         self.inner.lock().unwrap().switcher_rows = rows;
+    }
+
+    /// `state.viewSwitcher.linkGroup` (the panel's `test_state().linkGroup`).
+    pub fn set_link_group(&self, group: Value) {
+        self.inner.lock().unwrap().link_group = group;
+    }
+
+    /// Return on a herdr row in Ctrl+B W: `herdr-pick go-id <id>` raises
+    /// Ghostty (AeroSpace) and focuses the workspace. Off-main; kitchen-sink
+    /// neither activates nor hands focus back — Ghostty takes it.
+    pub fn links_go(&self, id: &str) {
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let cfg = LinksConfig::load();
+            let args = vec!["go-id".to_string(), id.clone()];
+            match crate::app::process_run::run_process_deadline(
+                &cfg.herdr_pick,
+                &args,
+                None,
+                None,
+                true,
+                Some(std::time::Duration::from_millis(cfg.go_timeout_ms)),
+            ) {
+                Ok(o) if o.code == 0 => {}
+                Ok(o) => crate::app::logging::ws_log(&format!("links: go-id {id} failed ({}): {}", o.code, o.out.trim())),
+                Err(e) => crate::app::logging::ws_log(&format!("links: {}: {e}", cfg.herdr_pick)),
+            }
+        });
+    }
+
+    /// Return on the header while herdr is offline: `[links] launch`.
+    pub fn links_launch(&self) {
+        std::thread::spawn(|| {
+            let cfg = LinksConfig::load();
+            if cfg.launch.trim().is_empty() {
+                return;
+            }
+            let args = vec!["-c".to_string(), cfg.launch.clone()];
+            if let Err(e) = crate::app::process_run::run_process_deadline(
+                "/bin/sh",
+                &args,
+                None,
+                None,
+                true,
+                Some(std::time::Duration::from_secs(10)),
+            ) {
+                crate::app::logging::ws_log(&format!("links: launch failed: {e}"));
+            }
+        });
     }
 
     /// `state.paths` — the live `PathsWindow.testState` document.
@@ -1557,6 +1707,135 @@ impl SwitcherController {
         })
     }
 
+    // -- link bank (PLAN-link-bank.md) ----------------------------------------
+
+    /// The `links` raw verb: this app's places as a `links.v1` envelope —
+    /// views by previous-view order, then the open notes, then the open
+    /// folder-compare sessions. Model reads only; never launches anything.
+    pub fn links_json(&self) -> Value {
+        crate::engines::links::envelope(&self.link_rows())
+    }
+
+    fn link_rows(&self) -> Vec<LinkRow> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let tilde = |p: &str| crate::views::notes::tilde_path(p, &home);
+        let parent = |p: &str| {
+            std::path::Path::new(p).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default()
+        };
+        let (recency, tab_paths, tab_sel) = {
+            let inner = self.inner.lock().unwrap();
+            let mut order: Vec<SlotView> = inner.current.into_iter().chain([inner.last]).collect();
+            order.extend(inner.history.iter().rev().copied());
+            let notes = inner.members.get(&SlotView::Notes).map(|m| &m.state);
+            let paths: Vec<String> = notes
+                .and_then(|s| s.get("tabPaths"))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            let sel = notes.and_then(|s| s.get("selectedTab")).and_then(Value::as_u64).unwrap_or(0) as usize;
+            (order, paths, sel)
+        };
+        let folders = self.compare_model().map(|m| m.lock().unwrap().folder_links()).unwrap_or_default();
+        let compare_where = self
+            .compare_model()
+            .and_then(|m| m.lock().unwrap().current().map(|s| s.label()))
+            .unwrap_or_default();
+
+        // Views: the header nav (one row per view; the Jira sub-views fold
+        // into Jira), most recently shown first, the rest in nav order.
+        let mut views: Vec<(SlotView, String)> = Vec::new();
+        for n in self.registry.nav_icons() {
+            let v = if n.view.is_jira() { SlotView::Jira } else { n.view };
+            if v != SlotView::CompareText && !views.iter().any(|(x, _)| *x == v) {
+                views.push((v, n.tip.clone()));
+            }
+        }
+        let rank = |v: SlotView| {
+            let v = if v.is_jira() { SlotView::Jira } else { v };
+            recency
+                .iter()
+                .map(|r| if r.is_jira() { SlotView::Jira } else { *r })
+                .position(|r| r == v)
+                .unwrap_or(usize::MAX)
+        };
+        views.sort_by_key(|(v, _)| rank(*v));
+        let selected_note = tab_paths.get(tab_sel).cloned();
+        let mut rows: Vec<LinkRow> = views
+            .into_iter()
+            .map(|(v, title)| {
+                let mut r = LinkRow::new("kitchen-sink", "view", &format!("view:{}", v.raw()), &title);
+                r.subtitle = match v {
+                    SlotView::Notes => selected_note
+                        .as_deref()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    SlotView::Compare => compare_where.clone(),
+                    _ => String::new(),
+                };
+                r
+            })
+            .collect();
+        // Open notes: the selected tab first, then tab order.
+        let mut notes: Vec<&String> = tab_paths.iter().collect();
+        notes.sort_by_key(|p| Some(p.as_str()) != selected_note.as_deref());
+        for path in notes {
+            let name = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned());
+            let mut r = LinkRow::new("kitchen-sink", "note", &format!("note:{path}"), &name.unwrap_or_else(|| path.clone()));
+            let dir = parent(path);
+            r.subtitle = tilde(&dir);
+            r.cwd = Some(dir);
+            r.preview = note_excerpt(path);
+            rows.push(r);
+        }
+        for (id, label, left, right) in folders {
+            let mut r = LinkRow::new("kitchen-sink", "folder", &format!("folder:{id}"), &label);
+            r.subtitle = format!("{} ⇆ {}", tilde(&left), tilde(&right));
+            r.preview = Some(format!("{}\n{}", tilde(&left), tilde(&right)));
+            r.cwd = (!left.is_empty()).then_some(left);
+            rows.push(r);
+        }
+        for (i, r) in rows.iter_mut().enumerate() {
+            r.recent = i as i64;
+        }
+        rows
+    }
+
+    /// `do:go:<id>`: present a `links` row — `view:<view>`, `note:<path>`
+    /// or `folder:<compare session id>`. This is the one link call that may
+    /// bring kitchen-sink forward (the herdr picker's Return).
+    fn link_go(&self, id: &str) -> Option<Value> {
+        if let Some(v) = id.strip_prefix("view:") {
+            return match SlotView::from_raw(v) {
+                Some(view) => {
+                    self.open(view);
+                    None
+                }
+                None => Some(json!({ "error": format!("unknown view '{v}'") })),
+            };
+        }
+        if let Some(path) = id.strip_prefix("note:") {
+            if path.is_empty() {
+                return Some(json!({ "error": "note: needs a path" }));
+            }
+            self.set_pending_note_open(path);
+            self.open(SlotView::Notes);
+            return None;
+        }
+        if let Some(sid) = id.strip_prefix("folder:") {
+            let Ok(sid) = sid.parse::<i64>() else {
+                return Some(json!({ "error": format!("'{sid}' is not a session id") }));
+            };
+            let found = self.compare_model().map(|m| m.lock().unwrap().select_session(sid)).unwrap_or(false);
+            if !found {
+                return Some(json!({ "error": format!("no folder session {sid}") }));
+            }
+            self.open(SlotView::Compare);
+            return None;
+        }
+        Some(json!({ "error": "go:view:<view>|note:<path>|folder:<id>" }))
+    }
+
     // -- socket launch path -------------------------------------------------
 
     /// `SwitcherController.showViewSwitcher()` — show the Ctrl+B W switcher.
@@ -1782,6 +2061,9 @@ impl SwitcherController {
                 }
                 None => Some(json!({ "error": "unknown view" })),
             };
+        }
+        if let Some(id) = action.strip_prefix("go:") {
+            return self.link_go(id);
         }
         if let Some(v) = action.strip_prefix("rebuild-card:") {
             return match SlotView::from_raw(v) {
@@ -3172,6 +3454,7 @@ impl CommandHandler for SwitcherController {
 
     fn raw_request(&self, verb: &str, _rest: &str) -> Option<String> {
         match verb {
+            "links" => Some(self.links_json().to_string()),
             "reload" => Some(self.reload_config().to_string()),
             "restart" => Some(json!({ "ok": true, "restarting": true }).to_string()),
             _ => None,
@@ -3258,7 +3541,7 @@ mod daemon_ui {
     use crate::ui::theme::{set_current_header_style, HeaderStyle as ThemeHeaderStyle, PopupColors};
     use crate::views::paths::{PathsWindow, ReturnAction as PathsReturn};
     use crate::views::switcher::{
-        gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
+        gather_workspaces, LinkPick, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
         ViewSwitcherPanel,
     };
     use crate::views::terminal::{TerminalConfig, TerminalPanel};
@@ -4702,6 +4985,84 @@ mod daemon_ui {
             drop(state);
             controller.set_switcher_rows(rows);
             controller.set_window_count(visible_window_count(mtm));
+            self.push_link_state();
+            Self::fetch_switcher_links();
+        }
+
+        /// herdr's places for the switcher's group, off-main (§4: never
+        /// blocking the panel's first draw); the panel paints stale rows
+        /// with a loading header meanwhile.
+        fn fetch_switcher_links() {
+            std::thread::spawn(|| {
+                let cfg = super::LinksConfig::load();
+                let result = if cfg.enabled { super::fetch_herdr_links(&cfg) } else { Ok(Vec::new()) };
+                if let Err(e) = &result {
+                    crate::app::logging::ws_log(&format!("links: herdr list: {e:?}"));
+                }
+                on_ui(move |ui| ui.refresh_switcher_links(result, cfg.texts, cfg.enabled));
+            });
+        }
+
+        fn refresh_switcher_links(
+            &self,
+            result: Result<Vec<crate::engines::links::LinkRow>, crate::engines::links::LinkError>,
+            texts: crate::engines::links::LinkTexts,
+            enabled: bool,
+        ) {
+            {
+                let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
+                let Some(sw) = state.as_mut().and_then(|st| st.switcher.as_mut()) else { return };
+                sw.set_links(result, texts, enabled);
+            }
+            self.push_link_state();
+        }
+
+        /// A header click: open / close in place, or start / re-ask herdr.
+        fn switcher_header_click(&self) {
+            let pick = {
+                let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
+                let Some(sw) = state.as_mut().and_then(|st| st.switcher.as_mut()) else { return };
+                sw.header_click()
+            };
+            self.link_pick(pick);
+        }
+
+        /// Run what the group asked for (Return / a header click).
+        fn link_pick(&self, pick: LinkPick) {
+            let c = self.ivars().controller.clone();
+            match pick {
+                LinkPick::Go(row) => {
+                    self.hide_switcher_for_link();
+                    c.links_go(&row.id);
+                }
+                LinkPick::Launch => {
+                    self.hide_switcher_for_link();
+                    c.links_launch();
+                }
+                LinkPick::Retry => Self::fetch_switcher_links(),
+                LinkPick::Toggled | LinkPick::HeaderClick => {}
+            }
+            self.push_link_state();
+        }
+
+        /// Close Ctrl+B W for a jump to Ghostty: no `palette_hand_back`, no
+        /// `activate_app` — herdr-pick's AeroSpace focus moves the user.
+        fn hide_switcher_for_link(&self) {
+            if let Some(sw) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.switcher.as_mut()) {
+                sw.hide_panel();
+            }
+            self.ivars().controller.view_switcher_hide();
+        }
+
+        /// `state.viewSwitcher.linkGroup` from the live panel.
+        fn push_link_state(&self) {
+            let group = {
+                let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
+                let Some(sw) = state.as_mut().and_then(|st| st.switcher.as_mut()) else { return };
+                sw.sync_query();
+                sw.test_state()["linkGroup"].clone()
+            };
+            self.ivars().controller.set_link_group(group);
         }
 
         /// `showViewSwitcher`'s per-view "where it is" (`whereText` / `tabName`).
@@ -4797,6 +5158,26 @@ mod daemon_ui {
                 }),
             );
             panel.set_on_close(on_close);
+            panel.set_link_callbacks(
+                Box::new({
+                    let c = controller.clone();
+                    move |pick: LinkPick| match pick {
+                        // A row click: the panel already ordered itself out.
+                        LinkPick::Go(row) => {
+                            c.set_view_switcher(false);
+                            c.links_go(&row.id);
+                        }
+                        LinkPick::Launch => {
+                            c.set_view_switcher(false);
+                            c.links_launch();
+                        }
+                        // Toggled in place through the model (it is borrowed
+                        // by the click right now, so after this returns).
+                        _ => on_ui(|ui| ui.switcher_header_click()),
+                    }
+                }),
+                Box::new(|| on_ui(|ui| ui.push_link_state())),
+            );
             let current = controller.current().map(|v| v.nav_id());
             // Always start on the first row.
             panel.show(&views, current, None);
@@ -5706,6 +6087,8 @@ mod daemon_ui {
                 PaletteClosed,
                 SwitcherClosed,
                 Nav(i64),
+                /// The switcher's link group moved / acted.
+                Link(Option<LinkPick>),
             }
 
             let code = event.keyCode();
@@ -5771,18 +6154,32 @@ mod daemon_ui {
                                 Out::SwitcherClosed
                             } else if code == popup::KEY_DOWN || (code == 45 && ctrl) {
                                 sw.move_selection(1);
-                                Out::Consumed
+                                Out::Link(None)
                             } else if code == popup::KEY_UP || (code == 35 && ctrl) {
                                 sw.move_selection(-1);
-                                Out::Consumed
+                                Out::Link(None)
                             } else if code == popup::KEY_TAB {
                                 sw.move_selection(if shift { -1 } else { 1 });
-                                Out::Consumed
+                                Out::Link(None)
                             } else if code == popup::KEY_RETURN || code == 76 {
-                                match sw.accept() {
-                                    Some(id) => Out::Nav(id),
-                                    None => Out::Consumed,
+                                match sw.link_action() {
+                                    Some(pick) => Out::Link(Some(pick)),
+                                    None => match sw.accept() {
+                                        Some(id) => Out::Nav(id),
+                                        None => Out::Consumed,
+                                    },
                                 }
+                            } else if code == 40 && ctrl && !cmd && !opt {
+                                // Ctrl+K: jump to the herdr group, opened.
+                                sw.links_jump();
+                                Out::Link(None)
+                            } else if !(cmd || ctrl || opt)
+                                && matches!(code, 124 | 37 | 123 | 4)
+                                // → / l open, ← / h close — only on the group;
+                                // elsewhere they reach the search field.
+                                && sw.group_open(matches!(code, 124 | 37))
+                            {
+                                Out::Link(None)
                             } else if let Some(id) =
                                 sw.key(code, cmd, ctrl, opt)
                             {
@@ -5840,6 +6237,13 @@ mod daemon_ui {
                 }
                 Out::SwitcherClosed => {
                     self.ivars().controller.view_switcher_hide();
+                    true
+                }
+                Out::Link(pick) => {
+                    match pick {
+                        Some(p) => self.link_pick(p),
+                        None => self.push_link_state(),
+                    }
                     true
                 }
                 Out::Nav(id) => {
@@ -14682,6 +15086,84 @@ label = \"Assistant\"
         assert_eq!(s["terminalPanel"]["shown"], json!(false));
         assert_eq!(s["viewSwitcher"]["shown"], json!(false));
         assert!(s["tools"].as_object().map_or(true, |o| o.is_empty()));
+    }
+
+    fn link_ids(c: &SwitcherController) -> Vec<String> {
+        let v = c.links_json();
+        assert_eq!(v["version"], json!(1));
+        v["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn links_lists_views_by_recency_then_notes() {
+        let mut c = controller();
+        c.registry_mut().set_nav(vec![
+            (SlotView::Files, "Files".into(), None),
+            (SlotView::Notes, "Notes".into(), None),
+            (SlotView::Jira, "Jira".into(), None),
+            (SlotView::Detail, "Jira".into(), None),
+        ]);
+        assert_eq!(link_ids(&c), ["view:notes", "view:files", "view:jira"], "the cold default view leads");
+        c.open(SlotView::Jira);
+        c.open(SlotView::Files);
+        assert_eq!(link_ids(&c), ["view:files", "view:jira", "view:notes"]);
+        c.set_view_state(
+            SlotView::Notes,
+            json!({ "tabPaths": ["/n/a.md", "/n/b.md"], "selectedTab": 1 }),
+        );
+        let v = c.links_json();
+        let rows = v["rows"].as_array().unwrap();
+        let notes: Vec<&Value> = rows.iter().filter(|r| r["kind"] == "note").collect();
+        assert_eq!(notes[0]["id"], json!("note:/n/b.md"), "the selected tab first");
+        assert_eq!(notes[0]["title"], json!("b.md"));
+        assert_eq!(notes[0]["cwd"], json!("/n"));
+        let notes_view = rows.iter().find(|r| r["id"] == "view:notes").unwrap();
+        assert_eq!(notes_view["subtitle"], json!("b.md"));
+        let ranks: Vec<i64> = rows.iter().map(|r| r["recent"].as_i64().unwrap()).collect();
+        assert_eq!(ranks, (0..rows.len() as i64).collect::<Vec<_>>());
+        // The raw verb answers the same envelope.
+        let raw: Value = serde_json::from_str(&c.raw_request("links", "").unwrap()).unwrap();
+        assert_eq!(raw, v);
+    }
+
+    #[test]
+    fn links_config_reads_the_section_with_defaults() {
+        let d = LinksConfig::from_entries(&HashMap::new());
+        assert!(d.enabled);
+        assert_eq!(d.texts.label, "Terminal spaces");
+        assert_eq!(d.timeout_ms, 300);
+        assert!(d.herdr_pick.ends_with("/.dotfiles/sesh/bin/herdr-pick") && !d.herdr_pick.starts_with('~'));
+        let e: HashMap<String, String> = [
+            ("enabled", "false"),
+            ("label", "herdr"),
+            ("timeout-ms", "450"),
+            ("herdr-pick", "/opt/hp"),
+            ("timeout-ms-typo", "x"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let c = LinksConfig::from_entries(&e);
+        assert!(!c.enabled);
+        assert_eq!((c.texts.label.as_str(), c.timeout_ms, c.herdr_pick.as_str()), ("herdr", 450, "/opt/hp"));
+        assert_eq!(c.texts.offline, "not running");
+        // A missing binary is "unavailable", never a hang or a panic.
+        let missing = LinksConfig { herdr_pick: "/nonexistent/herdr-pick".into(), ..d };
+        assert!(matches!(fetch_herdr_links(&missing), Err(LinkError::Unavailable(_))));
+        assert!(COMMAND_SECTION_SKIPS.contains(&"links"), "[links] enabled is not a palette command");
+    }
+
+    #[test]
+    fn go_presents_views_and_notes_and_refuses_junk() {
+        let c = controller();
+        assert!(c.do_action("go:view:files").is_none());
+        assert_eq!(c.current(), Some(SlotView::Files));
+        assert!(c.do_action("go:note:/tmp/x.md").is_none());
+        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.take_pending_note_open().as_deref(), Some("/tmp/x.md"));
+        for bad in ["go:view:nope", "go:note:", "go:folder:abc", "go:folder:7", "go:wat"] {
+            assert!(c.do_action(bad).and_then(|v| v.get("error").cloned()).is_some(), "{bad}");
+        }
     }
 
     #[test]
