@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless kitchen-sink sandbox for agent control (MCP / `nc`).
 #
-#   bin/ks-mcp-sandbox.sh start [--gui]|stop|status|sock|reset
+#   bin/ks-mcp-sandbox.sh start [--gui]|stop|status|sock|home|reset
 #
 # Runs the Rust daemon in `headless` mode against an isolated TMPDIR + WS_HOME,
 # so socket `state` / `do:` / raw verbs are safe to drive without touching the
@@ -35,6 +35,12 @@ PIDFILE="$SANDBOX/pid"
 # newer than the live app's last `./ws build`.
 APP="${KS_MCP_SANDBOX_APP:-$ROOT/kitchen-sink.app}"
 AERO_MARK="$SANDBOX/aerospace-disabled"
+# The app's HOME is this short alias of $SANDBOX/home. nvim listens on
+# $HOME/.cache/kitchen-sink/nvim-notes-<pid>.sock (notes_vim.rs socket_path),
+# and under the repo-relative sandbox HOME that path is ~105 bytes, past the
+# 103-byte AF_UNIX limit: nvim RPC then fails every time and the notes editor
+# misbehaves in ways the real app doesn't (2026-10-20 hammer, G1).
+HOME_ALIAS="/tmp/ksb-$(printf '%s' "$SANDBOX" | shasum | cut -c1-8)"
 LOG="$SANDBOX/daemon.log"
 
 die() { printf 'ks-mcp-sandbox: %s\n' "$*" >&2; exit 1; }
@@ -109,6 +115,10 @@ cmd_start() {
     if [ "${#SOCK}" -ge 104 ]; then
         die "sandbox socket path is ${#SOCK} bytes (must be < 104): $SOCK"
     fi
+    local nvim_sock="$HOME_ALIAS/.cache/kitchen-sink/nvim-notes-99999.sock"
+    if [ "${#nvim_sock}" -ge 104 ]; then
+        die "nvim socket path would be ${#nvim_sock} bytes (must be < 104): $nvim_sock"
+    fi
 
     local pid=""
     if pid=$(find_pid) && is_ours "$pid" && socket_answers; then
@@ -126,6 +136,7 @@ cmd_start() {
     # writes files that are absent, so a live home is never touched.
     python3 -B "$ROOT/bin/ks-jira-board-fixture.py" "$SANDBOX/home" >/dev/null 2>&1 || true
     rm -f "$SOCK" "$SOCK.lock" "$LOG" "$PIDFILE"
+    ln -sfn "$SANDBOX/home" "$HOME_ALIAS"
 
     # `headless` exists from the current build; the grep probe keeps an older
     # binary from silently launching a windowed daemon (still isolated).
@@ -139,10 +150,10 @@ cmd_start() {
 
     local envs=(
         "TMPDIR=$SANDBOX/tmp"
-        "HOME=$SANDBOX/home"
-        "XDG_CACHE_HOME=$SANDBOX/home/.cache"
-        "XDG_CONFIG_HOME=$SANDBOX/home/.config"
-        "XDG_DATA_HOME=$SANDBOX/home/.local/share"
+        "HOME=$HOME_ALIAS"
+        "XDG_CACHE_HOME=$HOME_ALIAS/.cache"
+        "XDG_CONFIG_HOME=$HOME_ALIAS/.config"
+        "XDG_DATA_HOME=$HOME_ALIAS/.local/share"
         "WS_HOME=$SANDBOX/home"
         "WS_COMMANDS_CONF=$SANDBOX/home/commands.toml"
         "WS_RS_ASSET_DIR=$ROOT"
@@ -240,6 +251,7 @@ case "${1:-}" in
     stop)   cmd_stop ;;
     status) cmd_status ;;
     sock)   printf '%s\n' "$SOCK" ;;
+    home)   printf '%s\n' "$HOME_ALIAS" ;;
     reset)  cmd_reset ;;
-    *)      die "usage: bin/ks-mcp-sandbox.sh start [--gui]|stop|status|sock|reset" ;;
+    *)      die "usage: bin/ks-mcp-sandbox.sh start [--gui]|stop|status|sock|home|reset" ;;
 esac

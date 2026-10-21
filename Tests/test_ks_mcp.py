@@ -10,7 +10,7 @@ throwaway unix-socket daemon in a short /tmp path that reads one line per
 connection and replies with canned JSON (one request per connection, like the
 real server). No real app, no real socket, no GUI is ever touched.
 
-The cases lock the protocol fixes from MCP-TEST-FINDINGS.md §4:
+The cases lock the protocol fixes from the wave-1 MCP findings (git log -- MCP-TEST-FINDINGS.md):
 invalid UTF-8 → -32700 and the loop survives; non-object params → -32602;
 unknown `do:` verbs surface as `isError`; the daemon-down path is a tool error
 rather than a crash; read-only mode hides/rejects mutating tools.

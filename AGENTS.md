@@ -148,11 +148,14 @@ An agent can drive and verify the app over the socket — no computer control:
   **refused** (`error: <verb> unavailable in headless mode`, since d21d2b1) so a headless daemon can
   never capture the owner's real screen; capture needs `start --gui`. Headless = `main_queue` never
   installed (`SwitcherController::is_headless`).
-- **`bin/ks-mcp-sandbox.sh start|stop|status|sock|reset`**: an isolated headless daemon under
+- **`bin/ks-mcp-sandbox.sh start|stop|status|sock|home|reset`**: an isolated headless daemon under
   `.build/mcp-sandbox` (its own `TMPDIR`/`WS_HOME`/`WS_COMMANDS_CONF` copy + jira/notify cache env,
   and `HOME`/`XDG_*` redirected under the sandbox root so nothing lands in the real `~/.cache`;
   live-safe cargo build; killed only by pidfile/`lsof -t` on its own socket). Drive it with
   `export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)` then `printf 'state\n' | nc -U -w3 "$KS_SOCKET"`.
+  The app's `HOME` is a short alias `/tmp/ksb-<hash>` of `$SANDBOX/home` (`… home` prints it) so
+  nvim's `--listen` socket stays under the 103-byte AF_UNIX limit; with the long path nvim RPC failed.
+  `bin/ks-ocr <png>` turns a capture into JSON text lines (+ a blank-pane check) for non-vision agents.
 - **`bin/ks-mcp-sandbox.sh start --gui`** (verified 2026-10-12): launches the real windowed app,
   isolated like the headless sandbox, via `open -n -g --env … kitchen-sink.app --args show`
   (LaunchServices, so the bundle's TCC grants apply). **It runs `aerospace enable off` for the
@@ -180,7 +183,7 @@ An agent can drive and verify the app over the socket — no computer control:
   `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty, `compare:select:<out of range>`. Headless
   still reports `shown: true` for panels/tools that cannot exist without AppKit (F0-7, undecided).
   Requests over 2048 bytes are refused (`request too long`), not truncated. Test status and open
-  findings: `MCP-TEST-FINDINGS.md`, plan for the next wave: `PLAN-mcp-wave3.md`. Deferrals in `BACKLOG.md` ("MCP / headless control").
+  strategy and the orchestrator playbook for DeepSeek test runs: `TESTING.md`; bug ledger: `APP-BUGS.md`. Deferrals in `BACKLOG.md` ("MCP / headless control").
 
 ## Linux (experimental)
 

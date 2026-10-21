@@ -7,8 +7,8 @@ app's features, not in the MCP/socket plumbing: every expectation cites the
 project's own docs or code as `file:line`, and every flow asserts at least one
 **non-log** oracle (state, disk, or an independent recomputation).
 
-This table validates the app, not the plumbing. See `TESTING-OVERVIEW.md`
-(§B) for the re-targeted plan; the UI suites were deleted by owner decision
+This table validates the app, not the plumbing. See `TESTING.md`
+for the test strategy and how workers run these flows; the UI suites were deleted by owner decision
 (AGENTS.md "Tests").
 
 ## Runner contract

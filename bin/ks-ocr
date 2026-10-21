@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# ks-ocr — OCR a screenshot to JSON text lines (+ blank-pane check) for non-vision agents.
+#
+# Builds Tests/tools/ks_ocr.swift with `swiftc -O` into
+# .build/ks-ocr/ks-ocr the first time (or when the source is newer) and
+# execs it. See `ks-ocr --help`. Exit 0 ok, 1 --find/--absent miss, 2 usage, 4 bad image.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$DIR/.." && pwd)"
+SRC="$ROOT/Tests/tools/ks_ocr.swift"
+OUTDIR="$ROOT/.build/ks-ocr"
+BIN="$OUTDIR/ks-ocr"
+
+if [ ! -f "$SRC" ]; then
+    echo "ks-ocr: missing $SRC" >&2
+    exit 5
+fi
+
+if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+    if ! command -v swiftc >/dev/null 2>&1; then
+        echo "ks-ocr: swiftc not found (install the Xcode command line tools)" >&2
+        exit 5
+    fi
+    mkdir -p "$OUTDIR"
+    tmp="$BIN.tmp.$$"
+    if ! swiftc -O -swift-version 5 "$SRC" -o "$tmp"; then
+        rm -f "$tmp"
+        echo "ks-ocr: swiftc failed" >&2
+        exit 5
+    fi
+    mv -f "$tmp" "$BIN"
+fi
+
+exec "$BIN" "$@"

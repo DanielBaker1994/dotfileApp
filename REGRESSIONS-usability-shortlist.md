@@ -1,6 +1,6 @@
 # Swift → Rust usability regressions — shortlist
 
-Condensed from `REGRESSIONS-swift-to-rust.md` (213 DeepSeek claims, unverified). Kept only things a
+Condensed from `REGRESSIONS-swift-to-rust.md` (213 DeepSeek claims, unverified; removed 2026-10-20, see `git log -- REGRESSIONS-swift-to-rust.md`). Kept only things a
 daily user would notice losing. Dropped: wording/toast text, tooltips, animations, cursors, internal
 plumbing, socket/CLI details, multi-display edge cases, theme-menu polish, and anything that is
 "differs" without a user-visible loss.
