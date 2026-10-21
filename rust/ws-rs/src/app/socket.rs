@@ -64,7 +64,14 @@ pub struct Reply {
 impl Reply {
     fn dup(fd: RawFd) -> Option<Reply> {
         let d = unsafe { libc::dup(fd) };
-        (d >= 0).then_some(Reply { fd: d })
+        if d < 0 {
+            return None;
+        }
+        // `dup` clears FD_CLOEXEC: a deferred handler that spawns a child
+        // (`screenshot`, `pane-shot`) must not hand the client's connection to
+        // it, or the client never sees EOF (APP-BUGS #17).
+        set_cloexec(d);
+        Some(Reply { fd: d })
     }
 
     /// Write one newline-terminated line, then close.
@@ -304,8 +311,22 @@ fn accept_loop(listener: Arc<AtomicI32>, handler: Arc<dyn CommandHandler>) {
     }
 }
 
+/// Mark `fd` close-on-exec so `Command::spawn` cannot hand it to a child.
+#[cfg(unix)]
+fn set_cloexec(fd: RawFd) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD, 0) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    }
+}
+
 #[cfg(unix)]
 fn configure_conn(fd: RawFd) {
+    // The connection must not leak into any child the daemon spawns while the
+    // request is served: the first `do:` after a GUI launch starts the Python
+    // helper / nvim, and a child holding this fd keeps the client's connection
+    // open after the server closed it (APP-BUGS #17).
+    set_cloexec(fd);
     // On macOS an accepted socket inherits the listener's O_NONBLOCK: a reply
     // larger than the socket buffer (~8 KB — a `state` with compare rows) then
     // hits EAGAIN and is cut short. Replies are written blocking, bounded by
@@ -836,6 +857,60 @@ mod tests {
         let action = "a".repeat(2000);
         let line = request(&path, &format!("do:{action}")).unwrap().unwrap();
         assert_eq!(line, "{\"view\":\"notes\"}");
+    }
+
+    /// APP-BUGS #17: the first `do:` after a GUI launch starts the Python
+    /// helper / nvim *while the accept thread holds the connection*, so the
+    /// child inherits the client's fd and the client never sees EOF after the
+    /// reply. Every connection fd must be `FD_CLOEXEC`.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_spawned_while_replying_does_not_hold_the_connection() {
+        struct SpawnOnDo {
+            child: Mutex<Option<std::process::Child>>,
+        }
+        impl CommandHandler for SpawnOnDo {
+            fn state_json(&self) -> Value {
+                json!({"ok": true})
+            }
+            fn do_action(&self, _action: &str) -> Option<Value> {
+                let mut slot = self.child.lock().unwrap();
+                if slot.is_none() {
+                    *slot = std::process::Command::new("/bin/sleep").arg("30").spawn().ok();
+                }
+                None
+            }
+            fn raw_request(&self, _verb: &str, _rest: &str) -> Option<String> {
+                None
+            }
+            fn launch(&self, _message: &str) {}
+        }
+
+        let h = Arc::new(SpawnOnDo { child: Mutex::new(None) });
+        let path = temp_path("cloexec");
+        let _s = CommandServer::start(&path, h.clone() as Arc<dyn CommandHandler>).unwrap();
+        let mut stream = connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        send_line(&mut stream, "do:open:notes").unwrap();
+        assert_eq!(
+            read_line(&mut stream).unwrap().as_deref(),
+            Some("{\"ok\":true}"),
+            "reply arrives"
+        );
+        // The daemon closed its side: EOF must arrive at once, not when the
+        // child that inherited the fd finally exits.
+        let mut extra = [0u8; 1];
+        let after = stream.read(&mut extra);
+        if let Some(mut child) = h.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            matches!(after, Ok(0)),
+            "connection still open after the reply: {after:?}"
+        );
     }
 
     #[test]
