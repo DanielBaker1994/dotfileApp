@@ -1020,6 +1020,49 @@ impl BinaryCompare {
             Some(n)
         }
     }
+
+    /// [`Self::first_difference`] over two files, read in 64 KiB chunks. This
+    /// is the "quick byte compare" for a pair past `[compare] max-bytes`:
+    /// `load_side` drops a too-large side's bytes instead of keeping them, so
+    /// the summary compares the files themselves (constant memory). A missing
+    /// side counts as an empty file.
+    pub fn first_difference_files(a: Option<&Path>, b: Option<&Path>) -> Option<usize> {
+        const CHUNK: usize = 64 * 1024;
+        let mut fa = a.and_then(|p| std::fs::File::open(p).ok());
+        let mut fb = b.and_then(|p| std::fs::File::open(p).ok());
+        let (mut ba, mut bb) = (vec![0u8; CHUNK], vec![0u8; CHUNK]);
+        let mut at = 0;
+        loop {
+            let (na, nb) = (read_chunk(fa.as_mut(), &mut ba), read_chunk(fb.as_mut(), &mut bb));
+            let n = na.min(nb);
+            if let Some(i) = (0..n).find(|&i| ba[i] != bb[i]) {
+                return Some(at + i);
+            }
+            at += n;
+            if na != nb {
+                return Some(at);
+            }
+            if n == 0 {
+                return None;
+            }
+        }
+    }
+}
+
+/// Fill `buf` from `f` (one chunk, short only at EOF or on an error).
+fn read_chunk(f: Option<&mut std::fs::File>, buf: &mut [u8]) -> usize {
+    use std::io::Read;
+    let Some(f) = f else { return 0 };
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    n
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2041,6 +2084,10 @@ pub struct CompareSession {
     pub disk: HashMap<CompareSide, Vec<u8>>,
     pub binary: HashMap<CompareSide, Vec<u8>>,
     pub too_large: HashMap<CompareSide, bool>,
+    /// The quick byte compare for a pair past `[compare] max-bytes` (whose
+    /// bytes are not kept in memory): `None` = not compared, `Some(None)` =
+    /// equal bytes, `Some(Some(d))` = first difference at byte `d`.
+    pub too_large_diff: Option<Option<usize>>,
     pub git: bool,
     pub clean_depth: [i64; 2],
     pub filter: CompareFilter,
@@ -2069,6 +2116,7 @@ impl CompareSession {
             disk: HashMap::new(),
             binary: HashMap::new(),
             too_large: HashMap::new(),
+            too_large_diff: None,
             git: false,
             clean_depth: [0, 0],
             filter: CompareFilter::All,
@@ -2170,9 +2218,11 @@ impl CompareSession {
     /// `binarySummary(_:)`.
     fn binary_summary(&self, cfg: &CompareConfig) -> String {
         let empty: Vec<u8> = Vec::new();
-        let disk = |side| self.disk.get(&side).unwrap_or(&empty);
-        if self.too_large.values().any(|v| *v) && self.binary.is_empty() {
-            let d = BinaryCompare::first_difference(disk(CompareSide::Left), disk(CompareSide::Right));
+        if self.too_large.values().any(|v| *v) {
+            // The bytes are not in memory (see `load_side`): byte-compare the
+            // files themselves. Cached on the session (`refresh`), so a
+            // repaint does not re-read a 50 MB+ pair.
+            let d = self.too_large_diff.unwrap_or_else(|| self.files_first_difference());
             let what = match d {
                 None => "identical bytes".to_string(),
                 Some(d) => format!("differ (first difference at byte {d})"),
@@ -2197,6 +2247,12 @@ impl CompareSession {
                 ),
             ),
         }
+    }
+
+    /// [`BinaryCompare::first_difference_files`] over the session's paths.
+    fn files_first_difference(&self) -> Option<usize> {
+        let path = |side| self.path.get(&side).map(String::as_str).map(Path::new);
+        BinaryCompare::first_difference_files(path(CompareSide::Left), path(CompareSide::Right))
     }
 
     pub fn display_count(&self) -> usize {
@@ -2232,6 +2288,8 @@ impl CompareSession {
 
     pub fn refresh(&mut self, context: usize) {
         self.version += 1;
+        self.too_large_diff =
+            self.too_large.values().any(|v| *v).then(|| self.files_first_difference());
         self.visible = self.model.visible_rows(self.filter, context);
         let dc = self.display_count();
         self.cursor = self.cursor.min(dc.saturating_sub(1));
@@ -3415,7 +3473,11 @@ impl CompareWindowModel {
             return (TextSide::default(), None, false);
         };
         if data.len() > self.config.max_bytes() {
-            return (TextSide::default(), Some(Vec::new()), true);
+            // Past `max-bytes` the bytes are not held (a byte compare reads the
+            // files instead — `CompareSession::files_first_difference`); an
+            // empty placeholder here made the summary compare two empty buffers
+            // and claim "identical" (APP-BUGS L4).
+            return (TextSide::default(), None, true);
         }
         match TextSide::decode(self.backend.as_ref(), &data) {
             Some(side) => (side, None, false),
@@ -7335,6 +7397,68 @@ mod tests {
             s.summary(&cfg),
             "Binary files differ (3 bytes vs 4 bytes, first difference at byte 1)"
         );
+    }
+
+    // APP-BUGS L4: a pair past `[compare] max-bytes` reported "Binary files
+    // are identical" even when the bytes differ (`load_side` dropped them).
+    #[test]
+    fn too_large_pair_is_byte_compared_from_disk() {
+        let dir = temp_dir("toolarge");
+        let mut entries = HashMap::new();
+        entries.insert("max-bytes".to_string(), "1048576".to_string());
+        let cfg = CompareConfig::from_entries(entries);
+        let limit = cfg.max_bytes();
+        let (a, b, same) =
+            (format!("{dir}/a.bin"), format!("{dir}/b.bin"), format!("{dir}/c.bin"));
+        let mut left = vec![b'z'; limit + 1];
+        std::fs::write(&a, &left).unwrap();
+        left[0] = b'y';
+        std::fs::write(&b, &left).unwrap();
+        std::fs::write(&same, vec![b'z'; limit + 1]).unwrap();
+        let mut model =
+            CompareWindowModel::with_backend(Stub::new(), cfg, CompareRecent::new(&dir));
+        let label = "Too large for Text Compare ([compare] max-lines / max-bytes): ";
+        // Differing bytes, same size: "differ", not "identical".
+        model.open_pair(Some(&a), Some(&b));
+        assert_eq!(
+            model.current().unwrap().summary(&model.config),
+            format!("{label}differ (first difference at byte 0)")
+        );
+        // Equal bytes past the limit stay identical.
+        model.open_pair(Some(&a), Some(&same));
+        assert_eq!(
+            model.current().unwrap().summary(&model.config),
+            format!("{label}identical bytes")
+        );
+        // A too-large file against an empty side differs too.
+        model.open_pair(Some(&a), None);
+        assert_eq!(
+            model.current().unwrap().summary(&model.config),
+            format!("{label}differ (first difference at byte 0)")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_first_difference_streams_across_chunks() {
+        let dir = temp_dir("chunks");
+        let (a, b, c) = (format!("{dir}/a"), format!("{dir}/b"), format!("{dir}/c"));
+        let n = 64 * 1024 + 10;
+        std::fs::write(&a, vec![7u8; n]).unwrap();
+        let mut v = vec![7u8; n];
+        v[64 * 1024 + 5] = 8;
+        std::fs::write(&b, &v).unwrap();
+        std::fs::write(&c, vec![7u8; n + 3]).unwrap();
+        fn p(s: &str) -> Option<&Path> {
+            Some(Path::new(s))
+        }
+        assert_eq!(BinaryCompare::first_difference_files(p(&a), p(&a)), None);
+        assert_eq!(BinaryCompare::first_difference_files(p(&a), p(&b)), Some(64 * 1024 + 5));
+        // One file is a prefix of the other.
+        assert_eq!(BinaryCompare::first_difference_files(p(&a), p(&c)), Some(n));
+        assert_eq!(BinaryCompare::first_difference_files(None, p(&a)), Some(0));
+        assert_eq!(BinaryCompare::first_difference_files(None, None), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
