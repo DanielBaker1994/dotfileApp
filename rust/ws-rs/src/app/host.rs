@@ -787,6 +787,23 @@ fn note_excerpt(path: &str) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+/// The view Ctrl+Tab (`dir` > 0) / Ctrl+Shift+Tab (`dir` < 0) moves to in
+/// the header's `views`, wrapping; a sub view (Jira detail, compare text)
+/// counts as its header icon. `None` when there are no views.
+fn cycle_target(views: &[SlotView], cur: Option<SlotView>, dir: i32) -> Option<SlotView> {
+    if views.is_empty() {
+        return None;
+    }
+    let n = views.len() as i32;
+    let at = cur.and_then(|c| views.iter().position(|v| v.nav_id() == c.nav_id()));
+    let i = match at {
+        Some(i) => (i as i32 + if dir < 0 { -1 } else { 1 }).rem_euclid(n),
+        None if dir < 0 => n - 1,
+        None => 0,
+    };
+    Some(views[i as usize])
+}
+
 /// Mirrors `SwitcherController`: owns the registry, the shared-window state,
 /// the `[app]` settings and the pane/vim models.
 pub struct SwitcherController {
@@ -1550,8 +1567,19 @@ impl SwitcherController {
         self.inner.lock().unwrap().home();
     }
 
+    /// Ctrl+Tab / Ctrl+Shift+Tab: the next / previous header view (the nav
+    /// icons, so only the shown views), opened as its header click would.
+    /// Without nav icons (no views registered) it is the Files <-> Notes toggle.
     pub fn cycle(&self, dir: i32) {
-        self.inner.lock().unwrap().cycle(dir);
+        let views: Vec<SlotView> = self.registry.nav_icons().iter().map(|n| n.view).collect();
+        match cycle_target(&views, self.current(), dir) {
+            Some(v) => {
+                self.nav_clicked(v.nav_id());
+                let now = self.current().map(|v| v.raw()).unwrap_or("nil");
+                self.inner.lock().unwrap().logs.push(format!("cycle: dir={dir} now={now}"));
+            }
+            None => self.inner.lock().unwrap().cycle(dir),
+        }
     }
 
     pub fn hotkey(&self, v: SlotView) {
@@ -14428,9 +14456,41 @@ mod tests {
     }
 
     #[test]
+    fn cycle_walks_the_header_views_both_ways() {
+        use SlotView::*;
+        let views = [Notes, Files, Jira, Confluence, Compare, Ai];
+        assert_eq!(cycle_target(&views, Some(Files), 1), Some(Jira));
+        assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Notes), "wraps forward");
+        assert_eq!(cycle_target(&views, Some(Notes), -1), Some(Ai), "wraps back");
+        assert_eq!(cycle_target(&views, Some(Detail), 1), Some(Confluence), "a Jira sub view is Jira");
+        assert_eq!(cycle_target(&views, Some(CompareText), -1), Some(Confluence));
+        assert_eq!(cycle_target(&views, None, 1), Some(Notes));
+        assert_eq!(cycle_target(&[], Some(Notes), 1), None);
+
+        let mut c = controller();
+        c.registry_mut().set_nav(vec![
+            (Notes, "Notes".into(), None),
+            (Files, "Files".into(), None),
+            (Jira, "Jira".into(), None),
+            (Compare, "Compare".into(), None),
+        ]);
+        c.open(Files);
+        let mut seen = vec![];
+        for _ in 0..4 {
+            assert_eq!(c.do_action("cycle"), None);
+            seen.push(c.current().unwrap());
+        }
+        assert_eq!(seen, [Jira, Compare, Notes, Files]);
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(Notes));
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(Compare));
+    }
+
+    #[test]
     fn cycle_and_cycle_back_are_a_two_view_toggle() {
-        // Swift's `SharedWindow.cycle(_:)` ignores `dir` too (`current == .files
-        // ? navNotes : navFiles`), so `cycle-back` is identical by design.
+        // With no header views registered, cycling falls back to Swift's
+        // `SharedWindow.cycle(_:)` toggle (`current == .files ? navNotes : navFiles`).
         let c = controller();
         assert_eq!(c.do_action("cycle-back"), None);
         assert_eq!(c.current(), Some(SlotView::Files));
