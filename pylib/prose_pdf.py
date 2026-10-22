@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import jsonmgr
 import os
+import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -181,7 +183,7 @@ def export(note: str, raw) -> dict:
                            capture_output=True, text=True)
         if w.returncode != 0 or not os.path.isfile(out):
             return {"ok": False, "error": "weasyprint failed: %s" % first_line(w.stderr)}
-        return {"ok": True, "out": out, "html": write_html(note, html, c)}
+        return {"ok": True, "out": out, "html": write_html(note, html, c), "png": write_png(out)}
     except OSError as e:
         return {"ok": False, "error": str(e)}
     finally:
@@ -203,6 +205,35 @@ def write_html(note: str, html: str, c: dict) -> str | None:
         return out
     except OSError:
         return None
+
+
+def write_png(pdf: str) -> str | None:
+    """<stem>.png beside the PDF, 200 dpi, every page stacked top to bottom
+    (the same image mdo writes); page 1 alone without ImageMagick. None when
+    poppler is missing or rasterising fails."""
+    pdftoppm = shutil.which("pdftoppm") or "/opt/homebrew/bin/pdftoppm"
+    magick = shutil.which("magick") or "/opt/homebrew/bin/magick"
+    if not os.access(pdftoppm, os.X_OK):
+        return None
+    out = os.path.splitext(pdf)[0] + ".png"
+    tmp = tempfile.mkdtemp(prefix="prose-png-")
+    try:
+        r = subprocess.run([pdftoppm, "-r", "200", "-png", pdf, os.path.join(tmp, "p")],
+                           capture_output=True)
+        pages = sorted(f for f in os.listdir(tmp) if f.endswith(".png"))
+        if r.returncode != 0 or not pages:
+            return None
+        paths = [os.path.join(tmp, f) for f in pages]
+        if len(paths) > 1 and os.access(magick, os.X_OK):
+            if subprocess.run([magick] + paths + ["-append", out], capture_output=True).returncode != 0:
+                return None
+        else:
+            shutil.move(paths[0], out)
+        return out
+    except OSError:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def first_line(text: str) -> str:

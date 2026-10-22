@@ -118,6 +118,10 @@ class Real(unittest.TestCase):
         r = pp.export(note, self.cfg)
         self.assertTrue(r["ok"], r.get("error"))
         self.assertEqual(r["html"], self.tmp + "/out/wide.html")
+        if shutil.which("pdftoppm"):
+            self.assertEqual(r["png"], self.tmp + "/out/wide.png")
+            with open(r["png"], "rb") as f:
+                self.assertEqual(f.read(4), b"\x89PNG")
         with open(r["html"], encoding="utf-8") as f:
             html = f.read()
         self.assertIn("table:has(tr > :nth-child(10))", html)
