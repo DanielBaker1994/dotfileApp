@@ -1000,7 +1000,9 @@ pub struct FileMenuActions {
 /// the terminal's selected-path menu and the "Find Recent Files" popup, so a
 /// right-click on a file reads the same everywhere. Canonical order:
 /// `Open / Reveal in Files / ── / Rename… / Compress / Move to Trash / ── /
-/// Copy File / Copy Absolute Path / Open in Notes`. "Open in Notes" is a
+/// Copy File / Copy Absolute Path / Copy Contents / Open in Notes`. "Copy
+/// Contents" (the file's text, like `cat | pbcopy`) rides on Copy Absolute
+/// Path and is skipped for a directory. "Open in Notes" is a
 /// file-only row (a directory has nothing to edit). Surfaces splice their
 /// extra rows (Quick Look, the Copy/Cut/Duplicate block, Compare) around the
 /// core; richer surface variants of a core row keep their own label and
@@ -1028,6 +1030,7 @@ pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_
     }
     if let Some(f) = a.copy_path {
         blocks[2].push(MenuEntry::item("Copy Absolute Path", f));
+        blocks[2].extend(copy_contents_entry(path));
     }
     if !Path::new(path).is_dir() {
         if let Some(f) = a.open_in_notes {
@@ -1045,6 +1048,32 @@ pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_
         e.extend(block);
     }
     e
+}
+
+/// The file's text as UTF-8, or why it can't be copied as text.
+pub fn file_text_contents(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Can't read {path}: {e}"))?;
+    String::from_utf8(bytes).map_err(|_| "Not a text file".to_string())
+}
+
+/// "Copy Contents": the file's text on the clipboard (`cat file | pbcopy`).
+/// `None` for a directory or a missing path, so menus simply skip the row.
+pub fn copy_contents_entry(path: &str) -> Option<crate::ui::menu_kit::MenuEntry> {
+    if !Path::new(path).is_file() {
+        return None;
+    }
+    let p = path.to_string();
+    Some(crate::ui::menu_kit::MenuEntry::item("Copy Contents", move || {
+        match file_text_contents(&p) {
+            Ok(text) => {
+                crate::platform::set_text(&text);
+                let home = std::env::var("HOME").unwrap_or_default();
+                let name = crate::views::notes::tilde_path(&p, &home);
+                crate::ui::toast::show(&format!("Copied contents of {name}"), "doc.on.clipboard");
+            }
+            Err(e) => crate::ui::toast::show(&e, "exclamationmark.triangle.fill"),
+        }
+    }))
 }
 
 // ------------------------------------------------------------------ appkit layout
@@ -2609,6 +2638,21 @@ mod tests {
     }
 
     #[test]
+    fn file_text_contents_reads_text_and_refuses_binary() {
+        let dir = std::env::temp_dir().join(format!("ks-contents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = dir.join("n.md");
+        std::fs::write(&md, "# Title\n\n| a | b |\n").unwrap();
+        assert_eq!(file_text_contents(&md.to_string_lossy()).unwrap(), "# Title\n\n| a | b |\n");
+        let bin = dir.join("b.bin");
+        std::fs::write(&bin, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        assert_eq!(file_text_contents(&bin.to_string_lossy()).unwrap_err(), "Not a text file");
+        assert!(copy_contents_entry(&dir.to_string_lossy()).is_none());
+        assert!(copy_contents_entry(&md.to_string_lossy()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_context_menu_core_order_for_a_file() {
         let dir = std::env::temp_dir().join(format!("ks-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2631,6 +2675,7 @@ mod tests {
                 "\u{2500}\u{2500}",
                 "Copy File",
                 "Copy Absolute Path",
+                "Copy Contents",
                 "Open in Notes",
             ]
         );

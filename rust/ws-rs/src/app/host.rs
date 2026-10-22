@@ -7198,6 +7198,7 @@ mod daemon_ui {
                         MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p2])),
                         MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p3)),
                     ];
+                    entries.extend(crate::views::files::copy_contents_entry(&path));
                     if pinned {
                         entries.push(MenuEntry::Separator);
                         entries.push(MenuEntry::item("Unpin", move || {
@@ -7692,6 +7693,7 @@ mod daemon_ui {
                         }));
                     }
                     entries.push(MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)));
+                    entries.extend(crate::views::files::copy_contents_entry(&path));
                     entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])));
                     if !is_root {
                         entries.push(MenuEntry::Separator);
@@ -7889,7 +7891,7 @@ mod daemon_ui {
                     let (p1, p3, pr, w) = (path.clone(), path.clone(), path.clone(), weak.clone());
                     let (pd, wd) = (path.clone(), weak.clone());
                     popup(
-                        vec![
+                        [vec![
                             MenuEntry::item("Rename\u{2026}  F2", move || {
                                 if let Some(ui) = w.load() {
                                     ui.notes_begin_rename(pr.clone(), Some(i));
@@ -7897,6 +7899,9 @@ mod daemon_ui {
                             }),
                             MenuEntry::Separator,
                             MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
+                        ],
+                        crate::views::files::copy_contents_entry(&path).into_iter().collect(),
+                        vec![
                             MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
                             MenuEntry::Separator,
                             MenuEntry::item("Close", move || {
@@ -7910,6 +7915,10 @@ mod daemon_ui {
                                 }
                             }),
                         ],
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
                         None,
                         x,
                         y,
@@ -8352,6 +8361,9 @@ mod daemon_ui {
                 crate::ui::toast::show(&msg, "doc.on.clipboard");
             })))));
             let p = t.path.clone().unwrap_or_default();
+            if on_side && !t.is_folder {
+                e.extend(crate::views::files::copy_contents_entry(&p));
+            }
             let (p1, p2) = (p.clone(), p.clone());
             e.push(item("Reveal in Files", on_side, Box::new(move || reveal_in_files(&[p1]))));
             if !t.is_folder {
@@ -8554,6 +8566,7 @@ mod daemon_ui {
             let p = path.clone().unwrap_or_default();
             let (p1, p2, p3) = (p.clone(), p.clone(), p.clone());
             e.push(item("Copy Absolute Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
+            e.extend(crate::views::files::copy_contents_entry(&p));
             e.push(item("Reveal in Files", has_path, Box::new(move || reveal_in_files(&[p2]))));
             let w = weak.clone();
             e.push(item(
@@ -8810,10 +8823,13 @@ mod daemon_ui {
             let (w2, w3) = (weak.clone(), weak.clone());
             let (r2, r3) = (r.clone(), r.clone());
             popup(
-                vec![
+                [vec![
                     file_action_open_in_notes(&r.path, &weak),
                     MenuEntry::Separator,
                     file_action_copy_path(&r.path),
+                ],
+                crate::views::files::copy_contents_entry(&r.path).into_iter().collect(),
+                vec![
                     MenuEntry::item("Duplicate…", move || {
                         if let Some(ui) = w2.load() {
                             ui.ai_new_rule(Some(r2));
@@ -8849,6 +8865,10 @@ mod daemon_ui {
                     MenuEntry::Separator,
                     file_action_reveal(&r.path),
                 ],
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 None,
                 x,
                 y,
@@ -12522,6 +12542,7 @@ mod daemon_ui {
                 // "Copy Absolute Path" is the row the user wants, and a second
                 // identically-labelled row copying the note would just confuse.
                 e.push(file_action_copy_path(&note));
+                e.extend(crate::views::files::copy_contents_entry(&note));
             }
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             e.push(MenuEntry::item("Open file at path…", move || {
