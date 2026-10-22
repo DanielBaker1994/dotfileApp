@@ -154,8 +154,10 @@ pub fn config_setting_text(
         .map(str::to_string)
 }
 
+/// The config's lines; a leading UTF-8 BOM is dropped (an editor that saves
+/// one used to hide the first `[app]` header, losing the whole section).
 pub fn config_lines(text: &str) -> Vec<String> {
-    text.split('\n').map(str::to_string).collect()
+    text.strip_prefix('\u{feff}').unwrap_or(text).split('\n').map(str::to_string).collect()
 }
 
 static TRI_MEMO: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();

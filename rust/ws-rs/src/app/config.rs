@@ -1490,6 +1490,7 @@ fn columns_json_problem(value: &str) -> Option<String> {
 
 
 pub fn validate_config(text: &str) -> Vec<ConfigIssue> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let lines = config_text::config_decoded_lines(text);
     // A helper failure yields no decoded lines (a successful decode returns one
     // record per source line, blanks and comments included). Do not report a
@@ -1616,7 +1617,11 @@ pub fn commands_conf_path() -> PathBuf {
 }
 
 pub fn read_config_text_at(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    // Drop a UTF-8 BOM so the first section header still parses.
+    std::fs::read_to_string(path).ok().map(|t| match t.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => t,
+    })
 }
 
 pub fn read_config_text() -> Option<String> {

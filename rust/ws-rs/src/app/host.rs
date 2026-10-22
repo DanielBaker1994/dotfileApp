@@ -1807,7 +1807,8 @@ impl SwitcherController {
             }
         };
         let text = match String::from_utf8(bytes) {
-            Ok(t) => t,
+            // A leading BOM would hide the first section header.
+            Ok(t) => t.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(t),
             Err(e) => {
                 let parked = config::park_broken_config(&path, e.as_bytes());
                 let mut inner = self.inner.lock().unwrap();
@@ -14973,6 +14974,19 @@ mod tests {
         assert_eq!(inner.current, Some(SlotView::Notes));
         inner.toggle(true);
         assert_eq!(inner.current, None);
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_section() {
+        let s = parse_sections("\u{feff}[app]\nesc-hides = true\n[files]\nroot = \"~/x\"\n");
+        assert_eq!(s.get("app").and_then(|a| a.get("esc-hides")).map(String::as_str), Some("true"));
+        assert_eq!(parse_sections_ordered("\u{feff}[app]\nx = 1\n")[0].0, "app");
+        let dir = std::env::temp_dir().join(format!("ks-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("commands.toml");
+        std::fs::write(&f, "\u{feff}[app]\nx = 1\n").unwrap();
+        assert!(crate::app::config::read_config_text_at(&f).unwrap().starts_with("[app]"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
