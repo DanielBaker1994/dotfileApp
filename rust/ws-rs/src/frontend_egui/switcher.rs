@@ -57,7 +57,7 @@ impl SwitcherOverlay {
     ///
     /// `controller` is the source of truth for which panel is up
     /// (`view_switcher_shown` / `is_palette_visible`) and the target of an
-    /// accept (`nav_clicked` / `run_palette_command` / `switch_workspace`).
+    /// accept (`nav_clicked` / `run_palette_command`).
     pub fn ui(&mut self, ctx: &egui::Context, controller: &SwitcherController) {
         // Show/hide is read from the controller flags each frame, so the
         // socket's `ShowPalette` / `ShowSwitcher` verbs (logged and ignored in
@@ -83,13 +83,14 @@ impl SwitcherOverlay {
         // --- keys (`route_key_event`'s switcher / palette handling) --------
         // Read before the widgets so the focused field cannot eat navigation:
         // a single-line field uses none of ↑ / ↓ / Esc.
-        let (up, down, esc, enter, tab) = ctx.input(|i| {
+        let (up, down, esc, enter, tab, shift) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowUp),
                 i.key_pressed(egui::Key::ArrowDown),
                 i.key_pressed(egui::Key::Escape),
                 i.key_pressed(egui::Key::Enter),
                 i.key_pressed(egui::Key::Tab),
+                i.modifiers.shift,
             )
         });
         let mut events: Vec<SwitcherEvent> = Vec::new();
@@ -105,8 +106,9 @@ impl SwitcherOverlay {
         if enter {
             events.push(SwitcherEvent::Enter);
         }
+        // The palette is one list: Tab moves down, Shift+Tab up.
         if tab && kind == OverlayKind::Palette {
-            events.push(SwitcherEvent::SwitchPane(1 - snap.split_pane));
+            events.push(SwitcherEvent::Move(if shift { -1 } else { 1 }));
         }
 
         // --- the filter field (`ViewSwitcherPanel.search` / the palette's) --
@@ -140,7 +142,7 @@ impl SwitcherOverlay {
                     events.push(SwitcherEvent::Query(self.filter.clone()));
                 }
                 ui.separator();
-                // --- the rows (`ListRows` / `drawSplitRow`) ----------------
+                // --- the rows (`ListRows`) ---------------------------------
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for (i, row) in snap.rows.iter().enumerate() {
                         let label = egui::RichText::new(row_label(row)).color(c(colors.text));
@@ -167,7 +169,6 @@ impl SwitcherOverlay {
     /// `show_switcher`): commands from the registry, the switcher's views from
     /// the nav icons, and the current view pre-selected.
     fn open(&mut self, kind: OverlayKind, controller: &SwitcherController) {
-        let commands = palette_commands(controller);
         match kind {
             OverlayKind::Switcher => {
                 let views: Vec<SwitchView> = controller
@@ -178,12 +179,10 @@ impl SwitcherOverlay {
                     .collect();
                 let current = controller.current().map(|v| v.nav_id());
                 self.switcher.show(&views, current, None);
-                self.switcher.set_commands(commands);
+                self.switcher.set_commands(palette_commands(controller));
             }
             OverlayKind::Palette => {
-                // AeroSpace workspaces are a macOS concept (`gather_workspaces`
-                // shells out to the CLI); the egui palette lists commands.
-                self.palette = PaletteModel::new(commands, Vec::new());
+                self.palette = PaletteModel::new(controller.hyper_palette_commands());
                 self.palette.shown = true;
             }
         }
@@ -238,11 +237,11 @@ impl SwitcherOverlay {
                     controller.nav_clicked(id);
                 }
             }
-            OverlayKind::Palette => match self.palette.accept() {
-                Some(PaletteAction::Command(name)) => controller.run_palette_command(&name),
-                Some(PaletteAction::Workspace(id)) => controller.switch_workspace(&id),
-                None => {}
-            },
+            OverlayKind::Palette => {
+                if let Some(PaletteAction::Command(name)) = self.palette.accept() {
+                    controller.run_palette_command(&name);
+                }
+            }
         }
     }
 }
@@ -260,7 +259,8 @@ fn overlay_kind(controller: &SwitcherController) -> Option<OverlayKind> {
 }
 
 /// The registry's palette commands as the models' `(name, title)` pairs
-/// (`show_palette`'s `paletteCommands()` map).
+/// (the Ctrl+B W `/` commands; the Hyper+S palette uses
+/// `hyper_palette_commands`).
 fn palette_commands(controller: &SwitcherController) -> Vec<(String, String)> {
     controller
         .registry()
@@ -270,8 +270,7 @@ fn palette_commands(controller: &SwitcherController) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The label one row draws (`SwitchRow.summary` / the command title /
-/// `PaletteRow::summary`).
+/// The label one row draws (`SwitchRow.summary` / the command title).
 fn row_label(row: &SwitcherRow) -> String {
     match row {
         SwitcherRow::View(r) => row_summary(r),
@@ -282,7 +281,6 @@ fn row_label(row: &SwitcherRow) -> String {
                 title.clone()
             }
         }
-        SwitcherRow::Palette(r) => r.summary(),
     }
 }
 
@@ -312,7 +310,7 @@ fn status_line(status: &SwitcherStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::views::switcher::{PaletteRow, SwitchRow, WorkspaceRow};
+    use crate::views::switcher::SwitchRow;
 
     fn view_row(name: &str, number: i64, current: bool) -> SwitchRow {
         SwitchRow {
@@ -326,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_the_three_row_kinds() {
+    fn labels_the_row_kinds() {
         assert_eq!(
             row_label(&SwitcherRow::View(view_row("Files", 3, true))),
             "3   Files   ● here"
@@ -340,17 +338,6 @@ mod tests {
             row_label(&SwitcherRow::Command { name: "notes".into(), title: String::new() }),
             "notes"
         );
-        let row = PaletteRow {
-            command: Some(("notes".into(), "Notes".into())),
-            workspace: Some(WorkspaceRow {
-                id: "2".into(),
-                apps: Vec::new(),
-                focused: true,
-                unread: "3".into(),
-                match_text: String::new(),
-            }),
-        };
-        assert_eq!(row_label(&SwitcherRow::Palette(row)), "Notes    2  (3)");
     }
 
     #[test]

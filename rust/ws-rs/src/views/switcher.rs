@@ -1024,256 +1024,87 @@ mod switch_ui {
 }
 
 // ---------------------------------------------------------------------------
-// The `show` command palette (`SwitcherController`: commands + workspaces)
+// The `show` command palette (Hyper+S: the `[app] palette` commands)
 // ---------------------------------------------------------------------------
-
-/// One app row inside a workspace (`WorkspaceInfo.AppInfo`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaletteApp {
-    pub name: String,
-    pub title: String,
-}
-
-/// A workspace row from `gatherWorkspaces()`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkspaceRow {
-    pub id: String,
-    pub apps: Vec<PaletteApp>,
-    pub focused: bool,
-    pub unread: String,
-    /// `"App — title · App2"` for the matched apps (Swift `row.match`).
-    pub match_text: String,
-}
-
-/// A `SplitRow`: the command pane cell and/or the workspace pane cell.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaletteRow {
-    pub command: Option<(String, String)>,
-    pub workspace: Option<WorkspaceRow>,
-}
-
-impl PaletteRow {
-    /// The drawn label (command title on the left, workspace summary right).
-    pub fn summary(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some((_, label)) = &self.command {
-            parts.push(label.clone());
-        }
-        if let Some(ws) = &self.workspace {
-            let mut ws_text = ws.id.clone();
-            if !ws.match_text.is_empty() {
-                ws_text.push_str(&format!("  {}", ws.match_text));
-            }
-            if !ws.unread.is_empty() {
-                ws_text.push_str(&format!("  ({})", ws.unread));
-            }
-            parts.push(ws_text);
-        }
-        parts.join("    ")
-    }
-}
 
 /// What accepting a row does (`accept(_:)`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaletteAction {
     Command(String),
-    Workspace(String),
 }
 
-/// The palette model: `paletteCommands()` + workspaces, the fuzzy filter, the
-/// two-pane cursor and the accept decision. Pure; the panel draws it.
+/// The Hyper+S palette model: one list of commands (`[app] palette`), the
+/// fuzzy filter, the cursor and the accept decision. Pure; the panel draws
+/// it. (It used to pair a second, Tab-switched pane of AeroSpace
+/// workspaces; that pane is gone — one list, nothing to gather on show.)
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PaletteModel {
     pub commands: Vec<(String, String)>,
-    pub workspaces: Vec<WorkspaceRow>,
     pub query: String,
-    pub split_pane: usize,
     pub selection: usize,
     pub shown: bool,
     /// The status row's data (`SwitcherController.status`; gathered off-main).
     pub status: SwitcherStatus,
-    /// The last filtered query (`splitQuery` — resets pane + selection).
+    /// The last filtered query (a change resets the selection).
     last_query: String,
 }
 
 impl PaletteModel {
-    pub fn new(commands: Vec<(String, String)>, workspaces: Vec<WorkspaceRow>) -> Self {
+    pub fn new(commands: Vec<(String, String)>) -> Self {
         PaletteModel {
             commands,
-            workspaces,
             ..Default::default()
         }
     }
 
-    /// Update the query; a change resets the pane + selection and re-runs the
-    /// split decision (`filter(_:)`'s side effects).
+    /// Update the query; a change resets the selection.
     pub fn set_query(&mut self, query: &str) {
         let q = query.trim().to_lowercase();
         if q != self.last_query {
             self.last_query = q;
-            self.split_pane = 0;
             self.selection = 0;
         }
         self.query = query.to_string();
-        let (cmds_empty, ws_empty) = {
-            let (cmds, ws) = self.filtered();
-            (cmds.is_empty(), ws.is_empty())
-        };
-        if cmds_empty && !ws_empty {
-            self.split_pane = 1;
-        }
     }
 
-    fn filtered(&self) -> (Vec<(String, String)>, Vec<WorkspaceRow>) {
+    /// The commands the query keeps, best match first (a leading `/` is
+    /// ignored: the palette is all commands).
+    pub fn rows(&self) -> Vec<(String, String)> {
         let q = self.query.trim().to_lowercase();
-        let slash = q.starts_with('/');
-        let t = if slash {
-            q.trim_start_matches('/').trim().to_string()
-        } else {
-            q.clone()
-        };
-        let cmds = if t.is_empty() {
-            self.commands.clone()
-        } else {
-            let texts: Vec<String> = self
-                .commands
-                .iter()
-                .map(|(name, label)| format!("{label} {name}"))
-                .collect();
-            let mut idx = FuzzyIndex::new(&texts);
-            idx.ranked(&t)
-                .into_iter()
-                .map(|i| self.commands[i].clone())
-                .collect()
-        };
-        let ws = if slash {
-            Vec::new()
-        } else {
-            self.filtered_workspaces(&t)
-        };
-        (cmds, ws)
-    }
-
-    fn filtered_workspaces(&self, t: &str) -> Vec<WorkspaceRow> {
-        let mut exact: Vec<WorkspaceRow> = Vec::new();
-        let mut hits: Vec<WorkspaceRow> = Vec::new();
-        for ws in &self.workspaces {
-            let id = ws.id.to_lowercase();
-            if t.is_empty() {
-                if !ws.apps.is_empty() || ws.focused {
-                    hits.push(ws.clone());
-                }
-                continue;
-            }
-            let matched: Vec<&PaletteApp> = ws
-                .apps
-                .iter()
-                .filter(|a| {
-                    a.name.to_lowercase().contains(t) || a.title.to_lowercase().contains(t)
-                })
-                .collect();
-            if id == *t {
-                exact.push(ws.clone());
-            } else if (!ws.apps.is_empty() && id.contains(t)) || !matched.is_empty() {
-                let mut row = ws.clone();
-                if !matched.is_empty() {
-                    row.match_text = matched
-                        .iter()
-                        .take(2)
-                        .map(|a| {
-                            if a.title.is_empty() {
-                                a.name.clone()
-                            } else {
-                                format!("{} — {}", a.name, a.title)
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                }
-                hits.push(row);
-            }
+        let t = q.trim_start_matches('/').trim();
+        if t.is_empty() {
+            return self.commands.clone();
         }
-        exact.extend(hits);
-        exact
-    }
-
-    /// The combined split rows (`filter(_:)`'s output).
-    pub fn rows(&self) -> Vec<PaletteRow> {
-        let (cmds, ws) = self.filtered();
-        (0..cmds.len().max(ws.len()))
-            .map(|i| PaletteRow {
-                command: cmds.get(i).cloned(),
-                workspace: ws.get(i).cloned(),
-            })
+        let texts: Vec<String> = self
+            .commands
+            .iter()
+            .map(|(name, label)| format!("{label} {name}"))
+            .collect();
+        let mut idx = FuzzyIndex::new(&texts);
+        idx.ranked(t)
+            .into_iter()
+            .map(|i| self.commands[i].clone())
             .collect()
     }
 
-    fn has_cell(&self, rows: &[PaletteRow], i: usize, pane: usize) -> bool {
-        rows.get(i)
-            .map(|r| {
-                if pane == 0 {
-                    r.command.is_some()
-                } else {
-                    r.workspace.is_some()
-                }
-            })
-            .unwrap_or(false)
-    }
-
-    /// `moveCursor(_:)` — wrap within the active pane's cells.
+    /// `moveCursor(_:)` — wrap around the list.
     pub fn move_cursor(&mut self, d: i64) {
-        let rows = self.rows();
-        let idx: Vec<usize> = (0..rows.len())
-            .filter(|i| self.has_cell(&rows, *i, self.split_pane))
-            .collect();
-        if idx.is_empty() {
+        let n = self.rows().len();
+        if n == 0 {
             return;
         }
-        match idx.iter().position(|i| *i == self.selection) {
-            Some(pos) => {
-                let next = (pos as i64 + d).rem_euclid(idx.len() as i64) as usize;
-                self.selection = idx[next];
-            }
-            None => self.selection = idx[0],
-        }
+        let cur = self.selection.min(n - 1) as i64;
+        self.selection = (cur + d).rem_euclid(n as i64) as usize;
     }
 
-    /// `switchPane(_:)` — first/last cell of the target pane at or after the
-    /// current selection.
-    pub fn switch_pane(&mut self, pane: usize) {
-        let rows = self.rows();
-        let lines: Vec<usize> = (0..rows.len())
-            .filter(|i| self.has_cell(&rows, *i, pane))
-            .collect();
-        let Some(last) = lines.last().copied() else {
-            return;
-        };
-        self.split_pane = pane;
-        if !lines.contains(&self.selection) {
-            self.selection = lines
-                .iter()
-                .copied()
-                .find(|i| *i >= self.selection)
-                .unwrap_or(last);
-        }
-    }
-
-    /// `accept(_:)` — the active pane's cell of the selected split row.
+    /// `accept(_:)` — the selected command.
     pub fn accept(&self) -> Option<PaletteAction> {
-        let rows = self.rows();
-        let row = rows.get(self.selection)?;
-        if self.split_pane == 0 {
-            row.command
-                .as_ref()
-                .map(|(name, _)| PaletteAction::Command(name.clone()))
-        } else {
-            row.workspace
-                .as_ref()
-                .map(|w| PaletteAction::Workspace(w.id.clone()))
-        }
+        self.rows()
+            .get(self.selection)
+            .map(|(name, _)| PaletteAction::Command(name.clone()))
     }
 
-    /// `switcherKey(_:_:)`: arrows / Ctrl+N,P / Tab / arrows-across / Return.
+    /// `switcherKey(_:_:)`: ↑ ↓ / Ctrl+N,P / Tab, Shift+Tab / Return.
     /// Returns the accept action when Return fires.
     pub fn key(&mut self, code: u16, ctrl: bool, shift: bool, cmd: bool, opt: bool) -> Option<PaletteAction> {
         if cmd || opt {
@@ -1288,21 +1119,9 @@ impl PaletteModel {
                 self.move_cursor(-1);
                 None
             }
+            // One list: Tab just moves down (Shift+Tab up).
             (48, false) => {
-                let _ = shift;
-                self.switch_pane(1 - self.split_pane);
-                None
-            }
-            (123, false) => {
-                if self.query.trim().is_empty() {
-                    self.switch_pane(0);
-                }
-                None
-            }
-            (124, false) => {
-                if self.query.trim().is_empty() {
-                    self.switch_pane(1);
-                }
+                self.move_cursor(if shift { -1 } else { 1 });
                 None
             }
             (36, _) | (76, _) => self.accept(),
@@ -1320,10 +1139,9 @@ impl PaletteModel {
 pub enum SwitcherRow {
     /// A view row (the Ctrl+B W switcher, view mode).
     View(SwitchRow),
-    /// A command row (the Ctrl+B W switcher's `/` command mode).
+    /// A command row (the Hyper+S palette, and the Ctrl+B W switcher's `/`
+    /// command mode).
     Command { name: String, title: String },
-    /// A split row (the `show` palette: a command cell and/or a workspace cell).
-    Palette(PaletteRow),
 }
 
 /// Everything a switcher / palette panel draws, pushed by the model.
@@ -1335,8 +1153,6 @@ pub struct SwitcherSnapshot {
     pub selection: usize,
     pub query: String,
     pub shown: bool,
-    /// The palette's active pane (0 = command, 1 = workspace; switcher 0).
-    pub split_pane: usize,
     /// True in the switcher's `/` command mode.
     pub command_mode: bool,
     /// The palette's status row (the Ctrl+B W switcher has none).
@@ -1355,8 +1171,6 @@ pub enum SwitcherEvent {
     Move(i64),
     /// Esc: close (a live palette query clears instead).
     Escape,
-    /// Tab / left-right: switch the palette's active pane.
-    SwitchPane(usize),
     /// The status row's fresh data arrived (`SwitcherController.onShow`).
     Status(SwitcherStatus),
 }
@@ -1386,7 +1200,6 @@ impl ViewSwitcherPanel {
             selection,
             query,
             shown: self.shown,
-            split_pane: 0,
             command_mode,
             status: None,
         }
@@ -1410,35 +1223,36 @@ impl ViewSwitcherPanel {
                     self.selection = i;
                 }
             }
-            SwitcherEvent::SwitchPane(_) | SwitcherEvent::Status(_) => {}
+            SwitcherEvent::Status(_) => {}
         }
     }
 }
 
 impl PaletteModel {
-    /// Everything the palette draws: the split rows plus the query, the active
-    /// pane, the selection and the status row.
+    /// Everything the palette draws: the command rows plus the query, the
+    /// selection and the status row.
     pub fn snapshot(&self) -> SwitcherSnapshot {
         SwitcherSnapshot {
-            rows: self.rows().into_iter().map(SwitcherRow::Palette).collect(),
+            rows: self
+                .rows()
+                .into_iter()
+                .map(|(name, title)| SwitcherRow::Command { name, title })
+                .collect(),
             selection: self.selection,
             query: self.query.clone(),
             shown: self.shown,
-            split_pane: self.split_pane,
             command_mode: is_command_query(&self.query),
             status: (!self.status.is_empty()).then(|| self.status.clone()),
         }
     }
 
     /// Dispatch one frontend event through the palette's own methods (the same
-    /// ones the AppKit half calls today). A click selects the pane through
-    /// [`SwitcherEvent::SwitchPane`]; accepts are read back through
+    /// ones the AppKit half calls today). Accepts are read back through
     /// [`Self::accept`].
     pub fn handle(&mut self, ev: SwitcherEvent) {
         match ev {
             SwitcherEvent::Query(q) => self.set_query(&q),
             SwitcherEvent::Move(d) => self.move_cursor(d),
-            SwitcherEvent::SwitchPane(p) => self.switch_pane(p),
             SwitcherEvent::Click { row } => {
                 if row < self.rows().len() {
                     self.selection = row;
@@ -1455,69 +1269,11 @@ impl PaletteModel {
                 } else {
                     self.set_query("");
                     self.selection = 0;
-                    self.split_pane = 0;
                 }
             }
             SwitcherEvent::Status(st) => self.status = st,
         }
     }
-}
-
-/// `gatherWorkspaces()` against an injectable AeroSpace caller.
-pub fn gather_workspaces_with(call: &dyn Fn(&[String]) -> Option<String>) -> Vec<WorkspaceRow> {
-    let order_out = call(&["list-workspaces".to_string(), "--all".to_string()])
-        .unwrap_or_default();
-    let order: Vec<String> = order_out.lines().map(str::to_string).collect();
-    let focused = call(&["list-workspaces".to_string(), "--focused".to_string()])
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let mut rows: Vec<WorkspaceRow> = order
-        .iter()
-        .map(|id| WorkspaceRow {
-            id: id.clone(),
-            apps: Vec::new(),
-            focused: *id == focused,
-            unread: String::new(),
-            match_text: String::new(),
-        })
-        .collect();
-    let wins = call(&[
-        "list-windows".to_string(),
-        "--all".to_string(),
-        "--format".to_string(),
-        "%{app-name}|%{window-title}|%{workspace}".to_string(),
-    ])
-    .unwrap_or_default();
-    for line in wins.lines() {
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() != 3 {
-            continue;
-        }
-        if let Some(ws) = rows.iter_mut().find(|w| w.id == parts[2]) {
-            ws.apps.push(PaletteApp {
-                name: parts[0].to_string(),
-                title: parts[1].to_string(),
-            });
-        }
-    }
-    rows.sort_by(|a, b| {
-        let an = a.id.parse::<i64>();
-        let bn = b.id.parse::<i64>();
-        match (an, bn) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-            (Err(_), Err(_)) => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
-        }
-    });
-    rows
-}
-
-/// `gatherWorkspaces()` on the live AeroSpace CLI.
-pub fn gather_workspaces() -> Vec<WorkspaceRow> {
-    let ipc = crate::app::hotkey::AeroIpc::discover();
-    gather_workspaces_with(&|args| crate::app::hotkey::AeroCall::call(&ipc, args))
 }
 
 #[cfg(target_os = "macos")]
@@ -1776,20 +1532,14 @@ mod macos {
     // -- the `show` command palette panel -----------------------------------
 
     /// The palette is wider than the switcher: two panes side by side.
-    pub const PALETTE_WIDTH: f64 = 680.0;
+    pub const PALETTE_WIDTH: f64 = 480.0;
 
-    /// The palette lists more rows than the view switcher (all commands +
-    /// the views + the window), so it has its own, taller cap — the shared
-    /// `MAX_ROWS` would clip the last row.
+    /// The palette's own row cap (the shared `MAX_ROWS` is the view
+    /// switcher's).
     pub const PALETTE_MAX_ROWS: usize = 16;
 
-    /// `splitMid(_:)`.
-    pub fn split_mid(width: f64) -> f64 {
-        (width * 0.46).round()
-    }
-
     /// Shown while the filter is empty (was blank: an unlabeled box).
-    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "Search commands and windows";
+    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "Search commands";
 
     pub struct PaletteHandlerIvars {
         pub model: RefCell<PaletteModel>,
@@ -1901,12 +1651,11 @@ mod macos {
             );
         }
 
-        /// A click: the half picks the pane (`splitMid`), then accept.
-        pub fn click(&self, row: usize, x: f64) {
+        /// A click: select the row, then accept.
+        pub fn click(&self, row: usize) {
             let action = {
                 let mut m = self.ivars().model.borrow_mut();
                 m.selection = row;
-                m.split_pane = if x < split_mid(PALETTE_WIDTH) { 0 } else { 1 };
                 m.accept()
             };
             if let Some(action) = action {
@@ -1920,100 +1669,24 @@ mod macos {
             }
         }
 
-        /// `drawSplitRow(_:_:_:)`: the command cell left of `splitMid`, the
-        /// workspace cell (id chip, apps / match, unread) right of it.
+        /// One command row: a full-width pill with the label.
         pub fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hover: bool) {
             use crate::ui::chrome::Rect;
             use crate::ui::style::{self, Weight};
             let c = crate::ui::theme::PopupThemeDefaults::colors();
             let model = self.ivars().model.borrow();
             let rows = model.rows();
-            let Some(r) = rows.get(i) else { return };
-            let mid = split_mid(rect.width);
-            style::fill_rect(Rect::new(mid, rect.y + 4.0, 1.0, rect.height - 8.0), c.text.with_alpha(0.1));
-            let pill = |x: f64, w: f64| Rect::new(x, rect.mid_y() - 13.0, w, 26.0);
-            if let Some((_, label)) = &r.command {
-                let on = selected && model.split_pane == 0;
-                let cell = pill(8.0, mid - 16.0);
-                style::row_pill(cell, 6.0, on, on, hover, &c, style::RowAccent::Rounded(5.0));
-                let f = style::system_font(13.0, if on { Weight::Semibold } else { Weight::Regular });
-                style::draw_text_left(
-                    label,
-                    Rect::new(cell.x + 14.0, cell.y, cell.width - 22.0, cell.height),
-                    &f,
-                    if on { c.text } else { c.text.with_alpha(0.88) },
-                );
-            }
-            if let Some(ws) = &r.workspace {
-                let on = selected && model.split_pane == 1;
-                let cell = pill(mid + 8.0, rect.width - mid - 16.0);
-                style::row_pill(cell, 6.0, on, on, hover, &c, style::RowAccent::Rounded(5.0));
-                let mono = style::mono_font(11.5, Weight::Semibold);
-                let chip = Rect::new(cell.x + 10.0, cell.mid_y() - 9.0, 22.0, 18.0);
-                let tint = if ws.focused { c.accent } else { c.dim };
-                style::fill_rounded(chip, 5.0, tint.with_alpha(0.18));
-                let (tw, th) = style::text_size(&ws.id, &mono);
-                style::draw_text(&ws.id, chip.mid_x() - tw / 2.0, chip.mid_y() - th / 2.0, &mono, tint);
-                let mut right = cell.max_x() - 10.0;
-                if !ws.unread.is_empty() {
-                    let uf = style::system_font(10.5, Weight::Semibold);
-                    let uw = style::draw_text_right(&ws.unread, Rect::new(cell.x, cell.y, cell.width - 10.0, cell.height), &uf, c.tone(crate::ui::theme::PopupTone::Warning));
-                    right -= uw + 8.0;
-                }
-                // App icons (like the header strip), not names: ≤3 + "+N".
-                let mut names: Vec<&str> = Vec::new();
-                for a in &ws.apps {
-                    if !names.contains(&a.name.as_str()) {
-                        names.push(&a.name);
-                    }
-                }
-                let mut x = chip.max_x() + 12.0;
-                let size = 20.0;
-                for name in names.iter().take(3) {
-                    if x + size > right {
-                        break;
-                    }
-                    style::draw_image(&app_icon_for_name(name), Rect::new(x, cell.mid_y() - size / 2.0, size, size), 1.0);
-                    x += size + 6.0;
-                }
-                if names.len() > 3 {
-                    style::draw_text_left(
-                        &format!("+{}", names.len() - 3),
-                        Rect::new(x, cell.y, (right - x).max(0.0), cell.height),
-                        &style::system_font(11.0, Weight::Medium),
-                        c.dim,
-                    );
-                }
-            }
+            let Some((_, label)) = rows.get(i) else { return };
+            let cell = Rect::new(8.0, rect.mid_y() - 13.0, rect.width - 16.0, 26.0);
+            style::row_pill(cell, 6.0, selected, selected, hover, &c, style::RowAccent::Rounded(5.0));
+            let f = style::system_font(13.0, if selected { Weight::Semibold } else { Weight::Regular });
+            style::draw_text_left(
+                label,
+                Rect::new(cell.x + 14.0, cell.y, cell.width - 22.0, cell.height),
+                &f,
+                if selected { c.text } else { c.text.with_alpha(0.88) },
+            );
         }
-    }
-
-    thread_local! {
-        static APP_ICONS: RefCell<std::collections::HashMap<String, Retained<objc2_app_kit::NSImage>>>
-            = RefCell::new(std::collections::HashMap::new());
-    }
-
-    /// The app's Dock icon by display name (cached); a generic glyph when the
-    /// bundle cannot be found.
-    fn app_icon_for_name(name: &str) -> Retained<objc2_app_kit::NSImage> {
-        if let Some(img) = APP_ICONS.with(|c| c.borrow().get(name).cloned()) {
-            return img;
-        }
-        let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
-        #[allow(deprecated)]
-        let mut path = ws.fullPathForApplication(&NSString::from_str(name)).map(|p| p.to_string());
-        if path.is_none() {
-            path = ["/Applications", "/System/Applications", "/Applications/Utilities"]
-                .iter()
-                .map(|d| format!("{d}/{name}.app"))
-                .find(|p| std::path::Path::new(p).exists());
-        }
-        let img = match path {
-            Some(p) => ws.iconForFile(&NSString::from_str(&p)),
-            None => crate::ui::style::glyph_icon("app.dashed", "?", crate::ui::theme::PopupColors::default().dim, 32.0),
-        };
-        APP_ICONS.with(|c| c.borrow_mut().insert(name.to_string(), img.clone()));
-        img
     }
 
     thread_local! {
@@ -2073,8 +1746,8 @@ mod macos {
             Self::default()
         }
 
-        pub fn set_rows(&mut self, commands: Vec<(String, String)>, workspaces: Vec<WorkspaceRow>) {
-            self.model = PaletteModel::new(commands, workspaces);
+        pub fn set_rows(&mut self, commands: Vec<(String, String)>) {
+            self.model = PaletteModel::new(commands);
             if let Some(h) = &self.handler {
                 // A fresh model means a fresh query — empty the field too, or
                 // the stale text from the last open lingers over the
@@ -2082,15 +1755,6 @@ mod macos {
                 // clears on every show; parity).
                 h.ivars().search.setStringValue(&NSString::from_str(""));
                 *h.model_mut() = self.model.clone();
-                h.rebuild();
-            }
-        }
-
-        /// Swap in fresh workspace rows without disturbing the selection.
-        pub fn refresh_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
-            self.model.workspaces = workspaces.clone();
-            if let Some(h) = &self.handler {
-                h.model_mut().workspaces = workspaces;
                 h.rebuild();
             }
         }
@@ -2154,13 +1818,11 @@ mod macos {
                 let mut model = h.model_mut();
                 model.set_query("");
                 model.selection = 0;
-                model.split_pane = 0;
                 drop(model);
                 h.rebuild();
             }
             self.model.set_query("");
             self.model.selection = 0;
-            self.model.split_pane = 0;
         }
 
         pub fn hide_panel(&mut self) {
@@ -2251,9 +1913,9 @@ mod macos {
                 }
             }));
             let weak = objc2::rc::Weak::from_retained(&handler);
-            list.set_on_click(Box::new(move |row, x, _double| {
+            list.set_on_click(Box::new(move |row, _x, _double| {
                 if let Some(h) = weak.load() {
-                    h.click(row, x);
+                    h.click(row);
                 }
             }));
             let (w1, w2) = (objc2::rc::Weak::from_retained(&handler), objc2::rc::Weak::from_retained(&handler));
@@ -2504,75 +2166,44 @@ mod tests {
     // -- the command palette model ------------------------------------------
 
     fn palette() -> PaletteModel {
-        PaletteModel::new(
+        PaletteModel::new(vec![
+            ("notes".to_string(), "Notes".to_string()),
+            ("jira".to_string(), "Jira Board".to_string()),
+        ])
+    }
+
+    #[test]
+    fn palette_is_one_list_of_commands() {
+        let p = palette();
+        assert_eq!(
+            p.rows(),
             vec![
                 ("notes".to_string(), "Notes".to_string()),
                 ("jira".to_string(), "Jira Board".to_string()),
-            ],
-            vec![
-                WorkspaceRow {
-                    id: "1".to_string(),
-                    apps: vec![PaletteApp {
-                        name: "Ghostty".to_string(),
-                        title: "vim".to_string(),
-                    }],
-                    focused: true,
-                    unread: String::new(),
-                    match_text: String::new(),
-                },
-                WorkspaceRow {
-                    id: "2".to_string(),
-                    apps: vec![PaletteApp {
-                        name: "Safari".to_string(),
-                        title: "docs".to_string(),
-                    }],
-                    focused: false,
-                    unread: String::new(),
-                    match_text: String::new(),
-                },
-            ],
-        )
+            ]
+        );
     }
 
     #[test]
-    fn palette_rows_pair_commands_and_workspaces() {
-        let p = palette();
-        let rows = p.rows();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].command, Some(("notes".into(), "Notes".into())));
-        assert_eq!(rows[0].workspace.as_ref().map(|w| w.id.clone()), Some("1".into()));
-        assert_eq!(rows[1].command.as_ref().unwrap().0, "jira");
-        assert_eq!(rows[1].workspace.as_ref().unwrap().id, "2");
-    }
-
-    #[test]
-    fn palette_slash_lists_commands_only_and_fuzzy_filters() {
+    fn palette_fuzzy_filters_with_or_without_a_slash() {
         let mut p = palette();
+        p.set_query("ji");
+        assert_eq!(p.rows().len(), 1);
+        assert_eq!(p.rows()[0].0, "jira");
         p.set_query("/ji");
-        let rows = p.rows();
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].workspace.is_none());
-        assert_eq!(rows[0].command.as_ref().unwrap().0, "jira");
+        assert_eq!(p.rows()[0].0, "jira");
     }
 
     #[test]
-    fn palette_query_change_resets_pane_and_selection() {
+    fn palette_query_change_resets_selection() {
         let mut p = palette();
-        p.split_pane = 1;
         p.selection = 1;
-        p.set_query("saf");
-        // No command cells survive, so the split falls to the workspace pane
-        // (`filter`'s `cmds.isEmpty && !ws.isEmpty` branch).
-        assert_eq!(p.split_pane, 1);
+        p.set_query("no");
         assert_eq!(p.selection, 0);
-        let rows = p.rows();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].workspace.as_ref().unwrap().id, "2");
-        assert_eq!(rows[0].workspace.as_ref().unwrap().match_text, "Safari — docs");
     }
 
     #[test]
-    fn palette_move_cursor_wraps_within_the_active_pane() {
+    fn palette_move_cursor_wraps() {
         let mut p = palette();
         p.move_cursor(1);
         assert_eq!(p.selection, 1);
@@ -2583,60 +2214,28 @@ mod tests {
     }
 
     #[test]
-    fn palette_switch_pane_snaps_to_the_next_cell() {
-        let mut p = palette();
-        p.split_pane = 1;
-        p.selection = 1;
-        p.switch_pane(0);
-        assert_eq!(p.split_pane, 0);
-        assert_eq!(p.selection, 1, "stay when the row has a command");
-        p.switch_pane(1);
-        assert_eq!(p.selection, 1);
-    }
-
-    #[test]
-    fn palette_accept_resolves_the_active_pane() {
+    fn palette_accept_runs_the_selected_command() {
         let mut p = palette();
         assert_eq!(p.accept(), Some(PaletteAction::Command("notes".into())));
-        p.split_pane = 1;
-        assert_eq!(p.accept(), Some(PaletteAction::Workspace("1".into())));
+        p.set_query("zzz");
+        assert_eq!(p.accept(), None, "nothing matches, nothing runs");
     }
 
     #[test]
-    fn palette_keys_route_like_the_swift_switcher() {
+    fn palette_keys_move_and_accept() {
         let mut p = palette();
         assert_eq!(p.key(125, false, false, false, false), None); // down
         assert_eq!(p.selection, 1);
         assert_eq!(p.key(45, true, false, false, false), None); // ctrl+n
         assert_eq!(p.selection, 0);
-        p.key(48, false, false, false, false); // tab
-        assert_eq!(p.split_pane, 1);
+        p.key(48, false, false, false, false); // tab moves down
+        assert_eq!(p.selection, 1);
+        p.key(48, false, true, false, false); // shift+tab moves up
+        assert_eq!(p.selection, 0);
         assert_eq!(
             p.key(36, false, false, false, false),
-            Some(PaletteAction::Workspace("1".into()))
+            Some(PaletteAction::Command("notes".into()))
         );
-    }
-
-    #[test]
-    fn palette_workspace_gather_groups_and_sorts() {
-        let call = |args: &[String]| -> Option<String> {
-            match args.first().map(String::as_str) {
-                Some("list-workspaces") if args.get(1).map(String::as_str) == Some("--all") => {
-                    Some("10\n2\n1\n".to_string())
-                }
-                Some("list-workspaces") => Some("2\n".to_string()),
-                Some("list-windows") => Some(
-                    "Ghostty|vim|2\nSafari|docs|1\nmail|inbox|1\n".to_string(),
-                ),
-                _ => None,
-            }
-        };
-        let rows = gather_workspaces_with(&call);
-        let ids: Vec<&str> = rows.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, vec!["1", "2", "10"], "numeric order");
-        assert!(rows[1].focused, "workspace 2 is focused");
-        assert_eq!(rows[0].apps.len(), 2);
-        assert_eq!(rows[0].apps[0].name, "Safari");
     }
 
     // -- the switcher / palette snapshot contract ---------------------------
@@ -2823,8 +2422,10 @@ mod tests {
         p.handle(SwitcherEvent::Status(SwitcherStatus { cpu: Some(12), ..Default::default() }));
         assert_eq!(p.snapshot().status.and_then(|s| s.cpu), Some(12));
 
-        p.handle(SwitcherEvent::SwitchPane(1));
-        assert_eq!(p.snapshot().split_pane, 1);
+        assert_eq!(
+            p.snapshot().rows[0],
+            SwitcherRow::Command { name: "notes".into(), title: "Notes".into() }
+        );
 
         p.handle(SwitcherEvent::Query("/ji".into()));
         assert!(p.snapshot().command_mode);

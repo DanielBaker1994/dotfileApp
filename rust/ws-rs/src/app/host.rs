@@ -217,6 +217,18 @@ pub type UiQueue = Arc<Mutex<Vec<UiCommand>>>;
 /// drains this alongside the [`UiQueue`]; headless controllers run inline.
 pub type MainQueue = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
+/// The Hyper+S palette's rows: `[app] palette` picks and orders them (an id
+/// with no enabled command is skipped); an empty list keeps every palette
+/// command. The Ctrl+B W `/` commands keep the full list.
+pub fn hyper_palette<'a>(all: Vec<&'a PaletteCommand>, ids: &[String]) -> Vec<&'a PaletteCommand> {
+    if ids.is_empty() {
+        return all;
+    }
+    ids.iter()
+        .filter_map(|id| all.iter().find(|c| c.id.to_lowercase() == *id).copied())
+        .collect()
+}
+
 /// The view the daemon presents when it cold-starts with no launch mode.
 pub const DEFAULT_VIEW: SlotView = SlotView::Notes;
 
@@ -617,11 +629,11 @@ impl ControllerInner {
             json!({})
         };
 
-        let palette_commands: Vec<String> = registry
-            .palette_commands()
-            .iter()
-            .map(|c| c.title.clone())
-            .collect();
+        let palette_commands: Vec<String> =
+            hyper_palette(registry.palette_commands(), &self.settings.palette)
+                .iter()
+                .map(|c| c.title.clone())
+                .collect();
 
         json!({
             "view": self.current.map(|v| v.raw()).unwrap_or(""),
@@ -1495,6 +1507,15 @@ impl SwitcherController {
                     .push(format!("palette: '{name}' has no Rust handler yet"));
             }
         }
+    }
+
+    /// The Hyper+S palette's `(id, title)` rows (`[app] palette`).
+    pub fn hyper_palette_commands(&self) -> Vec<(String, String)> {
+        let ids = self.inner.lock().unwrap().settings.palette.clone();
+        hyper_palette(self.registry.palette_commands(), &ids)
+            .iter()
+            .map(|c| (c.id.clone(), c.title.clone()))
+            .collect()
     }
 
     /// Whether the palette is currently shown (`state.palette`).
@@ -3771,7 +3792,7 @@ mod daemon_ui {
     use crate::ui::theme::{set_current_header_style, HeaderStyle as ThemeHeaderStyle, PopupColors};
     use crate::views::paths::{PathsWindow, ReturnAction as PathsReturn};
     use crate::views::switcher::{
-        gather_workspaces, LinkPick, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
+        LinkPick, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
         ViewSwitcherPanel,
     };
     use crate::views::terminal::{TerminalConfig, TerminalPanel};
@@ -3829,17 +3850,15 @@ mod daemon_ui {
     /// Picks that are *meant* to bring kitchen-sink forward: "Kitchen Sink"
     /// and the shared window's views. Every other pick — every popup (tool
     /// panels, terminal, paths, screenshot, the notes finders), all
-    /// non-activating and taking the keyboard without activating us — and
-    /// workspaces leave the user's app focused.
+    /// non-activating and taking the keyboard without activating us —
+    /// leave the user's app focused.
     fn pick_keeps_app(action: &PaletteAction) -> bool {
-        match action {
-            PaletteAction::Command(name) => matches!(
-                name.as_str(),
-                "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
-                    | "jira-config"
-            ),
-            PaletteAction::Workspace(_) => false,
-        }
+        let PaletteAction::Command(name) = action;
+        matches!(
+            name.as_str(),
+            "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
+                | "jira-config"
+        )
     }
 
     /// Re-activate the app Hyper+S was pressed over, *before* the palette is
@@ -4125,9 +4144,6 @@ mod daemon_ui {
         static NOTES_LAST_CLICK: std::cell::RefCell<Option<(String, f64)>> = const { std::cell::RefCell::new(None) };
     }
 
-    /// Last `gather_workspaces()` result, so the palette opens instantly.
-    static WORKSPACE_CACHE: std::sync::Mutex<Vec<crate::views::switcher::WorkspaceRow>> =
-        std::sync::Mutex::new(Vec::new());
     /// The last `[links] enabled = false` read (Ctrl+B W shows no group).
     static LINKS_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -5097,17 +5113,7 @@ mod daemon_ui {
             }
         }
 
-        /// `showViewSwitcher()` — show the palette over the shared window.
-        /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
-        fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
-            let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
-            if let Some(p) = state.as_mut().and_then(|st| st.palette.as_mut()) {
-                if p.is_visible() {
-                    p.refresh_workspaces(workspaces);
-                }
-            }
-        }
-
+        /// `showViewSwitcher()` — show the Hyper+S palette.
         fn show_palette(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -5116,22 +5122,7 @@ mod daemon_ui {
             let mut state = self.ivars().state.borrow_mut();
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.palette.take().unwrap_or_else(PalettePanel::new);
-            let commands: Vec<(String, String)> = controller
-                .registry()
-                .palette_commands()
-                .iter()
-                .map(|c| (c.id.clone(), c.title.clone()))
-                .collect();
-            // The `aerospace` CLI can stall for seconds (it did when the
-            // palette was opened from the Ctrl+B key chord), so never wait on
-            // it here: paint with the last known rows and refresh off-main.
-            let workspaces = WORKSPACE_CACHE.lock().unwrap().clone();
-            panel.set_rows(commands, workspaces);
-            std::thread::spawn(|| {
-                let fresh = gather_workspaces();
-                *WORKSPACE_CACHE.lock().unwrap() = fresh.clone();
-                on_ui(move |ui| ui.refresh_palette_workspaces(fresh));
-            });
+            panel.set_rows(controller.hyper_palette_commands());
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -5147,10 +5138,8 @@ mod daemon_ui {
                             ui.hide_palette_panel();
                             ui.end_palette(false);
                         });
-                        match action {
-                            PaletteAction::Command(name) => c.run_palette_command(&name),
-                            PaletteAction::Workspace(id) => c.switch_workspace(&id),
-                        }
+                        let PaletteAction::Command(name) = action;
+                        c.run_palette_command(&name);
                         c.set_palette_visible(false);
                     }
                 }),
@@ -6512,14 +6501,8 @@ mod daemon_ui {
                         p.hide_panel();
                     }
                     self.end_palette(false);
-                    match action {
-                        PaletteAction::Command(name) => {
-                            self.ivars().controller.run_palette_command(&name)
-                        }
-                        PaletteAction::Workspace(id) => {
-                            self.ivars().controller.switch_workspace(&id)
-                        }
-                    }
+                    let PaletteAction::Command(name) = action;
+                    self.ivars().controller.run_palette_command(&name);
                     self.ivars().controller.set_palette_visible(false);
                     true
                 }
@@ -14826,6 +14809,35 @@ mod tests {
             .add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
         let s = c.state_json();
         assert_eq!(s["paletteCommands"], json!(["Notes"]));
+    }
+
+    #[test]
+    fn hyper_palette_lists_only_the_configured_commands() {
+        let mut c = controller();
+        for (id, title) in [
+            ("paths", "Find Recent Files"),
+            ("notes", "Notes"),
+            ("filefast", "Create File"),
+            ("prettyprint", "Pretty Print"),
+            ("text-table", "Text to Table"),
+            ("window", "Kitchen Sink"),
+        ] {
+            c.registry_mut().add_palette(PaletteCommand::new(id, title, "views"));
+        }
+        // Unset: every palette command.
+        assert_eq!(c.hyper_palette_commands().len(), 6);
+        c.inner.lock().unwrap().settings.palette = ["paths", "filefast", "text-table", "prettyprint", "gone"]
+            .map(String::from)
+            .to_vec();
+        let titles: Vec<String> = c.hyper_palette_commands().into_iter().map(|(_, t)| t).collect();
+        assert_eq!(
+            titles,
+            vec!["Find Recent Files", "Create File", "Text to Table", "Pretty Print"],
+            "config order, unknown ids skipped, nothing else"
+        );
+        assert_eq!(c.state_json()["paletteCommands"], json!(titles));
+        // Ctrl+B W's `/` commands keep the full list.
+        assert_eq!(c.registry().palette_commands().len(), 6);
     }
 
     #[test]

@@ -18,6 +18,13 @@ if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"
 fi
 
+# Hyper+S on a running daemon: toggle the palette first thing — no lock, no
+# aerospace query (the palette reads the frontmost app itself). A cold start
+# falls through to the launch path at the bottom.
+if [ -z "$MODE" ] && [ "${WS_BUILD_ONLY:-}" != "1" ] && "$BIN" toggle >/dev/null 2>&1; then
+    exit 0
+fi
+
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 LOCK="$TMP/kitchen-sink.lockdir"

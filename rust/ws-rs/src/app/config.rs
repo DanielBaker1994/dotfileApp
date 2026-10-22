@@ -244,6 +244,9 @@ pub struct AppSettings {
     pub margin_bottom: f64,
     pub switcher_width: f64,
     pub palette_first: Vec<String>,
+    /// `[app] palette`: the Hyper+S palette lists exactly these command ids,
+    /// in this order. Empty = every `in-palette` command.
+    pub palette: Vec<String>,
     pub shell: String,
     pub shell_args: Vec<String>,
     pub terminal_font: String,
@@ -299,6 +302,7 @@ impl Default for AppSettings {
                 "text-table".to_string(),
                 "prettyprint".to_string(),
             ],
+            palette: Vec::new(),
             shell: "/opt/homebrew/bin/bash".to_string(),
             shell_args: vec!["--login".to_string(), "-i".to_string()],
             terminal_font: "Hack Nerd Font".to_string(),
@@ -554,15 +558,21 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     if let Some(v) = strv("switcher-width").and_then(|v| v.parse::<f64>().ok()) {
         settings.switcher_width = v.max(240.0).min(1200.0);
     }
-    if let Some(v) = strv("palette-first") {
-        // A repeated id would list its command twice: keep the first.
+    // A repeated id would list its command twice: keep the first.
+    let id_list = |v: &str| -> Vec<String> {
         let mut ids: Vec<String> = Vec::new();
         for p in v.split(',').map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()) {
             if !ids.contains(&p) {
                 ids.push(p);
             }
         }
-        settings.palette_first = ids;
+        ids
+    };
+    if let Some(v) = strv("palette-first") {
+        settings.palette_first = id_list(&v);
+    }
+    if let Some(v) = strv("palette") {
+        settings.palette = id_list(&v);
     }
     if let Some(v) = strv("margin-top-builtin").and_then(|v| v.parse::<f64>().ok()) {
         settings.margin_top_builtin = v.max(0.0);
@@ -1794,6 +1804,7 @@ mod tests {
             ("shared-width", "300"),     // below 400 -> ignored
             ("margin-top", "-5"),        // clamped to 0
             ("palette-first", "Paths, filefast, paths"), // repeat dropped
+            ("palette", "Text-Table, paths, text-table"),
             ("esc-close", "2"),
             ("copy-toast", "Copied!"),
             ("header-style", "AURORA"),
@@ -1816,6 +1827,7 @@ mod tests {
         assert_eq!(s.shared_width, 1100.0);
         assert_eq!(s.margin_top, 0.0);
         assert_eq!(s.palette_first, vec!["paths", "filefast"]);
+        assert_eq!(s.palette, vec!["text-table", "paths"]);
         assert_eq!(s.esc_close, 2);
         assert_eq!(s.copy_toast, "Copied!");
         assert_eq!(s.header_style, HeaderStyle::Aurora);
