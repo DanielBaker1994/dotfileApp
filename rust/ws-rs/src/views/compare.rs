@@ -3051,6 +3051,13 @@ impl FolderPageState {
     }
 }
 
+/// Whether a side is past `[compare] max-bytes` or `max-lines`: it then
+/// gets the too-large label and a byte compare instead of a text diff
+/// (`max-lines` used to only size the gutter).
+pub fn too_large_for_text(data: &[u8], max_bytes: usize, max_lines: usize) -> bool {
+    data.len() > max_bytes || data.iter().filter(|b| **b == b'\n').count() > max_lines
+}
+
 /// How much a rescan reads to settle file contents: at most `files` checks
 /// and `bytes` of the larger side, so a huge tree can't stall the window
 /// (what's left keeps its metadata status).
@@ -3209,6 +3216,27 @@ impl CompareConfig {
     }
     pub fn max_lines(&self) -> usize {
         (self.number("max-lines", 200_000.0) as i64).max(1000) as usize
+    }
+    /// The folder compare's scan options from `[compare]` (content,
+    /// time-tolerance, exclude, use-gitignore, ignore-file); they used to be
+    /// left at their defaults, so excluded / gitignored entries were scanned.
+    pub fn folder_options(&self) -> FolderOptions {
+        let d = FolderOptions::default();
+        FolderOptions {
+            time_tolerance: self.number("time-tolerance", d.time_tolerance).max(0.0),
+            content: self.string("content", &d.content).to_lowercase(),
+            exclude: self
+                .string("exclude", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect(),
+            importance: self.importance(),
+            use_gitignore: self.bool("use-gitignore", d.use_gitignore),
+            ignore_file: crate::app::config::expand_tilde(&self.string("ignore-file", "")),
+            ..d
+        }
     }
     pub fn max_bytes(&self) -> usize {
         (self.number("max-bytes", (50 * 1024 * 1024) as f64) as i64).max(1024 * 1024) as usize
@@ -3375,7 +3403,7 @@ impl CompareWindowModel {
         config: CompareConfig,
         recent: CompareRecent,
     ) -> Self {
-        let folder_page = FolderPageState::new(backend.clone(), FolderOptions::default());
+        let folder_page = FolderPageState::new(backend.clone(), config.folder_options());
         CompareWindowModel {
             sessions: Vec::new(),
             selected: None,
@@ -3540,7 +3568,7 @@ impl CompareWindowModel {
         let Ok(data) = std::fs::read(p) else {
             return (TextSide::default(), None, false);
         };
-        if data.len() > self.config.max_bytes() {
+        if too_large_for_text(&data, self.config.max_bytes(), self.config.max_lines()) {
             // Past `max-bytes` the bytes are not held (a byte compare reads the
             // files instead — `CompareSession::files_first_difference`); an
             // empty placeholder here made the summary compare two empty buffers
@@ -7302,6 +7330,30 @@ mod tests {
     /// consumes it exactly like `do:compare:folder-open`); before the fix the
     /// router never took the flag, so the sub view was never pushed and the
     /// flag leaked into the next compare verb.
+    #[test]
+    fn folder_options_come_from_the_compare_section() {
+        let cfg = CompareConfig::from_entries(HashMap::from([
+            ("exclude".to_string(), ".git, node_modules ,.DS_Store".to_string()),
+            ("use-gitignore".to_string(), "true".to_string()),
+            ("time-tolerance".to_string(), "5".to_string()),
+            ("content".to_string(), "Never".to_string()),
+        ]));
+        let o = cfg.folder_options();
+        assert_eq!(o.exclude, [".git", "node_modules", ".DS_Store"]);
+        assert!(o.use_gitignore);
+        assert_eq!(o.time_tolerance, 5.0);
+        assert_eq!(o.content, "never");
+        let d = CompareConfig::from_entries(HashMap::new()).folder_options();
+        assert!(d.exclude.is_empty() && !d.use_gitignore && d.content == "auto");
+    }
+
+    #[test]
+    fn max_lines_makes_a_side_too_large() {
+        assert!(!too_large_for_text(b"a\nb\n", 100, 2));
+        assert!(too_large_for_text(b"a\nb\nc\n", 100, 2), "three lines past max-lines 2");
+        assert!(too_large_for_text(b"abcdef", 5, 100), "past max-bytes");
+    }
+
     #[test]
     fn content_budget_caps_files_and_bytes() {
         let mut b = ContentBudget { files: 2, bytes: 10 };
