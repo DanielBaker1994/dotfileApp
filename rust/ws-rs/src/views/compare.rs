@@ -4524,6 +4524,9 @@ impl CompareWindowModel {
                     s.focus = s.focus.other();
                 }
             }
+            // j / k move like Down / Up (as in the other lists).
+            38 if !cmd && !ctrl && !key.opt => move_to(fp, cursor + 1, shift),
+            40 if !cmd && !ctrl && !key.opt => move_to(fp, cursor - 1, shift),
             126 if !cmd => move_to(fp, cursor - 1, shift),
             125 if !cmd => move_to(fp, cursor + 1, shift),
             126 if cmd => fp.up_one_level(),
@@ -7352,6 +7355,25 @@ mod tests {
         assert!(!too_large_for_text(b"a\nb\n", 100, 2));
         assert!(too_large_for_text(b"a\nb\nc\n", 100, 2), "three lines past max-lines 2");
         assert!(too_large_for_text(b"abcdef", 5, 100), "past max-bytes");
+    }
+
+    #[test]
+    fn j_and_k_move_the_folder_list() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderjk");
+        let mut model = CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_folders("/l", "/r");
+        let backend: Arc<dyn HelperBackend> = stub.clone();
+        let mut session = FolderSession::new("/l", "/r");
+        session.tree = Some(FolderScan::tree_from_snapshot(backend, &tree_snapshot(), "/l", "/r"));
+        session.rows = vec![FolderRow { id: 0, depth: 0 }, FolderRow { id: 1, depth: 1 }];
+        model.folder_page.bind(session);
+        let key = |code: u16| crate::ui::popup::KeyInput { key_code: code, chars: None, cmd: false, ctrl: false, opt: false, shift: false, esc_streak: 0 };
+        let cursor = |m: &CompareWindowModel| m.folder_page.session.as_ref().unwrap().cursor;
+        assert!(model.handle_key(key(38), false), "j");
+        assert_eq!(cursor(&model), 1);
+        assert!(model.handle_key(key(40), false), "k");
+        assert_eq!(cursor(&model), 0);
     }
 
     #[test]
