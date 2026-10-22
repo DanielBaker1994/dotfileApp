@@ -2711,13 +2711,35 @@ impl FolderPageState {
         s.scanned = 0;
         s.checking = false;
         let (left, right) = (s.left_root.clone(), s.right_root.clone());
-        let mut tree = FolderScan::run(backend, &left, &right, &options);
-        for id in tree.pending() {
+        let mut tree = FolderScan::run(backend.clone(), &left, &right, &options);
+        // Read the bytes for what size + time can't decide ("unknown") and,
+        // unless `content = never`, for files only metadata calls "same"
+        // (equal size and date can still differ). Answers are cached by
+        // path / size / mtime; a budget keeps a huge tree from stalling.
+        let mut ids = tree.pending();
+        if options.content != "never" {
+            ids.extend(tree.all().iter().filter(|n| n.same_by_metadata && !n.is_dir()).map(|n| n.id));
+        }
+        let mut budget = ContentBudget::default();
+        for id in ids {
             let key = cache_key(&tree, id);
-            if let Some(a) = s.content_cache.get(&key).copied() {
-                if let Some(n) = tree.node_mut(id) {
-                    FolderContent::apply(a, n);
+            let answer = match s.content_cache.get(&key).copied() {
+                Some(a) => Some(a),
+                None => {
+                    let sizes = tree.node(id).and_then(|n| Some((n.left.as_ref()?.size, n.right.as_ref()?.size)));
+                    match sizes {
+                        Some((ls, rs)) if budget.take(ls.max(rs)) => {
+                            let (lp, rp) = (tree.path(id, CompareSide::Left), tree.path(id, CompareSide::Right));
+                            let a = FolderContent::check(&*backend, &lp, &rp, (ls, rs), &options.importance);
+                            s.content_cache.insert(key, a);
+                            Some(a)
+                        }
+                        _ => None,
+                    }
                 }
+            };
+            if let (Some(a), Some(n)) = (answer, tree.node_mut(id)) {
+                FolderContent::apply(a, n);
             }
         }
         let expanded = s.expanded_keys.clone();
@@ -3026,6 +3048,33 @@ impl FolderPageState {
             out.push(tree.path(r.id, s.focus));
         }
         out
+    }
+}
+
+/// How much a rescan reads to settle file contents: at most `files` checks
+/// and `bytes` of the larger side, so a huge tree can't stall the window
+/// (what's left keeps its metadata status).
+#[derive(Clone, Copy, Debug)]
+pub struct ContentBudget {
+    pub files: usize,
+    pub bytes: i64,
+}
+
+impl Default for ContentBudget {
+    fn default() -> Self {
+        ContentBudget { files: 400, bytes: 64 << 20 }
+    }
+}
+
+impl ContentBudget {
+    /// Spend one check of `size` bytes; false once the budget can't cover it.
+    pub fn take(&mut self, size: i64) -> bool {
+        if self.files == 0 || size > self.bytes {
+            return false;
+        }
+        self.files -= 1;
+        self.bytes -= size.max(0);
+        true
     }
 }
 
@@ -7253,6 +7302,15 @@ mod tests {
     /// consumes it exactly like `do:compare:folder-open`); before the fix the
     /// router never took the flag, so the sub view was never pushed and the
     /// flag leaked into the next compare verb.
+    #[test]
+    fn content_budget_caps_files_and_bytes() {
+        let mut b = ContentBudget { files: 2, bytes: 10 };
+        assert!(b.take(4));
+        assert!(!b.take(7), "over the byte budget");
+        assert!(b.take(6));
+        assert!(!b.take(0), "out of files");
+    }
+
     #[test]
     fn rerunning_an_open_folder_pair_focuses_it() {
         let stub = Stub::new();
