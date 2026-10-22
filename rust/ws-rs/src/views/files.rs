@@ -950,6 +950,18 @@ pub fn compress_paths(paths: &[String]) -> Result<String, String> {
     Ok(dst)
 }
 
+/// Cmd+D's toast for the copies it made ("" when it made none).
+pub fn duplicate_toast(copies: &[String]) -> String {
+    match copies {
+        [] => String::new(),
+        [one] => format!(
+            "Duplicated as {} \u{b7} \u{2318}Z undoes",
+            Path::new(one).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        ),
+        many => format!("Duplicated {} items \u{b7} \u{2318}Z undoes", many.len()),
+    }
+}
+
 pub fn duplicate_paths(paths: &[String], undo: &UndoStack) -> Outcome {
     FileOps::duplicate(paths, undo)
 }
@@ -2851,6 +2863,13 @@ mod tests {
         assert_eq!(standardize("/a/./b"), "/a/b");
         assert_eq!(resolve_path("src/x", "/work"), "/work/src/x");
         assert_eq!(resolve_path("/abs/./x", "/work"), "/abs/x");
+    }
+
+    #[test]
+    fn duplicate_toast_names_the_copy() {
+        assert_eq!(duplicate_toast(&[]), "");
+        assert_eq!(duplicate_toast(&["/d/a copy.txt".into()]), "Duplicated as a copy.txt \u{b7} \u{2318}Z undoes");
+        assert_eq!(duplicate_toast(&["/d/a copy".into(), "/d/b copy".into()]), "Duplicated 2 items \u{b7} \u{2318}Z undoes");
     }
 
     #[test]

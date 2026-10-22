@@ -3303,6 +3303,9 @@ pub struct CompareWindowModel {
     /// Set when the model opened the sub-view itself (`folder-open`); the
     /// host takes it and pushes `.compareText`.
     sub_pending: bool,
+    /// A "nothing happened" message for the host to toast (`take_notice`):
+    /// nothing to undo, no further difference.
+    notice: Option<String>,
     pub recent_selection: usize,
     backend: Arc<dyn HelperBackend>,
 }
@@ -3331,6 +3334,7 @@ impl CompareWindowModel {
             sub_session: None,
             sub_return: None,
             sub_pending: false,
+            notice: None,
             recent_selection: 0,
             backend,
         }
@@ -3708,6 +3712,11 @@ impl CompareWindowModel {
         self.sub_pending = true;
     }
 
+    /// The pending "nothing happened" toast, if a key did nothing.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
     /// The host's cue to push `.compareText` after a model-side `open_sub`.
     pub fn take_sub_pending(&mut self) -> bool {
         std::mem::take(&mut self.sub_pending)
@@ -3937,6 +3946,8 @@ impl CompareWindowModel {
         if let Some(si) = next {
             let target = s.model.sections()[si].rows.start;
             s.cursor = s.display_row(target);
+        } else {
+            self.notice = Some(if dir >= 0 { "No next difference" } else { "No previous difference" }.to_string());
         }
     }
 
@@ -3970,10 +3981,10 @@ impl CompareWindowModel {
     pub fn undo(&mut self, redo: bool) {
         let ctx = self.config.context_lines();
         let Some(s) = self.current_mut() else { return };
-        if redo {
-            s.model.redo();
-        } else {
-            let _ = s.model.undo(None);
+        let done = if redo { s.model.redo() } else { s.model.undo(None) };
+        if !done {
+            self.notice = Some(if redo { "Nothing to redo" } else { "Nothing to undo" }.to_string());
+            return;
         }
         s.refresh(ctx);
     }
@@ -4369,6 +4380,8 @@ impl CompareWindowModel {
                 }
                 if i >= 0 && i < n {
                     move_to(fp, i, false);
+                } else {
+                    self.notice = Some(if dir > 0 { "No next difference" } else { "No previous difference" }.to_string());
                 }
             }
             15 | 37 | 123 | 124 if folder_transfer_key(&key).is_some() => {
@@ -6407,6 +6420,46 @@ mod tests {
     /// (`copyLine`), while Ctrl+R / Opt+→ keep copying the whole difference
     /// section (`copyAcross`). Before the fix Ctrl+Opt+R fell into the plain
     /// Ctrl+R arm and copied the section; Ctrl+Opt+L copied the section too.
+    #[test]
+    fn nothing_to_undo_and_no_further_difference_leave_a_notice() {
+        let doc = |lines: &[&str]| TextSide {
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+            eols: lines.iter().map(|_| Eol::Lf).collect(),
+            encoding: TextEncodingKind::Utf8,
+        };
+        let stub = Stub::new();
+        stub.push(
+            "compare.new",
+            json!({
+                "handle": 7,
+                "left": doc(&["a", "b"]).json(),
+                "right": doc(&["a", "B"]).json(),
+                "rows": [[0, 0, 0], [1, 1, 5]],
+                "sections": [[1, 2, 1]],
+                "anchors": [],
+                "undo": [0, 0],
+                "redo": [0, 0],
+                "importance": Importance::default().json(),
+                "ignoreUnimportant": false,
+            }),
+        );
+        let dir = temp_dir("compare-notice");
+        let mut model = CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_pair(None, None);
+        assert_eq!(model.take_notice(), None);
+        model.undo(false);
+        assert_eq!(model.take_notice().as_deref(), Some("Nothing to undo"));
+        model.undo(true);
+        assert_eq!(model.take_notice().as_deref(), Some("Nothing to redo"));
+        assert_eq!(model.test_do("cursor:1"), None);
+        model.jump_section(1);
+        assert_eq!(model.take_notice().as_deref(), Some("No next difference"), "row 1 is the last difference");
+        model.jump_section(-1);
+        assert_eq!(model.take_notice().as_deref(), Some("No previous difference"));
+        assert_eq!(model.take_notice(), None, "taking clears it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn copy_line_chords_copy_only_the_cursor_row() {
         let key = |code: u16, ctrl: bool, opt: bool| crate::ui::popup::KeyInput {

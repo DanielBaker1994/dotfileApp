@@ -7884,10 +7884,14 @@ mod daemon_ui {
             };
             // Never hold the compare-model lock across `push_view`: it takes
             // the controller lock (order is inner → model).
-            let (used, opened_sub) = {
+            let (used, opened_sub, notice) = {
                 let mut model = m.lock().unwrap();
-                model.handle_key_with_sub(key, in_text)
+                let (used, sub) = model.handle_key_with_sub(key, in_text);
+                (used, sub, model.take_notice())
             };
+            if let Some(n) = notice {
+                crate::ui::toast::show(&n, "info.circle");
+            }
             if opened_sub {
                 self.ivars().controller.push_view(SlotView::CompareText);
             }
@@ -7897,10 +7901,14 @@ mod daemon_ui {
         /// Run `f` on the shared compare model, then repaint the surface.
         fn compare_with<R>(&self, f: impl FnOnce(&mut crate::views::compare::CompareWindowModel) -> R) -> Option<R> {
             let model = self.ivars().controller.compare_model()?;
-            let r = {
+            let (r, notice) = {
                 let mut m = model.lock().ok()?;
-                f(&mut m)
+                let r = f(&mut m);
+                (r, m.take_notice())
             };
+            if let Some(n) = notice {
+                crate::ui::toast::show(&n, "info.circle");
+            }
             if let Some(st) = self.ivars().state.borrow().as_ref() {
                 if let Some(s) = st.compare.as_ref() {
                     s.invalidate();
@@ -11433,7 +11441,12 @@ mod daemon_ui {
                 return;
             }
             let o = FileOps::duplicate(&paths, FileOps::shared());
-            self.files_op_done(String::new(), o.failed);
+            let copies = o.paths();
+            self.files_op_done(crate::views::files::duplicate_toast(&copies), o.failed);
+            // Select the (first) new copy, as Finder does.
+            if let Some(first) = copies.first() {
+                self.files_surface(|b| b.select_path(first));
+            }
         }
 
         fn files_copy(&self) {
