@@ -290,8 +290,9 @@ pub enum PrefixOutcome {
     /// Let the key continue down the normal router (Swift `return false`;
     /// the tabs bar's nav keys have no Rust counterpart yet).
     Passthrough,
-    /// The armed prefix resolved: `l` previous view, `w` view switcher,
-    /// `t` prose/terminal, `b` sidebar rail.
+    /// The armed prefix resolved: `l` previous view, `L` (Shift+L) the last
+    /// terminal space (prefix+L across apps), `w` view switcher, `t`
+    /// prose/terminal, `b` sidebar rail.
     Command(char),
     /// Ctrl+H/J/K/L while unarmed: move pane focus (consumed).
     PaneMove(Direction),
@@ -370,6 +371,7 @@ impl PrefixState {
         self.reset();
         self.held_key = Some(key.key_code);
         match key.chars {
+            Some(c) if key.shift && c.eq_ignore_ascii_case(&'l') => PrefixOutcome::Command('L'),
             Some(c) if matches!(c.to_ascii_lowercase(), 'l' | 'w' | 't' | 'b') => {
                 PrefixOutcome::Command(c.to_ascii_lowercase())
             }
@@ -1153,6 +1155,10 @@ mod tests {
         // The command fires once; the next key passes through.
         let w = prefix_key(KEY_W, false, Some('w'));
         assert_eq!(s.handle(&w, 100.3), PrefixOutcome::Passthrough);
+        // Shift+L is its own command: the last place across apps.
+        assert_eq!(s.handle(&b, 101.0), PrefixOutcome::Consumed);
+        let big_l = PrefixKey { shift: true, ..prefix_key(KEY_L, false, Some('L')) };
+        assert_eq!(s.handle(&big_l, 101.1), PrefixOutcome::Command('L'));
     }
 
     #[test]

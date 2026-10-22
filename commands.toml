@@ -438,6 +438,7 @@ kitchen-sink = "*:app"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
 "all: Ctrl+B L" = "prefix (in this window only): back to the previous view"
+"all: Ctrl+B Shift+L" = "prefix: back to the terminal space you came from (herdr's prefix+L from this side; prefix+L in herdr comes back here)"
 "all: Ctrl+B W" = "prefix: switcher palette — commands on the left, windows/workspaces on the right; type to filter, Tab switches pane, Ctrl+N/P move, Return runs"
 "all: Ctrl+B T" = "prefix: toggle the terminal popup (in the notes window: the editor ⇄ prose reading page)"
 "all: Ctrl+B B" = "prefix: sidebar ⇄ icon rail (same as Cmd+\\)"
@@ -755,7 +756,7 @@ colors = "theme"
 window-title = "ws-settings"
 undo-limit = 20
 
-# The link bank (PLAN-link-bank.md): herdr's workspaces as a collapsed group
+# The link bank (PLAN-link-bank.md): herdr's workspaces as a group
 # pinned on top of Ctrl+B W. Return on the header raises Ghostty as it is;
 # → / l lists the workspaces, Return on one runs `herdr-pick go-id`, which
 # raises Ghostty through AeroSpace; herdr-pick reads our places over the
@@ -770,6 +771,14 @@ herdr-pick = "~/.dotfiles/sesh/bin/herdr-pick"
 timeout-ms = 300
 go-timeout-ms = 5000
 launch = "open -a Ghostty"
+# Ctrl+B Shift+L: back to the terminal space you came from (herdr's prefix+L
+# history, shared through AeroSpace's focus hook).
+last = "~/.dotfiles/herdr/plugins/last/last.sh from-ks"
 # The group is pinned on top; open with the cursor on it so Ctrl+B W, Return
 # jumps straight to Ghostty (false = start on the first view).
 start-on-group = true
+# The group opens with its spaces listed (false = collapsed until → / l).
+start-expanded = true
+# Typing one of these first keeps the whole group (Return raises Ghostty);
+# words after it narrow the spaces: `herdr dot`.
+names = "terminal, herdr, ghostty"

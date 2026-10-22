@@ -2,8 +2,11 @@ exec-on-workspace-change = [
   '/opt/homebrew/bin/bash', '-c', '~/.config/kitchen-sink/bin/no_stray_workspaces.sh &'
 ]
 
+# The focused window id for kitchen-sink, and kitchen-sink / Ghostty taking
+# focus for the shared prefix+L history (~/.dotfiles/herdr/plugins/last).
 on-focus-changed = [
-  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"'
+  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"',
+  'exec-and-forget $HOME/.dotfiles/herdr/plugins/last/last.sh app-focus'
 ]
 
 config-version = 2
@@ -41,12 +44,15 @@ on-window-detected = [
   # never `*.md`, so the tiling rule below still owns it.
   { if = "test %{app-bundle-id} = dev.danielbaker.kitchen-sink && test %{window-title} ~= '[.]md$'", run = ['layout floating'] },
 
-  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 2'] },
+  # kitchen-sink shares workspace 1 with Ghostty (the link bank switches
+  # between them): an accordion keeps both full size, so a jump is a focus
+  # change, not a workspace flip or a resize.
+  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 1', 'layout h_accordion'] },
 
   { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
 
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty && test %{window-title} = ws-settings', run = ['layout floating'] },
-{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1', 'exec-and-forget $HOME/.dotfiles/ghostty-strip/launch.sh --auto'] },
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1', 'layout h_accordion', 'exec-and-forget $HOME/.dotfiles/ghostty-strip/launch.sh --auto'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace G'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },

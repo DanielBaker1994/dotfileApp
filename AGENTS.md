@@ -389,9 +389,12 @@ The daemon UI installs one local `keyDown` monitor → `route_key_event`
 (Ctrl+B prefix, Ctrl+H/J/K/L pane moves, vim keys, overlays — palette,
 switcher, tool panels — Esc streak per `escCloseCount`/`esc-close` (0 =
 never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
-Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher (herdr's
-workspaces collapse at its bottom — `[links]`, `views/switcher.rs`; Ctrl+K
-jumps there, Return runs `herdr-pick go-id`), T =
+Ctrl+B is a 1.5 s prefix: L = previous view, Shift+L = the last terminal
+space (`[links] last` → herdr's `last.sh from-ks`; prefix+L in herdr comes
+back here through the shared places history), W = view switcher (herdr's
+workspaces pinned on top, open by default — `[links]`, `views/switcher.rs`;
+typing a `[links] names` word keeps the group; Ctrl+K jumps there, Return
+runs `herdr-pick go-id`), T =
 terminal/prose, B = sidebar rail (every `SidebarView` pane: notes, files,
 jira, confluence, ai, compare; persisted per view as `sidebarRail.<view>`).
 `PaneNav` moves the focus ring between panes;

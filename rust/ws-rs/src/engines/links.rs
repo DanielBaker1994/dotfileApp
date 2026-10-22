@@ -138,8 +138,31 @@ impl Default for LinkTexts {
     }
 }
 
-/// The collapsed group: the other app's rows, its fetch status and whether
-/// the user expanded it. Expansion lives for one picker open only.
+/// How the group opens and what searches it (`[links]` in commands.toml).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkOpts {
+    /// A fresh open puts the cursor on the header, so Return switches apps.
+    pub start_on_group: bool,
+    /// A fresh open (and a cleared query) lists the rows under the header.
+    pub start_expanded: bool,
+    /// Words that search the group itself: a query whose first word is one
+    /// of them (or a 3+ letter prefix) keeps the header and every row, and
+    /// the rest of the query narrows the rows (`herdr dot`).
+    pub names: Vec<String>,
+}
+
+impl Default for LinkOpts {
+    fn default() -> Self {
+        LinkOpts {
+            start_on_group: true,
+            start_expanded: true,
+            names: ["terminal", "herdr", "ghostty"].map(String::from).to_vec(),
+        }
+    }
+}
+
+/// The group: the other app's rows, its fetch status and whether it is
+/// expanded. A user's expand / collapse lives for one picker open only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkGroup {
     pub rows: Vec<LinkRow>,
@@ -148,8 +171,7 @@ pub struct LinkGroup {
     pub texts: LinkTexts,
     /// False when `[links] enabled = false`: no header at all.
     pub enabled: bool,
-    /// A fresh open puts the cursor on the header, so Return switches apps.
-    pub start_on_group: bool,
+    pub opts: LinkOpts,
 }
 
 impl Default for LinkGroup {
@@ -160,15 +182,16 @@ impl Default for LinkGroup {
             expanded: false,
             texts: LinkTexts::default(),
             enabled: true,
-            start_on_group: true,
+            opts: LinkOpts::default(),
         }
     }
 }
 
 impl LinkGroup {
-    /// A fresh open: the last good rows (stale-while-revalidate), collapsed.
+    /// A fresh open: the last good rows (stale-while-revalidate), expanded
+    /// or collapsed per `start_expanded`.
     pub fn reopen(&mut self) {
-        self.expanded = false;
+        self.expanded = self.opts.start_expanded;
         self.status = LinkStatus::Loading;
     }
 
@@ -191,22 +214,42 @@ impl LinkGroup {
         }
     }
 
+    /// `Some(rest)` when the query's first word names the group (see
+    /// [`LinkOpts::names`]): `herdr dot` → `dot`, `terminal` → ``.
+    pub fn scope<'a>(&self, query: &'a str) -> Option<&'a str> {
+        let q = query.trim_start();
+        let (first, rest) = q.split_once(char::is_whitespace).unwrap_or((q, ""));
+        let first = first.to_lowercase();
+        let hit = !first.is_empty()
+            && self.opts.names.iter().any(|n| {
+                let n = n.to_lowercase();
+                n == first || (first.chars().count() >= 3 && n.starts_with(&first))
+            });
+        hit.then(|| rest.trim())
+    }
+
     /// Indices into [`Self::rows`] to draw under the header: a query shows
-    /// just its matches (auto-expanded, ranked); no query shows all rows
-    /// when expanded, none when collapsed.
+    /// just its matches (auto-expanded, ranked), a query naming the group
+    /// shows every row (or the matches of the words after the name); no
+    /// query shows all rows when expanded, none when collapsed.
     pub fn visible(&self, query: &str) -> Vec<usize> {
         let q = query.trim();
         if q.is_empty() {
             return if self.expanded { (0..self.rows.len()).collect() } else { Vec::new() };
         }
+        let q = self.scope(q).unwrap_or(q);
+        if q.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
         let texts: Vec<String> = self.rows.iter().map(LinkRow::search_text).collect();
         FuzzyIndex::new(&texts).ranked(q)
     }
 
-    /// The header is always there with no query; a query hides the group
-    /// when nothing in it matches.
+    /// The header is always there with no query or a query naming the
+    /// group; any other query hides it when nothing in it matches.
     pub fn header_shown(&self, query: &str) -> bool {
-        self.enabled && (query.trim().is_empty() || !self.visible(query).is_empty())
+        self.enabled
+            && (query.trim().is_empty() || self.scope(query).is_some() || !self.visible(query).is_empty())
     }
 
     /// Open with no query and expanded, or opened by a query.
@@ -274,12 +317,16 @@ pub fn entries(local: &[usize], group: &LinkGroup, query: &str) -> Vec<Entry> {
 }
 
 /// Where the cursor starts: no query → the header (when `start_on_group`)
-/// else the first local row; a query → the best local match, else the best
-/// group match (never the header: Return there switches apps).
+/// else the first local row; a query naming the group → the header
+/// (`terminal`, Return switches apps) or its best row (`herdr dot`); any
+/// other query → the best local match, else the best group match.
 pub fn start_pos(list: &[Entry], group: &LinkGroup, query: &str) -> usize {
     let find = |f: fn(&Entry) -> bool| list.iter().position(f);
+    if let (Some(rest), Some(h)) = (group.scope(query), find(|e| *e == Entry::Header)) {
+        return if rest.is_empty() { h } else { find(|e| matches!(e, Entry::Link(_))).unwrap_or(h) };
+    }
     if query.trim().is_empty() {
-        if group.start_on_group {
+        if group.opts.start_on_group {
             if let Some(i) = find(|e| *e == Entry::Header) {
                 return i;
             }
@@ -388,6 +435,7 @@ mod tests {
     #[test]
     fn collapsed_by_default_query_auto_expands_to_matches() {
         let mut g = group(3);
+        g.opts.start_expanded = false;
         g.rows[1].title = "kitchen-sink".into();
         assert!(g.visible("").is_empty());
         assert!(!g.open(""));
@@ -399,6 +447,27 @@ mod tests {
         assert_eq!(g.visible(""), vec![0, 1, 2]);
         g.reopen();
         assert!(!g.expanded);
+    }
+
+    #[test]
+    fn expanded_by_default_and_its_names_keep_the_group() {
+        let mut g = group(3);
+        g.rows[1].title = "dotfiles".into();
+        g.reopen();
+        assert_eq!(g.visible(""), vec![0, 1, 2], "start_expanded: open on a fresh show");
+        for q in ["terminal", "herdr", "Ghost", "ter"] {
+            assert_eq!(g.scope(q), Some(""), "{q}");
+            assert!(g.header_shown(q));
+            assert_eq!(g.visible(q), vec![0, 1, 2]);
+        }
+        assert_eq!(g.scope("he"), None, "two letters is not a name");
+        assert_eq!(g.visible("herdr dot"), vec![1]);
+        assert!(g.header_shown("herdr zzzz"), "the name alone keeps the header");
+        let list = entries(&[0], &g, "terminal");
+        assert_eq!(start_pos(&list, &g, "terminal"), 0, "the header: Return raises the terminal");
+        let list = entries(&[], &g, "herdr dot");
+        assert_eq!(list, vec![Entry::Header, Entry::Link(1)]);
+        assert_eq!(start_pos(&list, &g, "herdr dot"), 1);
     }
 
     #[test]
@@ -419,7 +488,7 @@ mod tests {
         let mut g = group(2);
         let list = entries(&[0, 1], &g, "");
         assert_eq!(start_pos(&list, &g, ""), 0, "the header: Return switches apps");
-        g.start_on_group = false;
+        g.opts.start_on_group = false;
         assert_eq!(start_pos(&list, &g, ""), 1);
         g.rows[1].title = "notes-ish".into();
         let list = entries(&[0], &g, "notes");

@@ -669,8 +669,10 @@ pub struct LinksConfig {
     pub go_timeout_ms: u64,
     /// Shell line run by Return on an offline header (starts the terminal).
     pub launch: String,
-    /// Ctrl+B W opens with the cursor on the pinned header (Return = Ghostty).
-    pub start_on_group: bool,
+    /// Shell line run by Ctrl+B Shift+L (the last terminal space).
+    pub last: String,
+    /// How Ctrl+B W opens the group and which words search it.
+    pub opts: crate::engines::links::LinkOpts,
 }
 
 impl Default for LinksConfig {
@@ -682,7 +684,8 @@ impl Default for LinksConfig {
             timeout_ms: 300,
             go_timeout_ms: 5000,
             launch: "open -a Ghostty".into(),
-            start_on_group: true,
+            last: "~/.dotfiles/herdr/plugins/last/last.sh from-ks".into(),
+            opts: crate::engines::links::LinkOpts::default(),
         }
     }
 }
@@ -704,7 +707,15 @@ impl LinksConfig {
             timeout_ms: n("timeout-ms", d.timeout_ms),
             go_timeout_ms: n("go-timeout-ms", d.go_timeout_ms),
             launch: s("launch", &d.launch),
-            start_on_group: e.get("start-on-group").map_or(true, |v| v.trim() != "false"),
+            last: s("last", &d.last),
+            opts: crate::engines::links::LinkOpts {
+                start_on_group: e.get("start-on-group").map_or(true, |v| v.trim() != "false"),
+                start_expanded: e.get("start-expanded").map_or(true, |v| v.trim() != "false"),
+                names: e
+                    .get("names")
+                    .map(|v| v.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect())
+                    .unwrap_or(d.opts.names),
+            },
         }
     }
 
@@ -1294,6 +1305,30 @@ impl SwitcherController {
                 Ok(o) if o.code == 0 => {}
                 Ok(o) => crate::app::logging::ws_log(&format!("links: go-id {id} failed ({}): {}", o.code, o.out.trim())),
                 Err(e) => crate::app::logging::ws_log(&format!("links: {}: {e}", cfg.herdr_pick)),
+            }
+        });
+    }
+
+    /// Ctrl+B Shift+L: back to the terminal space you came from, through the
+    /// shared prefix+L history (`[links] last`, herdr's `last.sh from-ks`).
+    pub fn links_last(&self) {
+        std::thread::spawn(|| {
+            let cfg = LinksConfig::cached();
+            if cfg.last.trim().is_empty() {
+                return;
+            }
+            let args = vec!["-c".to_string(), cfg.last.clone()];
+            match crate::app::process_run::run_process_deadline(
+                "/bin/sh",
+                &args,
+                None,
+                None,
+                true,
+                Some(std::time::Duration::from_millis(cfg.go_timeout_ms)),
+            ) {
+                Ok(o) if o.code == 0 => {}
+                Ok(o) => crate::app::logging::ws_log(&format!("links: last failed ({}): {}", o.code, o.out.trim())),
+                Err(e) => crate::app::logging::ws_log(&format!("links: last: {e}")),
             }
         });
     }
@@ -5174,7 +5209,7 @@ mod daemon_ui {
                 if let Err(e) = &result {
                     crate::app::logging::ws_log(&format!("links: herdr list: {e:?}"));
                 }
-                on_ui(move |ui| ui.refresh_switcher_links(result, cfg.texts, on, cfg.start_on_group));
+                on_ui(move |ui| ui.refresh_switcher_links(result, cfg.texts, on, cfg.opts));
             });
         }
 
@@ -5183,12 +5218,12 @@ mod daemon_ui {
             result: Result<Vec<crate::engines::links::LinkRow>, crate::engines::links::LinkError>,
             texts: crate::engines::links::LinkTexts,
             enabled: bool,
-            start_on_group: bool,
+            opts: crate::engines::links::LinkOpts,
         ) {
             {
                 let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
                 let Some(sw) = state.as_mut().and_then(|st| st.switcher.as_mut()) else { return };
-                sw.set_links(result, texts, enabled, start_on_group);
+                sw.set_links(result, texts, enabled, opts);
             }
             self.push_link_state();
         }
@@ -6392,7 +6427,9 @@ mod daemon_ui {
                             } else if !(cmd || ctrl || opt)
                                 && matches!(code, 124 | 37 | 123 | 4)
                                 // → / l open, ← / h close — only on the group;
-                                // elsewhere they reach the search field.
+                                // elsewhere they reach the search field. With
+                                // a query, l / h are letters (`terminal`).
+                                && (matches!(code, 124 | 123) || sw.live_query().is_empty())
                                 && sw.group_open(matches!(code, 124 | 37))
                             {
                                 Out::Link(None)
@@ -6731,6 +6768,8 @@ mod daemon_ui {
                 'b' => {
                     self.route_rail_toggle();
                 }
+                // Ctrl+B Shift+L: herdr's prefix+L from this side.
+                'L' => self.ivars().controller.links_last(),
                 _ => {}
             }
         }
