@@ -447,6 +447,16 @@ mod appkit {
             f.setStringValue(&NSString::from_str(text));
         }
 
+        /// Select all of a path box's text, so typing replaces the old path
+        /// instead of appending to it (focus just moved into the box).
+        pub fn select_side_text(&self, right: bool) {
+            let f = if right { &self.ivars().right } else { &self.ivars().left };
+            if f.currentEditor().is_some() {
+                // SAFETY: main-thread AppKit call on a live field with no sender.
+                unsafe { f.selectText(None) };
+            }
+        }
+
         pub fn left_field(&self) -> Retained<NSTextField> {
             self.ivars().left.clone()
         }

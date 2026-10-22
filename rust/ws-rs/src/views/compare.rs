@@ -2068,6 +2068,15 @@ impl SyncPlan {
 
 static NEXT_SESSION_ID: OnceLock<Mutex<i64>> = OnceLock::new();
 
+/// The start page's error for a typed pair: the first non-empty side
+/// that does not exist (an empty side is allowed: it compares as empty).
+pub fn missing_compare_path(left: &str, right: &str) -> Option<String> {
+    [left, right]
+        .into_iter()
+        .find(|p| !p.is_empty() && !Path::new(p).exists())
+        .map(|p| format!("Compare: no such file or folder: {p}"))
+}
+
 fn next_session_id() -> i64 {
     let m = NEXT_SESSION_ID.get_or_init(|| Mutex::new(0));
     let mut v = m.lock().unwrap();
@@ -6051,6 +6060,19 @@ pub fn register_compare_hooks(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_compare_path_names_the_first_missing_side() {
+        let dir = std::env::temp_dir();
+        let d = dir.to_string_lossy().into_owned();
+        assert_eq!(super::missing_compare_path(&d, &d), None);
+        assert_eq!(super::missing_compare_path(&d, ""), None, "an empty side compares as empty");
+        let bad = format!("{d}/textL.txt~/compare/blockL.txt");
+        assert_eq!(
+            super::missing_compare_path(&d, &bad),
+            Some(format!("Compare: no such file or folder: {bad}"))
+        );
+    }
+
     use super::*;
     use std::collections::VecDeque;
     use std::process;

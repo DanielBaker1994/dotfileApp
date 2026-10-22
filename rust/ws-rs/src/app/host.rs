@@ -6874,6 +6874,19 @@ mod daemon_ui {
                     o.insert(k.clone(), val.clone());
                 }
             }
+            // Focus just moved into a compare path box: select its text so
+            // typing replaces the old path rather than appending to it.
+            let focused = doc.get("focused").and_then(|f| f.as_str()).unwrap_or("").to_string();
+            if focused == "left-path" || focused == "right-path" {
+                let was = serde_json::from_str::<serde_json::Value>(&self.ivars().live_pane_sig.borrow())
+                    .ok()
+                    .and_then(|v| v.get("focused").and_then(|f| f.as_str()).map(str::to_string));
+                if was.as_deref() != Some(focused.as_str()) {
+                    if let Some(s) = self.ivars().state.borrow().as_ref().and_then(|st| st.compare.as_ref()) {
+                        s.chrome().select_side_text(focused == "right-path");
+                    }
+                }
+            }
             let sig = doc.to_string();
             if *self.ivars().live_pane_sig.borrow() != sig {
                 *self.ivars().live_pane_sig.borrow_mut() = sig;
@@ -7956,6 +7969,10 @@ mod daemon_ui {
                     };
                     let (l, r) = (exp(&left), exp(&right));
                     if l.is_empty() && r.is_empty() {
+                        return;
+                    }
+                    if let Some(msg) = crate::views::compare::missing_compare_path(&l, &r) {
+                        crate::ui::toast::show(&msg, "exclamationmark.triangle.fill");
                         return;
                     }
                     let dirs = std::path::Path::new(&l).is_dir() && std::path::Path::new(&r).is_dir();
