@@ -115,6 +115,8 @@ pub enum CompareEvent {
     PaneMenu { right: bool, row: usize, x: f64, y: f64 },
     /// Right-click on a folder tree row (node `id`).
     FolderMenu { id: usize, x: f64, y: f64 },
+    /// A click on folder-tree row `row` (Shift extends, double opens).
+    FolderClick { row: usize, shift: bool, double: bool },
 }
 
 /// `CompareRecent.age(_:)`.

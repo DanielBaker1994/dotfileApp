@@ -7916,7 +7916,7 @@ mod daemon_ui {
             use crate::views::compare_view::CompareEvent as E;
             match ev {
                 E::Sidebar(SidebarEvent::Select(i)) => {
-                    self.compare_with(|m| m.select(i));
+                    self.compare_with(|m| m.select_open(i));
                 }
                 E::Sidebar(SidebarEvent::Close(i)) => {
                     self.compare_with(|m| m.close_session(i));
@@ -8172,6 +8172,13 @@ mod daemon_ui {
                     self.compare_pane_menu(side, row, x, y);
                 }
                 E::FolderMenu { id, x, y } => self.compare_folder_menu(id, x, y),
+                E::FolderClick { row, shift, double } => {
+                    // `compare_with` drops the model lock before `push_view`.
+                    let opened = self.compare_with(|m| m.folder_click(row, shift, double).1).unwrap_or(false);
+                    if opened {
+                        self.ivars().controller.push_view(SlotView::CompareText);
+                    }
+                }
             }
         }
 

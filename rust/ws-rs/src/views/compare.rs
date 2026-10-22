@@ -3428,7 +3428,7 @@ impl CompareWindowModel {
         use crate::ui::sidebar::SidebarEvent;
         use crate::views::compare_view::CompareEvent as E;
         match ev {
-            E::Sidebar(SidebarEvent::Select(i)) => self.select(i),
+            E::Sidebar(SidebarEvent::Select(i)) => self.select_open(i),
             E::Sidebar(SidebarEvent::Close(i)) => self.close_session(i),
             E::Sidebar(SidebarEvent::Pinned(k)) => {
                 if k == "home" {
@@ -3878,6 +3878,48 @@ impl CompareWindowModel {
             s.anchor = None;
         }
         s.cursor = target;
+    }
+
+    /// A click on the sidebar's OPEN row `i`: show that session (rebinding
+    /// its folder page). `select` moves the cursor instead.
+    pub fn select_open(&mut self, i: usize) {
+        if let Some(id) = self.sessions.get(i).map(|s| s.id) {
+            self.select_session(id);
+        }
+    }
+
+    /// A click on folder-tree row `row` (`CompareFolderView.mouseDown`):
+    /// select it (Shift extends); a double click opens it as Return does.
+    /// Returns `(used, opened_sub)` like [`Self::handle_key_with_sub`].
+    pub fn folder_click(&mut self, row: usize, extend: bool, double: bool) -> (bool, bool) {
+        if !self.current_is_folder() {
+            return (false, false);
+        }
+        let Some(s) = self.folder_page.session.as_mut() else { return (false, false) };
+        if row >= s.rows.len() {
+            return (false, false);
+        }
+        if extend {
+            if s.anchor.is_none() {
+                s.anchor = Some(s.cursor);
+            }
+        } else {
+            s.anchor = None;
+        }
+        s.cursor = row;
+        if double {
+            let ret = crate::ui::popup::KeyInput {
+                key_code: 36,
+                chars: None,
+                cmd: false,
+                ctrl: false,
+                opt: false,
+                shift: false,
+                esc_streak: 0,
+            };
+            return self.handle_key_with_sub(ret, false);
+        }
+        (true, false)
     }
 
     pub fn select(&mut self, i: usize) {
@@ -5202,6 +5244,10 @@ impl CompareSurface {
         self.pane.set_on_menu(std::rc::Rc::new(move |side, row, x, y| {
             pane_sink(CompareEvent::PaneMenu { right: side == CompareSide::Right, row, x, y })
         }));
+        let click_sink = rc.clone();
+        self.tree.set_on_click(std::rc::Rc::new(move |row, shift, double| {
+            click_sink(CompareEvent::FolderClick { row, shift, double })
+        }));
         self.tree.set_on_menu(std::rc::Rc::new(move |id, x, y| rc(CompareEvent::FolderMenu { id, x, y })));
     }
 
@@ -5910,6 +5956,8 @@ mod macos {
         pub model: RefCell<FolderTreeModel>,
         /// Right-click: (node id, screen x, screen y).
         pub on_menu: RefCell<Option<std::rc::Rc<dyn Fn(usize, f64, f64)>>>,
+        /// Click: (row index, shift, double).
+        pub on_click: RefCell<Option<std::rc::Rc<dyn Fn(usize, bool, bool)>>>,
     }
 
     define_class!(
@@ -5928,6 +5976,29 @@ mod macos {
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, dirty: NSRect) {
                 self.render(dirty);
+            }
+
+            /// `CompareFolderView.mouseDown`: take the keyboard and select the
+            /// row under the pointer (a double click opens it).
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                if let Some(w) = self.window() {
+                    w.makeFirstResponder(Some(self));
+                }
+                let p = view_base::mouse_point(self, e);
+                if p.y < FOLDER_HEADER_HEIGHT {
+                    return;
+                }
+                let row = {
+                    let m = self.ivars().model.borrow();
+                    let i = m.top + ((p.y - FOLDER_HEADER_HEIGHT) / FOLDER_ROW_HEIGHT).floor() as usize;
+                    (i < m.rows.len()).then_some(i)
+                };
+                let cb = self.ivars().on_click.borrow().clone();
+                if let (Some(row), Some(cb)) = (row, cb) {
+                    let shift = e.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+                    cb(row, shift, e.clickCount() >= 2);
+                }
             }
 
             /// `CompareFolderView.rightMouseDown`: the row under the pointer,
@@ -5960,6 +6031,7 @@ mod macos {
                 colors: RefCell::new(PopupColors::default()),
                 model: RefCell::new(FolderTreeModel::default()),
                 on_menu: RefCell::new(None),
+                on_click: RefCell::new(None),
             });
             unsafe {
                 msg_send![
@@ -5976,6 +6048,10 @@ mod macos {
 
         pub fn set_on_menu(&self, cb: std::rc::Rc<dyn Fn(usize, f64, f64)>) {
             *self.ivars().on_menu.borrow_mut() = Some(cb);
+        }
+
+        pub fn set_on_click(&self, cb: std::rc::Rc<dyn Fn(usize, bool, bool)>) {
+            *self.ivars().on_click.borrow_mut() = Some(cb);
         }
 
         pub fn set_model(&self, model: FolderTreeModel) {
@@ -7074,6 +7150,28 @@ mod tests {
     /// consumes it exactly like `do:compare:folder-open`); before the fix the
     /// router never took the flag, so the sub view was never pushed and the
     /// flag leaked into the next compare verb.
+    #[test]
+    fn sidebar_click_switches_session_and_tree_click_selects_row() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderclick");
+        let mut model = CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_folders("/x/A", "/x/B");
+        model.open_folders("/l", "/r");
+        assert_eq!(model.selected, Some(1));
+        model.select_open(0);
+        assert_eq!(model.selected, Some(0), "clicking an OPEN row shows that session");
+        assert_eq!(model.folder_bound, Some(model.sessions[0].id));
+        model.select_open(1);
+        let backend: Arc<dyn HelperBackend> = stub.clone();
+        let mut session = FolderSession::new("/l", "/r");
+        session.tree = Some(FolderScan::tree_from_snapshot(backend, &tree_snapshot(), "/l", "/r"));
+        session.rows = vec![FolderRow { id: 0, depth: 0 }, FolderRow { id: 1, depth: 1 }];
+        model.folder_page.bind(session);
+        assert_eq!(model.folder_click(1, false, false), (true, false));
+        assert_eq!(model.folder_page.session.as_ref().unwrap().cursor, 1, "the clicked row is selected");
+        assert_eq!(model.folder_click(9, false, false), (false, false), "a click below the rows does nothing");
+    }
+
     #[test]
     fn filter_pills_filter_a_folder_session() {
         let stub = Stub::new();
