@@ -204,6 +204,25 @@ pub fn frames_for_reserved(
 }
 
 /// Two-letter initials for a person cell ("Ada Lovelace" / "ada.lovelace" → AL).
+/// Greedy word wrap of `text` into lines no wider than `max_w` by
+/// `measure` (a single word wider than that gets its own line).
+pub fn wrap_words(text: &str, max_w: f64, measure: impl Fn(&str) -> f64) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let next = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+        if !cur.is_empty() && measure(&next) > max_w {
+            lines.push(std::mem::replace(&mut cur, word.to_string()));
+        } else {
+            cur = next;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 pub fn initials(name: &str) -> String {
     let base = name.split(" (").next().unwrap_or(name);
     let parts: Vec<&str> = base.split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-').filter(|p| !p.is_empty()).collect();
@@ -3684,8 +3703,12 @@ mod appkit {
             let snap = self.ivars().snap.borrow();
             let w = self.bounds().size.width;
             if snap.rows.is_empty() {
+                // Wrapped, so a long hint (the Jira setup step) stays readable.
                 let f = style::system_font(12.5, Weight::Regular);
-                style::draw_text_centered(&snap.empty, Rect::new(0.0, 24.0, w, 24.0), &f, c.dim);
+                let lines = wrap_words(&snap.empty, (w - 32.0).max(80.0), |t| style::text_size(t, &f).0);
+                for (i, line) in lines.iter().enumerate() {
+                    style::draw_text_centered(line, Rect::new(16.0, 24.0 + i as f64 * 18.0, w - 32.0, 24.0), &f, c.dim);
+                }
                 return;
             }
             let first = (dirty.origin.y / row_h()).floor().max(0.0) as usize;
@@ -5287,6 +5310,15 @@ mod appkit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_hint_wraps_instead_of_truncating() {
+        let w = |t: &str| t.chars().count() as f64; // 1 unit per char
+        assert_eq!(super::wrap_words("No synced lists yet — run setup", 12.0, w), ["No synced", "lists yet —", "run setup"]);
+        assert_eq!(super::wrap_words("short", 40.0, w), ["short"]);
+        assert_eq!(super::wrap_words("averyveryverylongword x", 5.0, w), ["averyveryverylongword", "x"]);
+        assert!(super::wrap_words("", 10.0, w).is_empty());
+    }
+
     use super::*;
     use serde_json::json;
 

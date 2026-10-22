@@ -16,6 +16,19 @@ pub const RESULT_GAP: f64 = 2.0;
 pub const FOOT_H: f64 = 32.0;
 pub const STAR_GUTTER: f64 = 30.0;
 
+/// The footer button labels: full, or compact when the table column is narrow.
+pub fn footer_labels(compact: bool) -> [&'static str; 3] {
+    if compact { ["More", "CQL", "curl"] } else { ["Load more", "Copy CQL", "Copy curl"] }
+}
+
+/// The width of each of the two filter pickers (190 pt, shrunk down to
+/// 120 pt) so the pickers plus the `choices` chips fit `avail`
+/// (8 pt between chips).
+pub fn picker_width(avail: f64, choices: &[f64]) -> f64 {
+    let rest: f64 = choices.iter().sum::<f64>() + 8.0 * (choices.len() + 1) as f64;
+    ((avail - rest) / 2.0).clamp(120.0, 190.0)
+}
+
 pub const MODES: [&str; 3] = ["All words", "Phrase", "Any word"];
 pub const MODE_TIPS: [&str; 3] = [
     "Every word somewhere in the page (AND)",
@@ -708,9 +721,15 @@ mod appkit {
             // Bottom row chips.
             let y2 = 10.0 + STRIP_ROW_H + 8.0;
             let mut cx = strip.x + 12.0;
+            let choice_ws: Vec<f64> = [&snap.type_label, &snap.mod_label, &snap.sort_label]
+                .iter()
+                .map(|t| style::text_size(t, &f).0.ceil() + 34.0)
+                .collect();
+            // The two pickers give up width so Sort stays inside the window.
+            let picker = picker_width(strip.width - 12.0 - 8.0, &choice_ws);
             let labels = [
-                (190.0, String::new()),
-                (190.0, String::new()),
+                (picker, String::new()),
+                (picker, String::new()),
                 (0.0, snap.type_label.clone()),
                 (0.0, snap.mod_label.clone()),
                 (0.0, snap.sort_label.clone()),
@@ -723,14 +742,15 @@ mod appkit {
             // Footer, right to left inside the table column.
             let mut fx = table.max_x() - 10.0;
             let bf = style::system_font(12.0, Weight::Medium);
-            let curl_w = style::text_size("Copy curl", &bf).0.ceil() + 22.0;
+            let [more_t, cql_t, curl_t] = footer_labels(self.footer_compact(table));
+            let curl_w = style::text_size(curl_t, &bf).0.ceil() + 22.0;
             fx -= curl_w;
             out.push((C_CURL, Rect::new(fx, fy, curl_w, 22.0)));
-            let cql_w = style::text_size("Copy CQL", &bf).0.ceil() + 22.0;
+            let cql_w = style::text_size(cql_t, &bf).0.ceil() + 22.0;
             fx -= cql_w;
             out.push((C_CQL, Rect::new(fx, fy, cql_w, 22.0)));
             fx -= 10.0;
-            let more_w = style::text_size("Load more", &bf).0.ceil() + 30.0;
+            let more_w = style::text_size(more_t, &bf).0.ceil() + 30.0;
             fx -= more_w;
             out.push((C_MORE, Rect::new(fx, fy, more_w, 22.0)));
             // Preview.
@@ -756,6 +776,15 @@ mod appkit {
                 out.push((C_NEXT, Rect::new(preview.x + 38.0, preview.y + 56.0 + 3.0, 26.0, 22.0)));
             }
             out
+        }
+
+        /// Whether the table column is too narrow for the full footer labels
+        /// plus a readable status (then "More · CQL | curl").
+        fn footer_compact(&self, table: Rect) -> bool {
+            let bf = style::system_font(12.0, Weight::Medium);
+            let [m, q, u] = footer_labels(false);
+            let used: f64 = [(m, 30.0), (q, 22.0), (u, 22.0)].iter().map(|(t, pad)| style::text_size(t, &bf).0.ceil() + pad).sum();
+            table.width - 10.0 - 10.0 - used - 36.0 < 100.0
         }
 
         fn hit(&self, x: f64, y: f64) -> Option<i32> {
@@ -852,9 +881,14 @@ mod appkit {
             }
             // Footer: status, Load more, Copy CQL | Copy curl.
             let bf = style::system_font(12.0, Weight::Medium);
+            let [more_t, cql_t, curl_t] = footer_labels(self.footer_compact(table));
             if let Some(more) = rect_of(C_MORE) {
-                let status_r = Rect::new(table.x + 32.0, fy + 3.0, (more.x - table.x - 36.0).max(40.0), 16.0);
-                style::draw_text_left(&snap.status, status_r, &style::system_font(11.0, Weight::Regular), tone_rgba(&c, snap.tone));
+                // The status gets what the buttons leave; never drawn under them.
+                let status_w = more.x - table.x - 36.0;
+                if status_w >= 24.0 {
+                    let status_r = Rect::new(table.x + 32.0, fy + 3.0, status_w, 16.0);
+                    style::draw_text_left(&snap.status, status_r, &style::system_font(11.0, Weight::Regular), tone_rgba(&c, snap.tone));
+                }
                 let enabled = snap.can_more;
                 let hov = hover == Some(C_MORE) && enabled;
                 let pres = pressed == Some(C_MORE) && enabled;
@@ -864,12 +898,12 @@ mod appkit {
                 } else if hov {
                     style::fill_rounded(more, more.height / 2.0, c.text.with_alpha(0.08));
                 }
-                style::draw_text_centered("Load more", more, &bf, if enabled { c.text.with_alpha(0.85) } else { c.dim.with_alpha(0.6) });
+                style::draw_text_centered(more_t, more, &bf, if enabled { c.text.with_alpha(0.85) } else { c.dim.with_alpha(0.6) });
             }
             if let (Some(cq), Some(cu)) = (rect_of(C_CQL), rect_of(C_CURL)) {
                 let both = Rect::new(cq.x, cq.y, cu.max_x() - cq.x, cq.height);
                 style::capsule_track(both, &c);
-                for (id, r, t, en) in [(C_CQL, cq, "Copy CQL", snap.has_cql), (C_CURL, cu, "Copy curl", snap.has_curl)] {
+                for (id, r, t, en) in [(C_CQL, cq, cql_t, snap.has_cql), (C_CURL, cu, curl_t, snap.has_curl)] {
                     if en && (hover == Some(id) || pressed == Some(id)) {
                         style::capsule_chip(r.inset_by(2.0, 2.0), &c, false, true);
                     }
@@ -940,5 +974,25 @@ mod tests {
     #[test]
     fn strip_height_matches_swift() {
         assert_eq!(STRIP_H, 10.0 + 26.0 * 2.0 + 8.0 + 10.0);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{footer_labels, picker_width};
+
+    #[test]
+    fn pickers_shrink_so_the_sort_chip_fits() {
+        let choices = [150.0, 142.0, 110.0];
+        assert_eq!(picker_width(1200.0, &choices), 190.0, "wide window: full pickers");
+        // 900 pt window (~740 pt of strip): 740 - (402 + 32) = 306 -> 153 each.
+        assert_eq!(picker_width(740.0, &choices), 153.0);
+        assert_eq!(picker_width(400.0, &choices), 120.0, "never below 120");
+    }
+
+    #[test]
+    fn compact_footer_labels() {
+        assert_eq!(footer_labels(false), ["Load more", "Copy CQL", "Copy curl"]);
+        assert_eq!(footer_labels(true), ["More", "CQL", "curl"]);
     }
 }

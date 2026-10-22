@@ -58,6 +58,26 @@ pub enum AIEvent {
     CopyCommand,
 }
 
+/// How the answer box header fits the box width `box_w`: the box title
+/// (`title_w`) on the left, the mode segments (`modes_w`) and the Copy
+/// button on the right. Tries the Copy widths in `copy_ws` (full label,
+/// "⧉ Copy", "⧉") with the title, then the narrowest without the title.
+/// Returns (index into `copy_ws`, show the title).
+pub fn header_fit(box_w: f64, title_w: f64, modes_w: f64, copy_ws: &[f64]) -> (usize, bool) {
+    let right = |cw: f64| 8.0 + cw + 6.0 + modes_w;
+    for (i, cw) in copy_ws.iter().enumerate() {
+        if 12.0 + title_w + 10.0 + right(*cw) <= box_w {
+            return (i, true);
+        }
+    }
+    (copy_ws.len().saturating_sub(1), false)
+}
+
+/// The Copy button's labels, widest first (see [`header_fit`]).
+pub fn copy_labels(full: &str) -> [String; 3] {
+    [full.to_string(), "\u{29c9} Copy".to_string(), "\u{29c9}".to_string()]
+}
+
 pub const C_MODE: i32 = 10;
 pub const C_COPY: i32 = 30;
 pub const C_RUN: i32 = 31;
@@ -426,7 +446,8 @@ mod appkit {
             out.push((C_CMD, cmd));
             let snap = self.ivars().snap.borrow();
             let bf = style::system_font(12.0, Weight::Medium);
-            let cw = style::text_size(&snap.copy_title, &style::system_font(12.0, Weight::Semibold)).0.ceil() + 26.0;
+            let (copy_text, _) = self.header_fit(&snap, rbox);
+            let cw = style::text_size(&copy_text, &style::system_font(12.0, Weight::Semibold)).0.ceil() + 26.0;
             let mut x = rbox.max_x() - 8.0 - cw;
             out.push((C_COPY, Rect::new(x, rbox.y + (HEAD_H - 24.0) / 2.0, cw, 24.0)));
             let geo = style::CAPSULE_GEO;
@@ -441,6 +462,19 @@ mod appkit {
             let rw = style::text_size(title, &style::system_font(13.0, Weight::Semibold)).0.ceil() + 40.0;
             out.push((C_RUN, Rect::new(self.left() + PAD, fy, rw, 28.0)));
             out
+        }
+
+        /// The Copy label and whether the box title shows, for `rbox`'s
+        /// width (narrow windows compact the Copy button, then drop the title).
+        fn header_fit(&self, snap: &AISnapshot, rbox: Rect) -> (String, bool) {
+            let bf = style::system_font(12.0, Weight::Medium);
+            let cf = style::system_font(12.0, Weight::Semibold);
+            let labels = copy_labels(&snap.copy_title);
+            let ws: Vec<f64> = labels.iter().map(|l| style::text_size(l, &cf).0.ceil() + 26.0).collect();
+            let (_, modes_w) = style::capsule_metrics(&snap.modes, &bf);
+            let title_w = style::text_size(&snap.right_title, &style::system_font(11.0, Weight::Semibold)).0;
+            let (i, show) = header_fit(rbox.width, title_w, modes_w, &ws);
+            (labels[i].clone(), show)
         }
 
         fn hit(&self, x: f64, y: f64) -> Option<i32> {
@@ -499,7 +533,9 @@ mod appkit {
                 }
             }
             // Boxes.
-            for (bx, title) in [(lbox, "Your text".to_string()), (rbox, snap.right_title.clone())] {
+            let (copy_text, show_title) = self.header_fit(&snap, rbox);
+            let right_title = if show_title { snap.right_title.clone() } else { String::new() };
+            for (bx, title) in [(lbox, "Your text".to_string()), (rbox, right_title)] {
                 style::fill_rounded(bx, 8.0, c.mantle().with_alpha(0.45));
                 style::stroke_rounded(bx, 8.0, 1.0, c.hairline());
                 let tf = style::system_font(11.0, Weight::Semibold);
@@ -543,7 +579,7 @@ mod appkit {
                 } else if hov {
                     style::fill_rounded(r, r.height / 2.0, c.text.with_alpha(0.08));
                 }
-                style::draw_text_centered(&snap.copy_title, r, &style::system_font(12.0, Weight::Semibold), c.text.with_alpha(0.9));
+                style::draw_text_centered(&copy_text, r, &style::system_font(12.0, Weight::Semibold), c.text.with_alpha(0.9));
             }
             // Footer.
             if let Some(r) = rect_of(C_RUN) {
@@ -564,5 +600,22 @@ mod appkit {
             }
             let _ = ButtonState::Idle;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_fit;
+
+    #[test]
+    fn answer_header_compacts_copy_then_drops_the_title() {
+        let copy = [150.0, 70.0, 36.0];
+        // Wide box: everything fits.
+        assert_eq!(header_fit(600.0, 45.0, 250.0, &copy), (0, true));
+        // 900 pt window (~325 pt box): no Copy label fits beside the title
+        // (12+45+10 + 8+36+6+250 = 367 > 325), so the icon shows, no title.
+        assert_eq!(header_fit(325.0, 45.0, 250.0, &copy), (2, false));
+        // A box where the short label fits with the title.
+        assert_eq!(header_fit(420.0, 45.0, 250.0, &copy), (1, true));
     }
 }
