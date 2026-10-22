@@ -51,12 +51,13 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 38 | S3 | AI / Confluence / Jira | At 900x500: AI mode segments drawn over the "Answer" title; Confluence "Sort:" clipped at the right edge and the footer status drawn under "Load more"; Jira empty-state hint truncated | `.build/haiku/20261021-2242/HAIKU.md` (2/2 each) | fixed 6a2d6e3: `ai_view::header_fit`, `confluence_view::picker_width` / `footer_labels`, `jira_view::wrap_words` · unit tests per helper · flow `visual-narrow-window-headers` (OCR oracles; VM runner can't capture, verified by OCR on ks-drive shots before/after) · verified 2026-10-22 |
 | 39 | S2 | Compare | Folder entries size + time couldn't decide stayed "unknown" forever: `FolderContent::check` was never called | night lead (h-cmp, 2026-10-20) | fixed 4d7990a (same change as #14) |
 | 40 | S3 | Config | A UTF-8 BOM dropped the whole first (`[app]`) section | night lead (h-cfg, 2026-10-20) | fixed 58cd672: BOM stripped on read / reload / validate / split · unit test `a_utf8_bom_does_not_hide_the_first_section` · verified 2026-10-22 (VM: BOM config + raw reload applies `[app] header-style`) |
+| 41 | S3 | Config | `palette-first` with a repeated id listed the command twice | night lead (h-cfg, 2026-10-20) | fixed b85e07f: parse keeps the first occurrence · unit test (parse_app_config case) · not VM-verified (needs a config change before launch) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
 Full repros: `.build/night/20261020-2246/find/h-cmp|h-cfg/findings.jsonl`. Confirm before fixing.
 
-- S3 config: TOML arrays accepted as scalars; palette-first with a repeated id shows the command twice.
+- S3 config: TOML arrays accepted as scalars (`hide-on-focus-loss = [true]` acts as `true`). by-design? A one-element list reading as its value may be what the user meant; rejecting needs a scalar-key schema in the shared codec. Owner decision.
 - S3 compare: `max-lines`, `exclude` / `use-gitignore` / `ignore-file` are not enforced.
 
 ## Leads (unverified: Haiku agents driving the real app in the VM, 2026-10-21, each 2/2+ by the agent)
