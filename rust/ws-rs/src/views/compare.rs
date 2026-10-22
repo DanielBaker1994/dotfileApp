@@ -3562,7 +3562,33 @@ impl CompareWindowModel {
     }
 
     /// `CompareWindow.openFolders`: a folder session, scanned and bound.
+    /// Re-running a pair that is already open focuses (and rescans) that
+    /// session instead of opening a second one.
     pub fn open_folders(&mut self, left: &str, right: &str) -> usize {
+        if let Some(id) = self.open_folder_session(left, right) {
+            self.select_session(id);
+            self.folder_page.rescan();
+            self.recent.add(left, right, self.config.recent_limit());
+            return self.selected.unwrap_or(0);
+        }
+        self.open_folders_new(left, right)
+    }
+
+    /// The id of the open (non-sub) folder session comparing `left` with `right`.
+    fn open_folder_session(&self, left: &str, right: &str) -> Option<i64> {
+        self.sessions
+            .iter()
+            .filter(|s| Some(s.id) != self.sub_session)
+            .filter(|s| s.folder.is_some() || self.folder_bound == Some(s.id))
+            .find(|s| {
+                s.path.get(&CompareSide::Left).map(String::as_str) == Some(left)
+                    && s.path.get(&CompareSide::Right).map(String::as_str) == Some(right)
+            })
+            .map(|s| s.id)
+    }
+
+    /// A new folder session, scanned and bound.
+    fn open_folders_new(&mut self, left: &str, right: &str) -> usize {
         self.unbind_folder();
         let model =
             TextCompare::with_backend(self.backend.clone(), TextSide::default(), TextSide::default(), self.config.importance(), false);
@@ -3582,10 +3608,16 @@ impl CompareWindowModel {
     /// Open a pair (`CompareWindow.openPair`): two folders open a folder
     /// session; otherwise a text pair, a missing side empty.
     pub fn open_pair(&mut self, left: Option<&str>, right: Option<&str>) -> usize {
+        self.open_pair_with(left, right, true)
+    }
+
+    /// [`Self::open_pair`]; `reuse` lets a folder pair focus its open session
+    /// (off for the sub-view, whose session `close_sub` deletes).
+    fn open_pair_with(&mut self, left: Option<&str>, right: Option<&str>, reuse: bool) -> usize {
         let is_dir = |p: Option<&str>| p.map_or(false, |p| Path::new(p).is_dir());
         if let (Some(l), Some(r)) = (left, right) {
             if is_dir(left) && is_dir(right) {
-                return self.open_folders(l, r);
+                return if reuse { self.open_folders(l, r) } else { self.open_folders_new(l, r) };
             }
         }
         self.unbind_folder();
@@ -3711,7 +3743,7 @@ impl CompareWindowModel {
     pub fn open_sub(&mut self, left: Option<&str>, right: Option<&str>) {
         self.close_sub();
         let ret = self.current().map(|s| s.id);
-        self.open_pair(left, right);
+        self.open_pair_with(left, right, false);
         self.sub_session = self.current().map(|s| s.id);
         self.sub_return = ret;
         self.sub = true;
@@ -7221,6 +7253,20 @@ mod tests {
     /// consumes it exactly like `do:compare:folder-open`); before the fix the
     /// router never took the flag, so the sub view was never pushed and the
     /// flag leaked into the next compare verb.
+    #[test]
+    fn rerunning_an_open_folder_pair_focuses_it() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderrerun");
+        let mut model = CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_folders("/x/A", "/x/B");
+        model.open_folders("/l", "/r");
+        assert_eq!(model.sessions.len(), 2);
+        let idx = model.open_folders("/x/A", "/x/B");
+        assert_eq!(model.sessions.len(), 2, "no second session for the same pair");
+        assert_eq!((idx, model.selected), (0, Some(0)), "the open session is focused");
+        assert_eq!(model.folder_bound, Some(model.sessions[0].id));
+    }
+
     #[test]
     fn sidebar_click_switches_session_and_tree_click_selects_row() {
         let stub = Stub::new();
