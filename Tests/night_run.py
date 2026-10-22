@@ -6,12 +6,14 @@
 
 Phases (each logs to .build/night/<run>/, failures never stop the next phase):
   find   parallel, nothing on screen: 4 flow-author workers (new flows from the docs) +
-         3 headless hunters (compare vs difflib, config fuzz, random state walk)
+         3 headless hunters (compare vs difflib, config fuzz, random state walk) +
+         usability: 2 new-user walkthroughs (docs-only task flows + friction) and a keyboard
+         consistency audit; these are report-only (USABILITY.md), never triaged or fixed
   run    validate the authored flows, run them in the VM (Tests/run_flows.py, no LLM)
   triage one worker per failing new flow (serial, VM): flow wrong -> corrected flow, or app bug
   fix    one worker per bug (serial, main tree): commit only if cargo test passes AND the
          full VM table has no new failures; otherwise the work is stashed (git stash list)
-  final  full VM run + SUMMARY.md
+  final  full VM run (+ silent shortcut keys) + USABILITY.md + SUMMARY.md
 
 Workers never commit; this script commits (docs/tests, and gated fixes) on main.
 """
@@ -137,7 +139,7 @@ VERIFY your flows in the VM before finishing (this runs them for real, ~10 s per
   python3 -c 'import json;b=json.load(open("Tests/app_flows.json"));n=json.load(open("{out}/flows.json"));b["fixtures"]+=n.get("fixtures",[]);b["flows"]=n["flows"];json.dump(b,open("Tests/app_flows_{key}.json","w"),indent=1,ensure_ascii=False)'
   bin/ks-vm test --table Tests/app_flows_{key}.json
   (then delete Tests/app_flows_{key}.json). Only ONE worker may use the VM at a time: if
-  `bin/ks-vm test` prints "another GUI sandbox run holds", wait 2 minutes and try again (max 5 times).
+  `bin/ks-vm test` prints "another GUI sandbox run holds", wait 2 minutes and try again (max 10 times).
 A flow that fails: decide from the app's code whether YOUR expectation is wrong (fix the flow) or the
 app is wrong (keep the flow, add "suspected_bug": "<one line>" to it). Report at the end: flows written,
 pass/fail in the VM, suspected bugs.
@@ -187,10 +189,67 @@ repeat k/3), {out}/summary.md. Stop the sandbox at the end.
 }
 
 
+# ---------------------------------------------------------------- usability (report-only)
+# Usability findings are design questions, not bugs: they never reach triage or the fix
+# phase. They land in .build/night/<run>/USABILITY.md for the owner to rank and move into
+# APP-BUGS.md if wanted.
+
+UX_TASKS = {
+    "files-notes": "Files and Notes: e.g. find a file by part of its name and open it; rename a file and undo it; "
+                   "make a new folder and move into it; start a new note, write two lines, save, find it again later; "
+                   "rename a note; search inside a note",
+    "compare-shell": "Compare and the shared window: e.g. compare two text files and jump to the next difference; "
+                     "copy one difference to the other side and undo; compare two folders and open a differing file; "
+                     "switch between views without the mouse; find and run a palette tool; close everything with the keyboard",
+}
+
+UX_TASK_BRIEF = """TASK: usability walkthrough of the kitchen-sink app as a NEW USER: {area}.
+Pick 6 everyday tasks. For each, decide the steps the way a new user would: ONLY from what a user can see
+or read: commands.toml (shortcut rows and palette command titles), README.md, PRODUCT.md, the in-app
+shortcut cards/menus (their text lives in commands.toml). Do NOT read rust/ to choose your steps.
+Write each task as a flow (same schema as Tests/app_flows.json; id "n-ux-{key}-<task>"; "why" = the user's
+goal in one sentence; extra field "ux": {{"goal": "...", "learned_from": ["<doc:line per shortcut used>"],
+"tries": <how many ideas you had to try before one worked>}}). Oracles check the GOAL was reached (state/
+disk), not the internals. Run them in the VM:
+  python3 -c 'import json;b=json.load(open("Tests/app_flows.json"));n=json.load(open("{out}/flows.json"));b["fixtures"]+=n.get("fixtures",[]);b["flows"]=n["flows"];json.dump(b,open("Tests/app_flows_ux{key}.json","w"),indent=1,ensure_ascii=False)'
+  bin/ks-vm test --table Tests/app_flows_ux{key}.json      (then delete that table file)
+  Only ONE VM user at a time: on "another GUI sandbox run holds", wait 2 minutes, retry (max 10 times).
+When the natural path fails, NOW read the code to learn why, and record it as friction (don't bend the flow
+to the code; keep the natural-path flow, add "ux_finding": "<one line>"). A flow that is malformed (bad
+schema, wrong state path) you fix. Also record friction when a task worked but was hard: a shortcut you
+could not find in any doc, a name that misled you, too many steps, no feedback after an action, an error
+with no explanation, a dead end that Esc did not leave.
+OUTPUT (the ONLY files you write): {out}/flows.json = {{"fixtures": [...], "flows": [...]}} and
+{out}/friction.jsonl, one JSON per line: {{"id","sev":"U1|U2|U3" (U1 = blocks the task, U2 = slows it a lot,
+U3 = annoyance),"task","tried","happened","would_help","evidence":"<file:line or VM result>"}}.
+""" + COMMON_RULES + "Exception to the 'never opinion' rule: friction notes are judgement, but each needs evidence.\n"
+
+UX_KEYS_BRIEF = """TASK: keyboard consistency audit of kitchen-sink, read-only (no app, no VM).
+For these keys: Esc, Return, Tab, Shift+Tab, Cmd+W, Cmd+Z, Cmd+Shift+Z, Cmd+F, Cmd+L, Cmd+N, Cmd+S, Cmd+C,
+Cmd+V, Cmd+A, Cmd+[, Cmd+], Backspace, Space, j/k, Up/Down, F2, Cmd+R, Cmd+0, Cmd+=/Cmd+- — find what each does
+in each surface: notes (plain editor, nvim pane, sidebar), files (list, filter field), compare text, compare
+folder, compare start page, jira, palette, view switcher, paths shelf, terminal/browser drawers, config/
+settings. Sources: commands.toml, PRODUCT.md / PRD-*.md, then the handlers (rust/ws-rs/src/app/host.rs
+*_key fns, ui/popup.rs route_key/vim_pane_key, panes/vim_keys.rs, views/*.rs keyDown/handle_key).
+A finding is: the same key does clearly different things in similar contexts (e.g. Esc closes here but
+clears there), a key works in one list but not in a sibling list, a documented shortcut with no handler, a
+handler a user can't discover (in no doc), or two keys for one action in one place but missing in another.
+OUTPUT (only files you write): {out}/keymap.md (a key x surface table, "-" = does nothing, cite file:line)
+and {out}/findings.jsonl: {{"id","sev":"U1|U2|U3","key","surfaces","what","would_help","evidence":"file:line"}}.
+""" + COMMON_RULES
+
+
 def phase_find() -> None:
-    log("phase find: 4 authors + 3 hunters in parallel")
+    log(f"phase find: 4 authors + 3 hunters + {len(UX_TASKS) + 1} usability workers in parallel")
     jobs = {}
-    with cf.ThreadPoolExecutor(max_workers=7) as ex:
+    with cf.ThreadPoolExecutor(max_workers=10) as ex:
+        for key, area in UX_TASKS.items():
+            d = os.path.join(OUT, "find", f"u-{key}")
+            os.makedirs(d, exist_ok=True)
+            jobs[ex.submit(worker, f"u-{key}", UX_TASK_BRIEF.format(area=area, key=key, out=d), 75)] = f"u-{key}"
+        d = os.path.join(OUT, "find", "u-keys")
+        os.makedirs(d, exist_ok=True)
+        jobs[ex.submit(worker, "u-keys", UX_KEYS_BRIEF.format(out=d), 60)] = "u-keys"
         for key, area in AUTHOR_AREAS.items():
             d = os.path.join(OUT, "find", f"a-{key}")
             os.makedirs(d, exist_ok=True)
@@ -205,7 +264,7 @@ def phase_find() -> None:
             except Exception as e:
                 log(f"  worker {jobs[f]} crashed: {e}")
     for f in os.listdir(os.path.join(ROOT, "Tests")):
-        if re.fullmatch(r"app_flows_(files|compare|notes|shell)\.json", f):
+        if re.fullmatch(r"app_flows_(files|compare|notes|shell|ux[\w-]+)\.json", f):
             os.remove(os.path.join(ROOT, "Tests", f))
     dirty = git_dirty()
     if dirty:
@@ -259,12 +318,12 @@ def phase_run() -> dict:
     base = json.load(open(TABLE))
     known = {f["id"] for f in base["flows"]}
     new_flows, fixtures = [], []
-    for key in AUTHOR_AREAS:
-        p = os.path.join(OUT, "find", f"a-{key}", "flows.json")
+    for name in [f"a-{k}" for k in AUTHOR_AREAS] + [f"u-{k}" for k in UX_TASKS]:
+        p = os.path.join(OUT, "find", name, "flows.json")
         try:
             doc = json.load(open(p))
         except Exception as e:
-            log(f"  a-{key}: no usable flows.json ({e})")
+            log(f"  {name}: no usable flows.json ({e})")
             continue
         for fl in doc.get("flows", []):
             why = validate_flow(fl, known)
@@ -307,7 +366,8 @@ OUTPUT (only file you write): {out}/verdict.json =
 
 
 def phase_triage(verdicts: dict) -> list[dict]:
-    failing = [k for k, v in verdicts.items() if v in ("FAIL", "ERROR")][:10]
+    # n-ux- walkthrough failures are usability findings (USABILITY.md), not bugs to fix.
+    failing = [k for k, v in verdicts.items() if v in ("FAIL", "ERROR") and not k.startswith("n-ux-")][:10]
     log(f"phase triage: {len(failing)} failing new flows")
     new = json.load(open(os.path.join(OUT, "new-flows.json")))
     flows = {f["id"]: f for f in new["flows"]}
@@ -407,8 +467,14 @@ REPORT: root cause (file:line), the diff summary, gate outputs.
 """
 
 
+LAST_FULL: dict = {}  # the latest full VM run's results (silent keys for USABILITY.md)
+
+
 def full_vm_failures() -> set:
     _, v = vm_test("", timeout=2400)
+    if v:
+        LAST_FULL.clear()
+        LAST_FULL.update(v)
     return {k for k, r in v.items() if r["verdict"] in ("FAIL", "ERROR")} if v else {"<no results>"}
 
 
@@ -463,6 +529,80 @@ def phase_fix(new_bugs: list[dict]) -> list[str]:
     return fixed
 
 
+# ---------------------------------------------------------------- usability report
+
+
+def read_jsonl(p: str) -> list[dict]:
+    rows = []
+    if os.path.exists(p):
+        for line in open(p, encoding="utf-8"):
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return rows
+
+
+def usability_report(verdicts: dict) -> int:
+    """USABILITY.md: walkthrough results + friction, key-consistency findings, silent keys.
+    Report-only; returns the number of items."""
+    lines = [f"# Usability findings, night run {RUN}", "",
+             "Report-only: nothing here was auto-fixed. Move what you want fixed into APP-BUGS.md.",
+             "U1 = blocks a task, U2 = slows it a lot, U3 = annoyance.", ""]
+    n = 0
+    friction = []
+    for key in UX_TASKS:
+        friction += read_jsonl(os.path.join(OUT, "find", f"u-{key}", "friction.jsonl"))
+    ux = {k: v for k, v in verdicts.items() if k.startswith("n-ux-")}
+    lines += ["## Task walkthroughs (new-user path, docs only)", ""]
+    if ux:
+        flows = {}
+        try:
+            flows = {f["id"]: f for f in json.load(open(os.path.join(OUT, "new-flows.json")))["flows"]}
+        except Exception:
+            pass
+        lines += ["| task | natural path | goal | finding |", "|---|---|---|---|"]
+        for fid, v in sorted(ux.items(), key=lambda kv: kv[1] == "PASS"):
+            f = flows.get(fid, {})
+            goal = (f.get("ux") or {}).get("goal") or f.get("why", "")
+            lines.append(f"| {fid} | {'works' if v == 'PASS' else 'FAILS'} | {goal[:120]} | "
+                         f"{str(f.get('ux_finding', ''))[:160]} |")
+    else:
+        lines.append("(no walkthrough flows ran)")
+    lines.append("")
+    for title, rows, cols in (("Friction (walkthroughs)", friction, ("task", "tried", "happened", "would_help")),
+                              ("Keyboard consistency", read_jsonl(os.path.join(OUT, "find", "u-keys", "findings.jsonl")),
+                               ("key", "surfaces", "what", "would_help"))):
+        rows = sorted(rows, key=lambda r: str(r.get("sev", "U9")))
+        n += len(rows)
+        lines += [f"## {title}", ""]
+        if rows:
+            lines += ["| sev | " + " | ".join(cols) + " | evidence |", "|---" * (len(cols) + 2) + "|"]
+            for r in rows:
+                cells = [str(r.get(c, ""))[:140].replace("|", "/").replace("\n", " ") for c in cols + ("evidence",)]
+                lines.append(f"| {r.get('sev', '?')} | " + " | ".join(cells) + " |")
+        else:
+            lines.append("(none)")
+        lines.append("")
+    silent: dict = {}
+    for fid, r in LAST_FULL.items():
+        for s in r.get("silent", []):
+            silent.setdefault((s["key"], s.get("view"), s.get("focus")), []).append(f"{fid}#{s.get('step')}")
+    n += len(silent)
+    lines += ["## Silent keys (final full VM run)", "",
+              "A shortcut-style key that changed nothing visible: state, toast, clipboard or files. Some are "
+              "intended no-ops (a test checking that a key does nothing); the rest are actions with no feedback.", ""]
+    if silent:
+        lines += ["| key | view | focus | seen in |", "|---|---|---|---|"]
+        for (k, view, focus), where in sorted(silent.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"| `{k}` | {view} | {focus} | {len(where)}: {', '.join(where[:4])} |")
+    else:
+        lines.append("(none)")
+    open(os.path.join(OUT, "USABILITY.md"), "w").write("\n".join(lines) + "\n")
+    log(f"  usability report: {n} items -> {OUT}/USABILITY.md")
+    return n
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -471,6 +611,8 @@ def summary(fixed: list[str], promoted: list[str], bugs: list[dict]) -> None:
              f"New flows promoted: {len(promoted)}", f"New app bugs (triaged): {len(bugs)}", ""]
     for b in bugs:
         lines.append(f"- {b.get('severity')} {b['flow']}: {b.get('bug_title')} ({str(b.get('evidence'))[:160]})")
+    if os.path.exists(os.path.join(OUT, "USABILITY.md")):
+        lines += ["", f"Usability (report-only, nothing fixed): {OUT}/USABILITY.md"]
     lines += ["", "## Headless hunters"]
     for key in HUNT_BRIEFS:
         p = os.path.join(OUT, "find", key, "findings.jsonl")
@@ -502,6 +644,7 @@ def main() -> int:
             fixed = phase_fix(bugs)
         if "final" in phases:
             log(f"final VM failures: {sorted(full_vm_failures())}")
+            usability_report(verdicts)
     except Exception as e:
         log(f"night run aborted: {e!r}")
     finally:

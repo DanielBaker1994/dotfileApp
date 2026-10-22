@@ -14,6 +14,24 @@ pub fn not_ported_text(what: &str) -> String {
     format!("{what}: not ported yet")
 }
 
+static SHOWN: std::sync::Mutex<(u64, String)> = std::sync::Mutex::new((0, String::new()));
+
+/// Count a toast and remember its text (`state.toast`): the pill itself is a
+/// separate window that no other state field reflects, so the flow runner's
+/// "did this key do anything visible" check would miss it.
+pub fn record(text: &str) {
+    if let Ok(mut s) = SHOWN.lock() {
+        s.0 += 1;
+        s.1 = text.to_string();
+    }
+}
+
+/// `state.toast`: `{count, text}` of the toasts shown since launch.
+pub fn state() -> serde_json::Value {
+    let (count, text) = SHOWN.lock().map(|s| s.clone()).unwrap_or_default();
+    serde_json::json!({ "count": count, "text": text })
+}
+
 /// SF Symbol for [`not_ported`] pills.
 pub const NOT_PORTED_SYMBOL: &str = "hammer";
 
@@ -48,6 +66,7 @@ mod appkit {
         if text.is_empty() {
             return;
         }
+        super::record(text);
         let Some(scr) = crate::platform::main_screen() else { return };
         PANEL.with(|p| {
             if let Some(old) = p.borrow_mut().take() {
@@ -146,5 +165,17 @@ mod appkit {
                 },
             )
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn record_counts_toasts_for_state() {
+        let before = super::state()["count"].as_u64().unwrap();
+        super::record("Nothing to undo");
+        let s = super::state();
+        assert_eq!(s["count"].as_u64().unwrap(), before + 1);
+        assert_eq!(s["text"], "Nothing to undo");
     }
 }

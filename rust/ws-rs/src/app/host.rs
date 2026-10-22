@@ -640,6 +640,7 @@ impl ControllerInner {
             "frontmostPid": self.frontmost_pid,
             "tools": Value::Object(self.tools.clone()),
             "lastKey": self.last_key.clone(),
+            "toast": crate::ui::toast::state(),
             "input": crate::app::synth_input::state(),
             "headerStyle": self.settings.header_style.raw(),
             "terminalPanel": self

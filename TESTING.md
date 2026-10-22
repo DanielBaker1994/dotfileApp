@@ -339,6 +339,28 @@ after the trigger; after Tab the expansion is in the buffer). Record the **first
 #11 is `re-check`, no clicks outside the app window, no Hyper combos), 500 events, the crash/hang/log
 oracle only. On a crash, the seed + event index is the repro. Cheap and finds crashes.
 
+### Usability lanes (report-only: findings go to `USABILITY.md`, never to triage or the fix phase)
+
+Bug lanes ask "does it do what the code/docs say?"; these ask "can a user get it done?". The
+findings are design questions, so the owner ranks them and moves the wanted ones into `APP-BUGS.md`.
+
+**U-TASK — new-user walkthrough.** A worker picks 6 everyday tasks in a feature area and writes each
+as a flow (`n-ux-*`) using only what a user can read (commands.toml shortcuts and palette titles,
+README, PRODUCT.md), never the Rust source. Oracles check the goal, not internals. A failing natural
+path is the finding (the code is read afterwards only to explain it); `friction.jsonl` records the
+rest (undocumented shortcut, misleading name, too many steps, no feedback, dead end). U1 blocks the
+task, U2 slows it a lot, U3 is an annoyance.
+
+**U-KEYS — keyboard consistency audit.** Read-only: a key x surface table (Esc, Return, Cmd+W/Z/F/L,
+j/k, …) from commands.toml + the key handlers; findings are the same key meaning different things in
+similar places, a documented shortcut with no handler, or a handler in no doc.
+
+**Silent keys (built into `run_flows.py`).** Every shortcut-style `key` step (a modifier, or
+Esc/Return/Tab/F-keys) is checked for a visible effect within 1 s: state (minus `input`, `lastKey`,
+pids, activations), `state.toast` (count + text of the toast pill), the clipboard, and files under the
+sandbox HOME. A step with none is listed under "Silent keys" in the run's `summary.md`; it is never a
+FAIL. Plain letters, arrows and typed text are not checked (editor text is not in state).
+
 ### Follow-up lanes
 
 **R-MIN — minimise and replay.** Input: one finding with its trail. Replay it 3 times; if it reproduces,

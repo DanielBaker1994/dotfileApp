@@ -476,18 +476,63 @@ def expand(s: str, sb: Sandbox) -> str:
     return s.replace("$HOME", sb.home).replace("~/", sb.home + "/")
 
 
-def run_step(sb: Sandbox, inp: str, replies: dict) -> None:
+# Silent-key check (usability, report-only): a shortcut-style key whose step changes
+# nothing a user could notice. State fields that move on every key are ignored; the
+# clipboard and files under the sandbox HOME count as effects (neither is in state).
+VOLATILE_STATE = {"input", "lastKey", "activations", "frontmostPid", "pid"}
+SHORTCUT_KEY = re.compile(r"(^|\+)(cmd|ctrl|opt|alt)\+|^(esc|escape|return|enter|tab|shift\+tab|f\d+)$")
+SILENT_POLL_S = 1.0
+
+
+def effect_snapshot(sb: Sandbox) -> tuple:
+    st = sb.state(quiet=True) or {}
+    core = json.dumps({k: v for k, v in st.items() if k not in VOLATILE_STATE}, sort_keys=True)
+    try:
+        clip = subprocess.run(["pbpaste"], capture_output=True, timeout=2).stdout
+    except Exception:
+        clip = b""
+    files = []
+    for d, _, fs in os.walk(sb.real_home):
+        if "/logs" in d[len(sb.real_home):]:
+            continue
+        for f in fs:
+            try:
+                s = os.stat(os.path.join(d, f))
+                files.append((d, f, s.st_size, s.st_mtime_ns))
+            except OSError:
+                pass
+    return core, clip, tuple(sorted(files))
+
+
+def silent_after(sb: Sandbox, before: tuple) -> bool:
+    """True when nothing in `effect_snapshot` changed within SILENT_POLL_S."""
+    deadline = time.time() + SILENT_POLL_S
+    while True:
+        if effect_snapshot(sb) != before:
+            return False
+        if time.time() >= deadline:
+            return True
+        time.sleep(0.2)
+
+
+def run_step(sb: Sandbox, inp: str, replies: dict, silent: list | None = None) -> None:
     kind, _, arg = inp.partition(" ")
     if kind == "wait":
         time.sleep(int(arg) / 1000)
         return
     if kind in ("key", "type"):
+        check = silent is not None and kind == "key" and SHORTCUT_KEY.search(arg.strip().lower())
+        snap = effect_snapshot(sb) if check else None
         before = (sb.state(quiet=True) or {}).get("input", {}).get("dropped", 0)
         sb.do(("input:key:" if kind == "key" else "input:text:") + arg)
         time.sleep(0.15)
         after = (sb.state(quiet=True) or {}).get("input", {})
         if after.get("dropped", 0) > before:
             raise StepError(f"{inp}: input dropped ({after.get('lastError')})")
+        if silent is not None and snap is not None and silent_after(sb, snap):
+            st = sb.state(quiet=True) or {}
+            silent.append({"key": arg, "view": st.get("view"),
+                           "focus": (st.get("pane") or {}).get("focused")})
         return
     if kind == "click-rel":
         fx, fy = (float(x) for x in arg.split())
@@ -516,7 +561,7 @@ def run_step(sb: Sandbox, inp: str, replies: dict) -> None:
 
 def run_flow(sb: Sandbox, flow: dict, out: str, tag: str) -> dict:
     res = {"id": flow["id"], "feature": flow.get("feature"), "run": tag, "verdict": "PASS",
-           "failed": [], "pending": [], "error": None, "shots": []}
+           "failed": [], "pending": [], "error": None, "shots": [], "silent": []}
     marks = {p: os.path.getsize(p) for p in sb.logs() if os.path.exists(p)}
     replies: dict[str, object] = {}
     by_cp: dict[str | None, list[dict]] = {}
@@ -585,7 +630,10 @@ def run_flow(sb: Sandbox, flow: dict, out: str, tag: str) -> dict:
             sb.activate()
         for i, step in enumerate(flow["steps"], 1):
             try:
-                run_step(sb, step["input"], replies)
+                n = len(res["silent"])
+                run_step(sb, step["input"], replies, res["silent"])
+                if len(res["silent"]) > n:
+                    res["silent"][-1]["step"] = i
             except (OSError, socket.timeout) as e:
                 raise StepError(f"step {i} {step['input']!r}: {e or 'timed out'}")
             if step.get("checkpoint"):
@@ -653,6 +701,12 @@ def write_summary(out: str, results: list[dict], replay: bool) -> str:
             detail = r["error"] or "; ".join(r["failed"]) or (
                 "pending: " + ", ".join(p["kind"] for p in r["pending"]) if r["pending"] else "")
             lines.append(f"| {r['id']} | {r['run']} | {r['verdict']} | {detail[:220].replace('|', '/')} |")
+        quiet = [(r["id"], s) for r in results for s in r.get("silent", [])]
+        if quiet:
+            lines += ["", "## Silent keys (usability, report-only)", "",
+                      "A shortcut key that changed nothing a user could see (state, toast, clipboard, files).", "",
+                      "| flow | step | key | view | focus |", "|---|---|---|---|---|"]
+            lines += [f"| {fid} | {s.get('step')} | `{s['key']}` | {s['view']} | {s['focus']} |" for fid, s in quiet]
     text = "\n".join(lines) + "\n"
     open(os.path.join(out, "summary.md"), "w").write(text)
     return text
