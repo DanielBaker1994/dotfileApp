@@ -2178,6 +2178,12 @@ impl CompareSession {
         if n == 0 {
             return self.identical_summary(cfg);
         }
+        // The Same filter shows only matching rows: count those, so the
+        // header doesn't contradict the list with "≠ N sections".
+        if self.filter == CompareFilter::Same {
+            let k = self.display_count();
+            return format!("= {k} same · {n} diff{} hidden", if n == 1 { "" } else { "s" });
+        }
         let mut out = format!("≠ {n} section{}", if n == 1 { "" } else { "s" });
         if m.unimportant_count() > 0 {
             out.push_str(&format!(
@@ -7590,8 +7596,14 @@ mod tests {
             CompareSession::new(tc)
         };
         // Sections: "≠ N section(s)".
-        let s = session(new_snapshot(), side("a", "b"), side("a", "c"));
+        let mut s = session(new_snapshot(), side("a", "b"), side("a", "c"));
         assert!(s.summary(&cfg).starts_with("≠ 1 section"), "{}", s.summary(&cfg));
+        // The Same filter counts the matching rows it shows instead.
+        s.filter = CompareFilter::Same;
+        s.refresh(cfg.context_lines());
+        assert_eq!(s.summary(&cfg), "= 1 same · 1 diff hidden");
+        s.filter = CompareFilter::All;
+        s.refresh(cfg.context_lines());
         // No sections, same text: "Identical".
         let mut same = new_snapshot();
         same["right"] = side("a", "b").json();
