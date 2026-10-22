@@ -3792,7 +3792,7 @@ mod daemon_ui {
     use crate::ui::theme::{set_current_header_style, HeaderStyle as ThemeHeaderStyle, PopupColors};
     use crate::views::paths::{PathsWindow, ReturnAction as PathsReturn};
     use crate::views::switcher::{
-        LinkPick, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
+        gather_workspaces, LinkPick, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
         ViewSwitcherPanel,
     };
     use crate::views::terminal::{TerminalConfig, TerminalPanel};
@@ -3850,15 +3850,17 @@ mod daemon_ui {
     /// Picks that are *meant* to bring kitchen-sink forward: "Kitchen Sink"
     /// and the shared window's views. Every other pick — every popup (tool
     /// panels, terminal, paths, screenshot, the notes finders), all
-    /// non-activating and taking the keyboard without activating us —
-    /// leave the user's app focused.
+    /// non-activating and taking the keyboard without activating us — and
+    /// workspaces leave the user's app focused.
     fn pick_keeps_app(action: &PaletteAction) -> bool {
-        let PaletteAction::Command(name) = action;
-        matches!(
-            name.as_str(),
-            "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
-                | "jira-config"
-        )
+        match action {
+            PaletteAction::Command(name) => matches!(
+                name.as_str(),
+                "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
+                    | "jira-config"
+            ),
+            PaletteAction::Workspace(_) => false,
+        }
     }
 
     /// Re-activate the app Hyper+S was pressed over, *before* the palette is
@@ -4144,6 +4146,9 @@ mod daemon_ui {
         static NOTES_LAST_CLICK: std::cell::RefCell<Option<(String, f64)>> = const { std::cell::RefCell::new(None) };
     }
 
+    /// Last `gather_workspaces()` result, so the palette opens instantly.
+    static WORKSPACE_CACHE: std::sync::Mutex<Vec<crate::views::switcher::WorkspaceRow>> =
+        std::sync::Mutex::new(Vec::new());
     /// The last `[links] enabled = false` read (Ctrl+B W shows no group).
     static LINKS_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -5113,6 +5118,16 @@ mod daemon_ui {
             }
         }
 
+        /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
+        fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
+            let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
+            if let Some(p) = state.as_mut().and_then(|st| st.palette.as_mut()) {
+                if p.is_visible() {
+                    p.refresh_workspaces(workspaces);
+                }
+            }
+        }
+
         /// `showViewSwitcher()` — show the Hyper+S palette.
         fn show_palette(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -5122,7 +5137,15 @@ mod daemon_ui {
             let mut state = self.ivars().state.borrow_mut();
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.palette.take().unwrap_or_else(PalettePanel::new);
-            panel.set_rows(controller.hyper_palette_commands());
+            // The `aerospace` CLI can stall for seconds, so never wait on it
+            // here: paint with the last known rows and refresh off-main.
+            let workspaces = WORKSPACE_CACHE.lock().unwrap().clone();
+            panel.set_rows(controller.hyper_palette_commands(), workspaces);
+            std::thread::spawn(|| {
+                let fresh = gather_workspaces();
+                *WORKSPACE_CACHE.lock().unwrap() = fresh.clone();
+                on_ui(move |ui| ui.refresh_palette_workspaces(fresh));
+            });
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -5138,8 +5161,10 @@ mod daemon_ui {
                             ui.hide_palette_panel();
                             ui.end_palette(false);
                         });
-                        let PaletteAction::Command(name) = action;
-                        c.run_palette_command(&name);
+                        match action {
+                            PaletteAction::Command(name) => c.run_palette_command(&name),
+                            PaletteAction::Workspace(id) => c.switch_workspace(&id),
+                        }
                         c.set_palette_visible(false);
                     }
                 }),
@@ -6501,8 +6526,14 @@ mod daemon_ui {
                         p.hide_panel();
                     }
                     self.end_palette(false);
-                    let PaletteAction::Command(name) = action;
-                    self.ivars().controller.run_palette_command(&name);
+                    match action {
+                        PaletteAction::Command(name) => {
+                            self.ivars().controller.run_palette_command(&name)
+                        }
+                        PaletteAction::Workspace(id) => {
+                            self.ivars().controller.switch_workspace(&id)
+                        }
+                    }
                     self.ivars().controller.set_palette_visible(false);
                     true
                 }

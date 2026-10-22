@@ -382,9 +382,10 @@ panels that take the keyboard without activating the app; only a pick of
 macOS raise the shared window and AeroSpace jumps to its workspace. As a
 backstop the palette remembers the frontmost app (`PALETTE_RETURN`) and hands
 focus back on cancel / popup picks (`palette_hand_back`, `pick_keeps_app`).
-The Hyper+S palette is **one list** of exactly the `[app] palette` commands
+The Hyper+S palette is **one list**: the `[app] palette` commands
 (`hyper_palette`; shipped: Find Recent Files, Create File, Text to Table, Pretty
-Print). No workspace pane, nothing gathered on show. Ctrl+B W's `/` commands
+Print), then the AeroSpace workspaces with their app icons (cached, refreshed
+off-main). No side-by-side panes, no Tab pane switch. Ctrl+B W's `/` commands
 keep the full `in-palette` list. `bin/kitchen_sink.sh` toggles a running
 daemon before its lock / aerospace query, so the press costs one socket write.
 

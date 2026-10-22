@@ -30,8 +30,8 @@ focus-bridge = "ws-aerospace-focus"
 switcher-name = "kitchen-sink"
 
 palette-first = "paths, filefast, text-table, prettyprint"
-# The Hyper+S palette lists exactly these commands, in this order (one list;
-# the views and windows live in the app itself). Empty = every in-palette command.
+# The Hyper+S palette: these commands, in this order, then your AeroSpace
+# workspaces + their apps — one list. Empty = every in-palette command.
 palette = "paths, filefast, text-table, prettyprint"
 switcher-width = 760
 detail-name = "jira-detail"
@@ -436,7 +436,7 @@ sidebar-width = 245
 kitchen-sink = "*:app"
 
 [shortcuts]
-"all: Hyper+S" = "command palette: Find Recent Files, Create File, Text to Table, Pretty Print"
+"all: Hyper+S" = "palette: Find Recent Files, Create File, Text to Table, Pretty Print, then your workspaces + apps (one list)"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
@@ -471,7 +471,7 @@ kitchen-sink = "*:app"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt); in the notes vim pane Ctrl+Shift+J / K add a cursor below / above (multi-cursor)"
 "all: Cmd+/" = "this list"
 "palette: ↑ ↓ / Ctrl+N / Ctrl+P / Tab" = "move through the list"
-"palette: Return" = "run the command"
+"palette: Return" = "run the command / go to the workspace"
 "palette: Esc" = "clear the filter, else close"
 "notes: Cmd+Shift+P" = "reading view ⇄ editor"
 "notes: Cmd+Shift+O" = "the reading view in its own window"

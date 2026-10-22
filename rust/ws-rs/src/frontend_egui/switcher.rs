@@ -57,7 +57,7 @@ impl SwitcherOverlay {
     ///
     /// `controller` is the source of truth for which panel is up
     /// (`view_switcher_shown` / `is_palette_visible`) and the target of an
-    /// accept (`nav_clicked` / `run_palette_command`).
+    /// accept (`nav_clicked` / `run_palette_command` / `switch_workspace`).
     pub fn ui(&mut self, ctx: &egui::Context, controller: &SwitcherController) {
         // Show/hide is read from the controller flags each frame, so the
         // socket's `ShowPalette` / `ShowSwitcher` verbs (logged and ignored in
@@ -182,7 +182,9 @@ impl SwitcherOverlay {
                 self.switcher.set_commands(palette_commands(controller));
             }
             OverlayKind::Palette => {
-                self.palette = PaletteModel::new(controller.hyper_palette_commands());
+                // AeroSpace workspaces are a macOS concept (`gather_workspaces`
+                // shells out to the CLI); the egui palette lists commands.
+                self.palette = PaletteModel::new(controller.hyper_palette_commands(), Vec::new());
                 self.palette.shown = true;
             }
         }
@@ -237,11 +239,11 @@ impl SwitcherOverlay {
                     controller.nav_clicked(id);
                 }
             }
-            OverlayKind::Palette => {
-                if let Some(PaletteAction::Command(name)) = self.palette.accept() {
-                    controller.run_palette_command(&name);
-                }
-            }
+            OverlayKind::Palette => match self.palette.accept() {
+                Some(PaletteAction::Command(name)) => controller.run_palette_command(&name),
+                Some(PaletteAction::Workspace(id)) => controller.switch_workspace(&id),
+                None => {}
+            },
         }
     }
 }
@@ -270,7 +272,8 @@ fn palette_commands(controller: &SwitcherController) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The label one row draws (`SwitchRow.summary` / the command title).
+/// The label one row draws (`SwitchRow.summary` / the command title /
+/// `WorkspaceRow::summary`).
 fn row_label(row: &SwitcherRow) -> String {
     match row {
         SwitcherRow::View(r) => row_summary(r),
@@ -281,6 +284,7 @@ fn row_label(row: &SwitcherRow) -> String {
                 title.clone()
             }
         }
+        SwitcherRow::Workspace(w) => w.summary(),
     }
 }
 
@@ -310,7 +314,7 @@ fn status_line(status: &SwitcherStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::views::switcher::SwitchRow;
+    use crate::views::switcher::{SwitchRow, WorkspaceRow};
 
     fn view_row(name: &str, number: i64, current: bool) -> SwitchRow {
         SwitchRow {
@@ -338,6 +342,14 @@ mod tests {
             row_label(&SwitcherRow::Command { name: "notes".into(), title: String::new() }),
             "notes"
         );
+        let ws = WorkspaceRow {
+            id: "2".into(),
+            apps: Vec::new(),
+            focused: true,
+            unread: "3".into(),
+            match_text: String::new(),
+        };
+        assert_eq!(row_label(&SwitcherRow::Workspace(ws)), "2  (3)");
     }
 
     #[test]
