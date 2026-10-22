@@ -55,6 +55,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 42 | S3 | Compare | `[compare] max-lines` was never enforced (a 200,500-line pair was diffed) | night lead (h-cmp CMP-02) | fixed 5fec1d3: `too_large_for_text` · unit test `max_lines_makes_a_side_too_large` · verified 2026-10-22 (VM: 200,500-line pair -> "Too large for Text Compare") |
 | 43 | S3 | Compare | Folder compare ignored `[compare] exclude` / `use-gitignore` / `ignore-file` / `time-tolerance` / `content` (options left at defaults) | night lead (h-cmp CMP-05) | fixed 5fec1d3: `CompareConfig::folder_options` · unit test `folder_options_come_from_the_compare_section` · flow `compare-folder-exclude-and-gitignore` · verified 2026-10-22 (VM flow, ks-test2) |
 | 44 | S4 | Files | Esc in the filter moved focus to the list but kept the filter (owner: Esc should clear it) | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed bb05d63: `host_vim.rs` ExitToNormal from files-filter clears the query · flow `files-esc-clears-filter` · verified 2026-10-22 (VM flow + ks-drive replay) |
+| 45 | S3 | Notes | F2 did nothing with the keyboard in the note editor (owner: it should rename) | `.build/haiku/20261021-2242/HAIKU.md` (3/3) | fixed 8dc4d75: F2 branch renames the open note from the editor · flow `notes-f2-renames-from-editor` · verified 2026-10-22 (VM flow + ks-drive replay; plain editor, the VM has no nvim) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
