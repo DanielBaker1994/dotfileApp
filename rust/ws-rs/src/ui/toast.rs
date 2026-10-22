@@ -1,12 +1,27 @@
 //! `ScreenToast` / `makeToastPill` (Screenshot.swift, PopupWindow.swift): a
 //! borderless, click-through pill near the bottom of the screen — symbol +
-//! text on `crust` — that fades out after 1.4 s.
+//! text on `crust` — that fades out after 1.4 s (errors: 4 s, warning tint).
 
 #[cfg(target_os = "macos")]
 pub use appkit::show;
 
 /// How long the pill stays up before fading (`animateToastPill` `hold`).
 pub const HOLD_SECS: f64 = 1.4;
+
+/// How long an error pill stays up: 1.4 s was too short to read, so a
+/// failed rename ("already exists") looked like a silent no-op.
+pub const ERROR_HOLD_SECS: f64 = 4.0;
+
+/// Whether `symbol` marks the pill as an error / warning (every failure
+/// toast uses an `exclamationmark…` symbol).
+pub fn is_error_symbol(symbol: &str) -> bool {
+    symbol.starts_with("exclamationmark")
+}
+
+/// The pill's hold time for `symbol`.
+pub fn hold_secs(symbol: &str) -> f64 {
+    if is_error_symbol(symbol) { ERROR_HOLD_SECS } else { HOLD_SECS }
+}
 
 /// Pill text for a shortcut / verb the port routes but doesn't implement yet,
 /// so a gap is visible on screen instead of only in the log.
@@ -43,7 +58,7 @@ pub fn not_ported(what: &str) {
 
 #[cfg(target_os = "macos")]
 mod appkit {
-    use super::HOLD_SECS;
+    use super::{hold_secs, is_error_symbol};
     use crate::ui::style::{self, Weight};
     use crate::ui::theme::{PopupThemeDefaults, PopupTone};
     use objc2::rc::Retained;
@@ -82,7 +97,8 @@ mod appkit {
         label.setTextColor(Some(&c.text.to_nscolor()));
         label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
         label.sizeToFit();
-        let icon = style::symbol_image(symbol, 12.5, Weight::Medium, c.tone(PopupTone::Success))
+        let tone = if is_error_symbol(symbol) { PopupTone::Warning } else { PopupTone::Success };
+        let icon = style::symbol_image(symbol, 12.5, Weight::Medium, c.tone(tone))
             .map(|img| NSImageView::imageViewWithImage(&img, mtm));
 
         let (pad_x, gap, h) = (16.0, 8.0, 32.0);
@@ -151,7 +167,7 @@ mod appkit {
         let bound = dispatch2::MainThreadBound::new(panel, mtm);
         dispatch2::DispatchQueue::main()
             .after(
-                dispatch2::DispatchTime::NOW.time((HOLD_SECS * 1e9) as i64),
+                dispatch2::DispatchTime::NOW.time((hold_secs(symbol) * 1e9) as i64),
                 move || {
                     let Some(mtm) = MainThreadMarker::new() else { return };
                     let panel = bound.get(mtm);
@@ -170,6 +186,14 @@ mod appkit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_toasts_hold_longer_than_info_toasts() {
+        assert_eq!(super::hold_secs("pencil"), super::HOLD_SECS);
+        assert_eq!(super::hold_secs("exclamationmark.triangle.fill"), super::ERROR_HOLD_SECS);
+        assert_eq!(super::hold_secs("exclamationmark.triangle"), super::ERROR_HOLD_SECS);
+        assert!(super::ERROR_HOLD_SECS > super::HOLD_SECS);
+    }
+
     #[test]
     fn record_counts_toasts_for_state() {
         let before = super::state()["count"].as_u64().unwrap();
