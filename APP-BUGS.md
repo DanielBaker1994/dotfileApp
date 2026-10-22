@@ -52,13 +52,14 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 39 | S2 | Compare | Folder entries size + time couldn't decide stayed "unknown" forever: `FolderContent::check` was never called | night lead (h-cmp, 2026-10-20) | fixed 4d7990a (same change as #14) |
 | 40 | S3 | Config | A UTF-8 BOM dropped the whole first (`[app]`) section | night lead (h-cfg, 2026-10-20) | fixed 58cd672: BOM stripped on read / reload / validate / split · unit test `a_utf8_bom_does_not_hide_the_first_section` · verified 2026-10-22 (VM: BOM config + raw reload applies `[app] header-style`) |
 | 41 | S3 | Config | `palette-first` with a repeated id listed the command twice | night lead (h-cfg, 2026-10-20) | fixed b85e07f: parse keeps the first occurrence · unit test (parse_app_config case) · not VM-verified (needs a config change before launch) |
+| 42 | S3 | Compare | `[compare] max-lines` was never enforced (a 200,500-line pair was diffed) | night lead (h-cmp CMP-02) | fixed 5fec1d3: `too_large_for_text` · unit test `max_lines_makes_a_side_too_large` · verified 2026-10-22 (VM: 200,500-line pair -> "Too large for Text Compare") |
+| 43 | S3 | Compare | Folder compare ignored `[compare] exclude` / `use-gitignore` / `ignore-file` / `time-tolerance` / `content` (options left at defaults) | night lead (h-cmp CMP-05) | fixed 5fec1d3: `CompareConfig::folder_options` · unit test `folder_options_come_from_the_compare_section` · flow `compare-folder-exclude-and-gitignore` · verified 2026-10-22 (VM flow, ks-test2) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
 Full repros: `.build/night/20261020-2246/find/h-cmp|h-cfg/findings.jsonl`. Confirm before fixing.
 
 - S3 config: TOML arrays accepted as scalars (`hide-on-focus-loss = [true]` acts as `true`). by-design? A one-element list reading as its value may be what the user meant; rejecting needs a scalar-key schema in the shared codec. Owner decision.
-- S3 compare: `max-lines`, `exclude` / `use-gitignore` / `ignore-file` are not enforced.
 
 ## Leads (unverified: Haiku agents driving the real app in the VM, 2026-10-21, each 2/2+ by the agent)
 
