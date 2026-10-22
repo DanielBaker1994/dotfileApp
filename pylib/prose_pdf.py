@@ -22,6 +22,7 @@ jsonmgr.lazy_module(__name__, globals(), {
     "DEFAULTS": _defaults,
     "SOURCEPOS_FILTER": ("pylib/prose_pdf", ("sourcepos_filter",)),
     "BUILTIN_CSS": ("pylib/prose_pdf", ("builtin_css",)),
+    "FIT_CSS": ("pylib/prose_pdf", ("fit_css",)),
 })
 
 
@@ -88,10 +89,17 @@ def engine_args(note: str, html: str, out: str) -> list:
     return ["--pdf-tags", "-u", base, html, out]
 
 
-def header_file(c: dict) -> str:
+def html_path(note: str, c: dict) -> str:
+    return os.path.splitext(output_path(note, c))[0] + ".html"
+
+
+def header_file(c: dict, fit: bool = False) -> str:
+    """The CSS pandoc puts in <head>. fit=True (PDF export) always appends the
+    print rules that keep wide/long tables inside the page, whatever CSS the
+    user configured."""
     own = expand(c["css"])
     own_exists = bool(c["css"]) and os.path.isfile(own)
-    if own_exists and not c["themeCSS"]:
+    if own_exists and not c["themeCSS"] and not fit:
         return own
     text = None
     if own_exists:
@@ -104,6 +112,8 @@ def header_file(c: dict) -> str:
         text = jsonmgr.field("pylib/prose_pdf", "builtin_css")
     if c["themeCSS"]:
         text += "\n" + c["themeCSS"]
+    if fit:
+        text += "\n<style>\n" + jsonmgr.field("pylib/prose_pdf", "fit_css") + "</style>\n"
     path = _scratch(c, "header")
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -161,7 +171,7 @@ def export(note: str, raw) -> dict:
     try:
         os.makedirs(c["cacheDir"], exist_ok=True)
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        css = header_file(c)
+        css = header_file(c, fit=True)
         html = _scratch(c, "pdf")
         p = subprocess.run([expand(c["pandoc"])] + pandoc_args(note, css, html, c),
                            capture_output=True, text=True)
@@ -171,12 +181,28 @@ def export(note: str, raw) -> dict:
                            capture_output=True, text=True)
         if w.returncode != 0 or not os.path.isfile(out):
             return {"ok": False, "error": "weasyprint failed: %s" % first_line(w.stderr)}
-        return {"ok": True, "out": out}
+        return {"ok": True, "out": out, "html": write_html(note, html, c)}
     except OSError as e:
         return {"ok": False, "error": str(e)}
     finally:
         _remove_scratch(css, c)
         _remove_scratch(html, c)
+
+
+def write_html(note: str, html: str, c: dict) -> str | None:
+    """Keep the rendered page beside the PDF as <stem>.html; a <base> to the
+    note's folder lets its relative images resolve from the output folder."""
+    out = html_path(note, c)
+    try:
+        with open(html, encoding="utf-8") as f:
+            text = f.read()
+        base = '<base href="%s/">' % Path(os.path.dirname(os.path.abspath(note))).as_uri()
+        text = text.replace("<head>", "<head>\n" + base, 1)
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+        return out
+    except OSError:
+        return None
 
 
 def first_line(text: str) -> str:

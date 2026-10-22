@@ -110,6 +110,30 @@ class Real(unittest.TestCase):
             self.assertEqual(f.read(5), b"%PDF-")
         self.assertEqual(os.listdir(self.cfg["cacheDir"]), [])
 
+    def test_export_writes_html_and_fits_wide_tables(self):
+        cols = 14
+        table = ("| " + " | ".join("Header %d" % c for c in range(cols)) + " |\n|" + "---|" * cols
+                 + "\n| " + " | ".join("https://example.com/a/very/long/path/%d" % c for c in range(cols)) + " |\n")
+        note = self.write("wide.md", "# Wide\n\n" + table)
+        r = pp.export(note, self.cfg)
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertEqual(r["html"], self.tmp + "/out/wide.html")
+        with open(r["html"], encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("table:has(tr > :nth-child(10))", html)
+        self.assertIn('<base href="file://', html)
+        try:
+            from weasyprint import HTML
+        except ImportError:
+            return
+        page = HTML(r["html"]).render().pages[0]
+
+        def widest(box):
+            right = box.position_x + box.margin_width() if getattr(box, "element_tag", None) == "table" else 0
+            kids = box.all_children() if hasattr(box, "all_children") else []
+            return max([right] + [widest(k) for k in kids])
+        self.assertLessEqual(widest(page._page_box), page.width)
+
     def test_sourcepos_task_list(self):
         tasks = self.write("tasks.md", "- [ ] todo\n- [x] done\n  - [ ] nested\n- plain\n")
         sh = pp.screen_html(tasks, self.cfg)
