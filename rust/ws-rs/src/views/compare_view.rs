@@ -324,7 +324,24 @@ mod appkit {
             }
 
             #[unsafe(method(control:textView:doCommandBySelector:))]
-            fn do_command(&self, _c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
+            fn do_command(&self, c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
+                // Tab / Shift+Tab move between the Left and Right path boxes
+                // (no key-view loop is set, so AppKit's default went nowhere).
+                if cmd == sel!(insertTab:) || cmd == sel!(insertBacktab:) {
+                    let iv = self.ivars();
+                    let is = |f: &NSTextField| std::ptr::eq(c as *const AnyObject, as_any(f));
+                    let to = if is(&iv.left) {
+                        Some(&iv.right)
+                    } else if is(&iv.right) {
+                        Some(&iv.left)
+                    } else {
+                        None
+                    };
+                    if let (Some(to), Some(w)) = (to, self.window()) {
+                        w.makeFirstResponder(Some(to));
+                        return objc2::runtime::Bool::YES;
+                    }
+                }
                 if cmd == sel!(insertNewline:) {
                     self.emit(CompareEvent::Compare {
                         left: self.ivars().left.stringValue().to_string(),
@@ -358,7 +375,7 @@ mod appkit {
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64, sidebar_range: DividerRange) -> Retained<Self> {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("compare");
-            let (left_box, left) = crate::ui::field::search_box(mtm, &colors, 13.0, "Left: a file or folder path (Tab completes)", 6.0, FIELD_H);
+            let (left_box, left) = crate::ui::field::search_box(mtm, &colors, 13.0, "Left: a file or folder path (Tab: Right)", 6.0, FIELD_H);
             let (right_box, right) = crate::ui::field::search_box(mtm, &colors, 13.0, "Right: a file or folder path", 6.0, FIELD_H);
             let (filter_box, filter) = crate::ui::field::search_box(mtm, &colors, 12.0, "filter", 6.0, 26.0);
             let divider = PaneDividerView::new(mtm, sidebar_range);
