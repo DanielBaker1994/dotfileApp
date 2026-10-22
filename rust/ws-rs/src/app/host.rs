@@ -139,6 +139,9 @@ pub enum UiCommand {
     PaneMove(PaneDir),
     /// `do:pane:focus:<id>`.
     PaneFocus(String),
+    /// `do:notes-delete:<path>` — the note context menu's Delete… (confirm
+    /// sheet, then Trash).
+    NotesDelete(String),
     /// `do:notes-find` (false) / `do:notes-grep` (true) — `NoteFindWindow`.
     NoteFind(bool),
     /// `do:jira-jump` — `SidebarJumpWindow` over the Jira rail.
@@ -2290,6 +2293,14 @@ impl SwitcherController {
                     None => json!({ "error": "timeout" }),
                 });
             }
+        }
+        if let Some(p) = action.strip_prefix("notes-delete:") {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.main_queue.is_none() {
+                return Some(json!({ "error": "needs the window" }));
+            }
+            inner.ui_push(UiCommand::NotesDelete(crate::app::config::expand_tilde(p)));
+            return None;
         }
         if let Some(v) = action.strip_prefix("pane:") {
             let mut inner = self.inner.lock().unwrap();
@@ -4770,6 +4781,7 @@ mod daemon_ui {
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }
+                        UiCommand::NotesDelete(p) => self.notes_confirm_delete(p),
                         UiCommand::PaneFocus(id) => {
                             if !self.live_pane_focus(&id) {
                                 self.ivars().controller.log(&format!("pane:focus:{id}: no such pane"));
@@ -7679,35 +7691,47 @@ mod daemon_ui {
                         }));
                         let (w, pt) = (weak.clone(), path.clone());
                         entries.push(MenuEntry::item("Delete…", move || {
-                            let Some(ui) = w.load() else { return };
-                            let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-                            let name = std::path::Path::new(&pt).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            let weak = objc2::rc::Weak::from_retained(&ui.retain());
-                            crate::ui::sheet::alert_sheet(
-                                &window,
-                                &format!("Delete “{name}”?"),
-                                "It goes to the Trash.",
-                                &["Move to Trash", "Cancel"],
-                                move |b| {
-                                    if b != 0 {
-                                        return;
-                                    }
-                                    use crate::engines::file_ops::FileOps;
-                                    let o = FileOps::trash(&[pt.clone()], FileOps::shared());
-                                    if let Some(ui) = weak.load() {
-                                        match o.failed.as_deref() {
-                                            Some(msg) => crate::ui::toast::show(msg, "exclamationmark.triangle"),
-                                            None => {
-                                                ui.notes_surface(|s| s.tree_removed(&pt));
-                                                crate::ui::toast::show("Moved to the Trash", "trash");
-                                            }
-                                        }
-                                    }
-                                },
-                            );
+                            if let Some(ui) = w.load() {
+                                ui.notes_confirm_delete(pt.clone());
+                            }
                         }));
                     }
                     popup(entries, None, x, y);
+                }
+            }
+        }
+
+        /// Right-click ▸ Delete… on a note (tree or sidebar): confirm, move it
+        /// to the Trash, close its tab and drop it from the tree.
+        fn notes_confirm_delete(&self, path: String) {
+            let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            crate::ui::sheet::alert_sheet(
+                &window,
+                &format!("Delete \u{201c}{name}\u{201d}?"),
+                "It goes to the Trash.",
+                &["Move to Trash", "Cancel"],
+                move |b| {
+                    if b == 0 {
+                        if let Some(ui) = weak.load() {
+                            ui.notes_delete_now(&path);
+                        }
+                    }
+                },
+            );
+        }
+
+        /// Move a note to the Trash now (the confirmed half of
+        /// [`Self::notes_confirm_delete`], and `do:notes:delete:<path>`).
+        fn notes_delete_now(&self, path: &str) {
+            use crate::engines::file_ops::FileOps;
+            let o = FileOps::trash(&[path.to_string()], FileOps::shared());
+            match o.failed.as_deref() {
+                Some(msg) => crate::ui::toast::show(msg, "exclamationmark.triangle"),
+                None => {
+                    self.notes_surface(|s| s.tree_removed(path));
+                    crate::ui::toast::show("Moved to the Trash", "trash");
                 }
             }
         }
@@ -7851,6 +7875,7 @@ mod daemon_ui {
                     let Some(Some(path)) = self.notes_surface(|s| s.tab_path(i)) else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
                     let (p1, p3, pr, w) = (path.clone(), path.clone(), path.clone(), weak.clone());
+                    let (pd, wd) = (path.clone(), weak.clone());
                     popup(
                         vec![
                             MenuEntry::item("Rename\u{2026}  F2", move || {
@@ -7865,6 +7890,11 @@ mod daemon_ui {
                             MenuEntry::item("Close", move || {
                                 if let Some(ui) = weak.load() {
                                     ui.notes_surface(|s| s.close_tab(i));
+                                }
+                            }),
+                            MenuEntry::item("Delete\u{2026}", move || {
+                                if let Some(ui) = wd.load() {
+                                    ui.notes_confirm_delete(pd.clone());
                                 }
                             }),
                         ],

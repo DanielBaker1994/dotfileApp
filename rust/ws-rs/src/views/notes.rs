@@ -4087,8 +4087,17 @@ mod macos {
                 .filter(|(_, p)| p.as_str() == path || p.starts_with(&prefix))
                 .map(|(i, _)| i)
                 .collect();
+            let gone: Vec<String> = doomed.iter().filter_map(|i| self.model.tabs.paths().get(*i).cloned()).collect();
             for i in doomed.into_iter().rev() {
                 self.close_tab(i);
+            }
+            // A deleted note is not "dismissed": keep the dismissed list free of
+            // it, so a new note with the same name later is not hidden.
+            if !gone.is_empty() {
+                for p in &gone {
+                    self.model.tabs.undismiss(p);
+                }
+                save_dismissed(&self.model.tabs.dismissed_paths());
             }
             if self.tree_model.selected.as_deref().is_some_and(|p| p == path || p.starts_with(&prefix)) {
                 self.tree_model.selected = None;
