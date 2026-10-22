@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# ks-drive — drive the kitchen-sink app inside the test VM by hand, one command per call.
+# Host-side wrapper over `bin/ks-vm ssh` + Tests/drive.py (which runs in the guest).
+# KS_VM picks the VM (default ks-test); `bin/ks-vm sync` must have copied the build in.
+#
+#   bin/ks-drive start | stop
+#   bin/ks-drive state [dotted.path]
+#   bin/ks-drive do VERB              e.g. open:files
+#   bin/ks-drive key COMBO            e.g. cmd+n  |  'ctrl+b w'  |  esc
+#   bin/ks-drive text TEXT
+#   bin/ks-drive click X Y [2|right]
+#   bin/ks-drive shot NAME [VIEW]     PNG copied to $KS_DRIVE_OUT/NAME.png (default .build/drive/)
+#   bin/ks-drive log [N]
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
+OUT=${KS_DRIVE_OUT:-$ROOT/.build/drive}
+[ $# -ge 1 ] || { sed -n '2,13p' "$0"; exit 2; }
+
+args=$(printf '%q ' "$@")
+"$ROOT/bin/ks-vm" ssh "cd ~/ks && PATH=~/py/bin:\$PATH WS_PYTHON=~/py/bin/python3 ~/py/bin/python3 Tests/drive.py $args"
+
+if [ "$1" = shot ] && [ $# -ge 2 ]; then
+    name=${2%.png}
+    mkdir -p "$OUT"
+    "$ROOT/bin/ks-vm" pull "/tmp/ks-drive/$name.png" "$OUT/$name.png" && echo "saved: $OUT/$name.png"
+fi

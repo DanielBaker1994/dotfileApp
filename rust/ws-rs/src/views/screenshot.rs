@@ -917,6 +917,72 @@ fn ws_value(words: &[String], i: &mut usize, flag: &str) -> Result<String, Captu
 /// desktop-independent window filter, at the requested backing scale, encoded
 /// as a PNG. Used by the `window-shot` socket verb — no overlay, no activation.
 #[cfg(target_os = "macos")]
+/// `window-shot` without Screen Recording permission (the test VM has none): the
+/// app draws its own window — the frame view, so the title bar is included —
+/// into a bitmap and encodes it as PNG. Main thread only. Views that draw
+/// outside AppKit's cache path (a Metal/GL layer) may come out blank.
+pub fn window_self_render_png(window_id: u32) -> Result<Vec<u8>, String> {
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSApplication, NSBitmapImageFileType, NSBitmapImageRepPropertyKey};
+    use objc2_foundation::NSDictionary;
+    let mtm = objc2::MainThreadMarker::new().ok_or("window self-render needs the main thread")?;
+    let app = NSApplication::sharedApplication(mtm);
+    let window = app
+        .windowWithWindowNumber(window_id as isize)
+        .ok_or_else(|| format!("no window {window_id}"))?;
+    let content = window.contentView().ok_or("window has no content view")?;
+    let view = unsafe { content.superview() }.unwrap_or(content.clone());
+    // Layer-backed views paint backgrounds and some content straight into their
+    // CALayers, which `cacheDisplayInRect` skips (it only replays drawRect:), so
+    // render the layer tree when there is one.
+    if let Some(png) = render_layer_png(&view).or_else(|| render_layer_png(&content)) {
+        return Ok(png);
+    }
+    let rect = view.bounds();
+    let rep = view
+        .bitmapImageRepForCachingDisplayInRect(rect)
+        .ok_or("could not allocate a bitmap for the window")?;
+    view.cacheDisplayInRect_toBitmapImageRep(rect, &rep);
+    let props: objc2::rc::Retained<NSDictionary<NSBitmapImageRepPropertyKey, AnyObject>> =
+        NSDictionary::new();
+    let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+        .ok_or("could not encode PNG")?;
+    Ok(png.to_vec())
+}
+
+/// `view.layer` rendered into a 2x sRGB bitmap and encoded as PNG; `None`
+/// when the view has no layer or the bitmap cannot be made.
+#[cfg(target_os = "macos")]
+fn render_layer_png(view: &objc2_app_kit::NSView) -> Option<Vec<u8>> {
+    use objc2_core_graphics::{
+        kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext,
+        CGImageAlphaInfo,
+    };
+    let layer = view.layer()?;
+    let b = view.bounds();
+    let scale = 2.0;
+    let (w, h) = ((b.size.width * scale) as usize, (b.size.height * scale) as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
+    let ctx = unsafe {
+        CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, 0, Some(&*space),
+                              CGImageAlphaInfo::PremultipliedLast.0)
+    }?;
+    // CALayer draws in its own geometry; a flipped root layer needs a flipped context.
+    if layer.isGeometryFlipped() {
+        CGContext::translate_ctm(Some(&*ctx), 0.0, h as f64);
+        CGContext::scale_ctm(Some(&*ctx), scale, -scale);
+    } else {
+        CGContext::scale_ctm(Some(&*ctx), scale, scale);
+    }
+    layer.renderInContext(&ctx);
+    let img = CGBitmapContextCreateImage(Some(&*ctx))?;
+    shot_cg::encode_png(&img)
+}
+
+#[cfg(target_os = "macos")]
 pub fn window_shot_image(window_id: u32, scale: f64) -> Result<ShotImage, CaptureError> {
     let captured = sck::capture_window(window_id, scale)?;
     let image = captured

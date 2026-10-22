@@ -7,6 +7,11 @@
 #                              in the VM, copy results to .build/flow-runs/vm-<ts>/
 #   bin/ks-vm up | down | status | ip
 #   bin/ks-vm ssh [CMD…]       shell (or one command) in the VM
+#   bin/ks-vm sync             build the working tree and copy it in (no flows run)
+#   bin/ks-vm pull GUEST HOST  copy a file out of the VM
+#
+# KS_VM picks the VM (default ks-test). Each VM has its own lock, app build and run
+# log, so two VMs (Apple's licence allows two per host) can run side by side.
 #
 # The VM is headless (`tart run --no-graphics`): its own virtual display and
 # window server, nothing appears on the host. Default guest login admin/admin
@@ -25,7 +30,9 @@ G_REPO=/Users/$GUSER/ks          # repo copy inside the VM
 G_PY=/Users/$GUSER/py/bin/python3
 STATE=$ROOT/.build/vm
 PY_TGZ=$STATE/dl/cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz
-VM_APP=$STATE/kitchen-sink.app   # host-side build of the bundle for the VM
+# Per-VM files: the default VM keeps the original paths.
+if [ "$VM" = ks-test ]; then VSTATE=$STATE; else VSTATE=$STATE/$VM; fi
+VM_APP=$VSTATE/kitchen-sink.app   # host-side build of the bundle for the VM
 SIGN_ID="kitchen-sink codesign"
 BUNDLE_ID=dev.danielbaker.kitchen-sink
 
@@ -68,12 +75,12 @@ grsync() {   # grsync SRC… DEST   (DEST uses :path for the guest)
 cmd_up() {
     vm_exists || die "no VM '$VM' (bin/ks-vm setup)"
     if ! vm_running; then
-        mkdir -p "$STATE"
+        mkdir -p "$VSTATE"
         say "booting $VM (headless) …"
-        nohup "$TART" run --no-graphics "$VM" >"$STATE/run.log" 2>&1 &
+        nohup "$TART" run --no-graphics "$VM" >"$VSTATE/run.log" 2>&1 &
     fi
     local ip i
-    ip=$(vm_ip 180) || die "VM got no IP within 180 s (see $STATE/run.log)"
+    ip=$(vm_ip 180) || die "VM got no IP within 180 s (see $VSTATE/run.log)"
     for i in $(seq 1 60); do
         if ensure_key "$ip" 2>/dev/null && ssh "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null; then
             say "up at $ip"
@@ -126,9 +133,10 @@ cmd_setup() {
 
 build_vm_app() {
     say "building release binary …"
+    mkdir -p "$VSTATE"
     ( cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/.build/rust-target" \
-        cargo build --release -p ws-rs -p ws-helpers ) >"$STATE/cargo.log" 2>&1 \
-        || { tail -30 "$STATE/cargo.log"; die "cargo build failed"; }
+        cargo build --release -p ws-rs -p ws-helpers ) >"$VSTATE/cargo.log" 2>&1 \
+        || { tail -30 "$VSTATE/cargo.log"; die "cargo build failed"; }
     rm -rf "$VM_APP"
     cp -R "$ROOT/kitchen-sink.app" "$VM_APP"
     cp "$ROOT/.build/rust-target/release/kitchen-sink" "$VM_APP/Contents/MacOS/kitchen-sink"
@@ -155,8 +163,8 @@ sync_in() {
 cmd_test() {
     # One `test` at a time on this host (several workers may call it): queue on a lock.
     if [ -z "${KS_VM_LOCKED:-}" ]; then
-        mkdir -p "$STATE"
-        KS_VM_LOCKED=1 exec lockf -k "$STATE/test.lock" "$0" test "$@"
+        mkdir -p "$VSTATE"
+        KS_VM_LOCKED=1 exec lockf -k "$VSTATE/test.lock" "$0" test "$@"
     fi
     [ -x "$STATE/bin/ks-input" ] && [ -x "$STATE/bin/ks-ocr" ] || die "missing VM helper binaries in $STATE/bin"
     cmd_up
@@ -176,6 +184,18 @@ cmd_test() {
     return $rc
 }
 
+cmd_sync() {
+    if [ -z "${KS_VM_LOCKED:-}" ]; then
+        mkdir -p "$VSTATE"
+        KS_VM_LOCKED=1 exec lockf -k "$VSTATE/test.lock" "$0" sync
+    fi
+    cmd_up
+    gssh "test -f ~/.ks-provisioned" || provision
+    build_vm_app
+    sync_in
+    say "synced: app at $G_REPO/.build/vm-app/kitchen-sink.app"
+}
+
 case "${1:-}" in
     setup)  cmd_setup ;;
     up)     cmd_up ;;
@@ -184,5 +204,7 @@ case "${1:-}" in
     ip)     vm_ip ;;
     ssh)    shift; gssh "$@" ;;
     test)   shift; cmd_test "$@" ;;
-    *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]" ;;
+    sync)   cmd_sync ;;
+    pull)   [ $# -eq 3 ] || die "usage: bin/ks-vm pull GUEST_PATH HOST_PATH"; grsync ":$2" "$3" ;;
+    *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]|sync|pull GUEST HOST" ;;
 esac

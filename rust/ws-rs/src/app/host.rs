@@ -2844,11 +2844,12 @@ impl SwitcherController {
         };
         #[cfg(target_os = "macos")]
         {
-            use crate::views::screenshot::{screen_capture_permitted, window_shot_image};
-            if !screen_capture_permitted() {
-                reply.send("error: screen capture not permitted");
-                return;
-            }
+            use crate::views::screenshot::{
+                screen_capture_permitted, window_self_render_png, window_shot_image,
+            };
+            // Without Screen Recording permission (the test VM) the app draws
+            // its own window instead of capturing the screen.
+            let self_render = !screen_capture_permitted();
             let target = match args.view.as_deref() {
                 Some(name) => match SlotView::from_raw(name) {
                     Some(v) => Some(v),
@@ -2879,8 +2880,12 @@ impl SwitcherController {
                     if wid == 0 {
                         return Err("no shared window to capture".to_string());
                     }
-                    let shot = window_shot_image(wid as u32, scale).map_err(|e| e.0)?;
-                    let bytes = shot.png.ok_or_else(|| "could not encode PNG".to_string())?;
+                    let bytes = if self_render {
+                        window_self_render_png(wid as u32)?
+                    } else {
+                        let shot = window_shot_image(wid as u32, scale).map_err(|e| e.0)?;
+                        shot.png.ok_or_else(|| "could not encode PNG".to_string())?
+                    };
                     std::fs::write(&out, &bytes)
                         .map_err(|e| format!("could not write {out}: {e}"))?;
                     Ok(out)
