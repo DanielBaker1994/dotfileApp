@@ -11541,6 +11541,14 @@ mod daemon_ui {
                     self.jira_toggle_search();
                     true
                 }
+                // Cmd+L: focus the search box, as in Files / Confluence / AI /
+                // Compare (only focuses, never closes, unlike Cmd+F).
+                popup::KEY_L if key.cmd && !key.ctrl && !key.opt && !key.shift => {
+                    if !self.live_pane_focus("search") {
+                        self.jira_toggle_search();
+                    }
+                    true
+                }
                 48 if !key.cmd && !key.ctrl && !key.opt => {
                     // A focused text field (the search box, the embedded setup
                     // form) owns Tab so it moves between fields; only the list
