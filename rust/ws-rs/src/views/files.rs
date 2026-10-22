@@ -2184,7 +2184,8 @@ impl FileBrowser {
     }
 
     pub fn test_state(&self) -> Value {
-        json!({
+        #[allow(unused_mut)]
+        let mut v = json!({
             "cwd": self.cwd,
             "where": self.where_text(),
             "query": self.query,
@@ -2194,7 +2195,13 @@ impl FileBrowser {
             "rows": self.list.rows.iter().map(|e| json!({
                 "name": e.name, "path": e.path, "isDir": e.is_dir
             })).collect::<Vec<_>>(),
-        })
+        });
+        // What the filter / path field really shows (the view can lag the model).
+        #[cfg(target_os = "macos")]
+        if let Some(view) = &self.view {
+            v["fieldText"] = json!(view.search_text());
+        }
+        v
     }
 }
 

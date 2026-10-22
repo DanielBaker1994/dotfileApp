@@ -98,6 +98,13 @@ pub struct FilesLayout {
     pub status: Rect,
 }
 
+/// Whether the focused filter field (empty query) still shows the previous
+/// folder's path `old` after navigating to `new`: untouched by the user, so
+/// it should follow.
+pub fn path_text_is_stale(cur: &str, old: &str, new: &str) -> bool {
+    cur == old && old != new
+}
+
 pub fn files_layout(width: f64, height: f64, sidebar_w: f64, split_fraction: f64) -> FilesLayout {
     let left = if sidebar_w > 0.0 { sidebar_w + 4.0 } else { 0.0 };
     let list_y = TOOLBAR_Y + TOOLBAR_H + 5.0 + 4.0;
@@ -893,6 +900,11 @@ mod appkit {
             self.setNeedsDisplay(true);
         }
 
+        /// The filter / path field's current text.
+        pub fn search_text(&self) -> String {
+            self.ivars().search.stringValue().to_string()
+        }
+
         /// Push a fresh model snapshot.
         pub fn apply(&self, s: FilesSnapshot) {
             let iv = self.ivars();
@@ -902,6 +914,12 @@ mod appkit {
             let want = if editing || !s.query.is_empty() { &s.query } else { &s.field_text };
             if !(editing && s.query.is_empty()) && cur != *want {
                 iv.search.setStringValue(&NSString::from_str(want));
+            } else if editing && s.query.is_empty() && path_text_is_stale(&cur, &iv.snap.borrow().field_text, &s.field_text) {
+                // The field still shows the old folder's path (nothing typed):
+                // follow the navigation, selected so typing replaces it.
+                iv.search.setStringValue(&NSString::from_str(&s.field_text));
+                // SAFETY: main-thread AppKit call on a live field with no sender.
+                unsafe { iv.search.selectText(None) };
             }
             let c = iv.colors.get();
             let ph = NSAttributedString::from_nsstring(&NSString::from_str(&s.placeholder));
@@ -1162,6 +1180,15 @@ mod appkit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn focused_path_field_follows_navigation_until_typed_in() {
+        use super::path_text_is_stale;
+        assert!(path_text_is_stale("/f", "/f", "/f/empty"), "entering a folder updates the shown path");
+        assert!(!path_text_is_stale("/f/empty", "/f", "/f/empty"), "already current");
+        assert!(!path_text_is_stale("/f/emp", "/f/emp", "/f/emp"), "no navigation");
+        assert!(!path_text_is_stale("~/x", "/f", "/f/empty"), "text the user typed is kept");
+    }
+
     use super::*;
 
     #[test]
