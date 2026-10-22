@@ -3849,6 +3849,13 @@ impl CompareWindowModel {
     }
 
     pub fn set_filter(&mut self, f: CompareFilter) {
+        // A folder session filters its tree: pill i is `FolderFilter::ALL[i]`
+        // (the same as Cmd+1..4 in `folder_key`).
+        if self.current_is_folder() {
+            let i = CompareFilter::ALL.iter().position(|x| *x == f).unwrap_or(0);
+            self.folder_page.test_do("filter", FolderFilter::ALL[i].raw());
+            return;
+        }
         let ctx = self.config.context_lines();
         if let Some(s) = self.current_mut() {
             s.filter = f;
@@ -5290,7 +5297,12 @@ impl CompareSurface {
             folder: model.current_is_folder(),
             recent: if on_start { self.recent_rows(model) } else { Vec::new() },
             recent_sel: model.recent_selection,
-            filter: cur.map(|s| CompareFilter::ALL.iter().position(|f| *f == s.filter).unwrap_or(0)).unwrap_or(0),
+            filter: if model.current_is_folder() {
+                let f = model.folder_page.session.as_ref().map(|fs| fs.view.filter).unwrap_or(FolderFilter::All);
+                FolderFilter::ALL.iter().position(|x| *x == f).filter(|i| *i < 4).unwrap_or(usize::MAX)
+            } else {
+                cur.map(|s| CompareFilter::ALL.iter().position(|f| *f == s.filter).unwrap_or(0)).unwrap_or(0)
+            },
             summary: cur.map(|s| s.summary(&model.config)).unwrap_or_default(),
             identical: cur.is_some_and(|s| s.model.sections().is_empty() && !s.is_binary()),
             status: cur.map(|s| s.status.clone()).unwrap_or_default(),
@@ -7062,6 +7074,28 @@ mod tests {
     /// consumes it exactly like `do:compare:folder-open`); before the fix the
     /// router never took the flag, so the sub view was never pushed and the
     /// flag leaked into the next compare verb.
+    #[test]
+    fn filter_pills_filter_a_folder_session() {
+        let stub = Stub::new();
+        let dir = temp_dir("folderpills");
+        let mut model = CompareWindowModel::with_backend(stub.clone(), CompareConfig::default(), CompareRecent::new(&dir));
+        model.open_folders("/l", "/r");
+        let backend: Arc<dyn HelperBackend> = stub.clone();
+        let mut session = FolderSession::new("/l", "/r");
+        session.tree = Some(FolderScan::tree_from_snapshot(backend, &tree_snapshot(), "/l", "/r"));
+        model.folder_page.bind(session);
+        for _ in 0..4 {
+            stub.push("folder.rows", json!({"rows": [{"id": 0, "depth": 0}]}));
+        }
+        let folder_filter = |m: &CompareWindowModel| m.folder_page.session.as_ref().unwrap().view.filter;
+        model.set_filter(CompareFilter::Diffs);
+        assert_eq!(folder_filter(&model), FolderFilter::Diffs, "the Diffs pill filters the tree");
+        model.set_filter(CompareFilter::Same);
+        assert_eq!(folder_filter(&model), FolderFilter::Same);
+        model.set_filter(CompareFilter::All);
+        assert_eq!(folder_filter(&model), FolderFilter::All);
+    }
+
     #[test]
     fn folder_return_hands_the_compare_text_push_to_the_host() {
         let stub = Stub::new();

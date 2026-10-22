@@ -17,6 +17,13 @@ pub const RECENT_ROW_H: f64 = 28.0;
 pub const FIELD_H: f64 = 28.0;
 
 pub const FILTERS: [&str; 4] = ["All", "Diffs", "Same", "Context"];
+/// The pills over a folder session (`FolderFilter::ALL[..4]`, as Cmd+1..4).
+pub const FOLDER_FILTERS: [&str; 4] = ["All", "Diffs", "Same", "Orphans"];
+
+/// The filter pill labels for a text (`false`) or folder session.
+pub fn filter_labels(folder: bool) -> &'static [&'static str; 4] {
+    if folder { &FOLDER_FILTERS } else { &FILTERS }
+}
 pub const FILTER_TIPS: [&str; 4] = [
     "Every line (⌘1)",
     "Only differences (⌘2)",
@@ -604,7 +611,7 @@ mod appkit {
             } else {
                 let f = style::system_font(12.0, Weight::Medium);
                 let geo = style::CAPSULE_GEO;
-                let (ws, _) = style::capsule_metrics(&FILTERS, &f);
+                let (ws, _) = style::capsule_metrics(filter_labels(snap.folder), &f);
                 let mut sx = left + 12.0 + geo.track_pad;
                 for (i, w) in ws.iter().enumerate() {
                     out.push((C_FILTER + i as i32, Rect::new(sx, (TOOLBAR_H - 26.0) / 2.0 + geo.track_pad, *w, 20.0)));
@@ -789,7 +796,7 @@ mod appkit {
                     // Press shows on any chip (`TabPillView` semantics).
                     let hov = pressed == Some(C_FILTER + i) || (!on && hover == Some(C_FILTER + i));
                     style::capsule_chip(r, &c, on, hov);
-                    style::draw_text_centered(FILTERS[i as usize], r, &f, if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim });
+                    style::draw_text_centered(filter_labels(snap.folder)[i as usize], r, &f, if on { c.text } else if hov { c.text.with_alpha(0.9) } else { c.dim });
                 }
                 let first_tool = rect_of(C_TOOL).map(|r| r.x).unwrap_or(b.size.width);
                 style::draw_text_left(
