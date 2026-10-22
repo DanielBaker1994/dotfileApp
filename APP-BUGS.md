@@ -40,6 +40,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 27 | S2 | Compare | A pair past `[compare] max-bytes` was reported identical even when the bytes differ | night lead (h-cmp, 2026-10-20) | fixed e492a88: streamed byte compare from disk · unit test |
 | 28 | S2 | Shell | Ctrl+Tab only toggled Files <-> Notes (`host.rs` `cycle()` ignored `dir`); PRODUCT.md:42 says it cycles the views | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 675bf70: `cycle_target` walks the header nav icons both ways · unit test `cycle_walks_the_header_views_both_ways` · flow `cycle-views-all-header-views` · verified 2026-10-22 (VM flows + ks-drive replay) |
 | 29 | S2 | Jira | After Esc (focus on the list), Cmd+L did not focus the search box and typed text was dropped: Jira never bound Cmd+L | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 6c24cbb: `host.rs` `jira_key` Cmd+L -> `live_pane_focus("search")` · flow `jira-cmd-l-after-esc` · verified 2026-10-22 (VM flow + ks-drive replay) |
+| 30 | S2 | Compare | Start page: Tab in the Left path box did not move to the Right one (no key-view loop), so the second path replaced the first | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed e172144: `compare_view.rs` `do_command` moves Left <-> Right on Tab / Shift+Tab · flow `compare-start-tab-moves-to-right` · verified 2026-10-22 (VM flow + ks-drive replay) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
@@ -57,5 +58,4 @@ Full steps (`bin/ks-drive` commands) and screenshots: `.build/haiku/20261021-224
 - S2 compare: folder compare's Diffs / Same filter pills highlight but don't filter the rows.
 - S2 compare: clicking a folder-compare row doesn't select it (Return still acts on the old row); clicking an OPEN session in the sidebar doesn't switch to it.
 - S2 compare: the start page's path fields keep the previous text, so retyping appends and compares a nonexistent path as "(no differences)" with no error.
-- S2 compare: Tab in the start page doesn't move from the Left path to the Right path.
 - S2 files: after Return into an empty folder, state says cwd=empty/rowCount 0 but the window still draws the parent's list and path (may be a stale redraw or a capture artifact: check on the real screen).
