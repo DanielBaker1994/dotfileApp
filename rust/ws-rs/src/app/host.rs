@@ -5377,11 +5377,9 @@ mod daemon_ui {
                 .registry()
                 .nav_icons()
                 .iter()
-                // Ctrl+B W lists only the in-app views: Files, Notes,
-                // Confluence, Jira (Hyper+S keeps the full palette).
-                .filter(|n| {
-                    n.view.is_jira() || matches!(n.view, SlotView::Files | SlotView::Notes | SlotView::Confluence)
-                })
+                // Ctrl+B W lists every view the header shows (Compare and AI
+                // were left out, so they were unreachable from it); Hyper+S
+                // keeps the full palette.
                 .map(|n| {
                     // The display name comes from the nav tip (config `label`),
                     // so the pane list stays in step with the header nav and the
