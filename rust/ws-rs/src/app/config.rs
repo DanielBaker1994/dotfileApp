@@ -555,11 +555,14 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
         settings.switcher_width = v.max(240.0).min(1200.0);
     }
     if let Some(v) = strv("palette-first") {
-        settings.palette_first = v
-            .split(',')
-            .map(|p| p.trim().to_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect();
+        // A repeated id would list its command twice: keep the first.
+        let mut ids: Vec<String> = Vec::new();
+        for p in v.split(',').map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()) {
+            if !ids.contains(&p) {
+                ids.push(p);
+            }
+        }
+        settings.palette_first = ids;
     }
     if let Some(v) = strv("margin-top-builtin").and_then(|v| v.parse::<f64>().ok()) {
         settings.margin_top_builtin = v.max(0.0);
@@ -1790,7 +1793,7 @@ mod tests {
             ("switcher-width", "200"),   // clamped up to 240
             ("shared-width", "300"),     // below 400 -> ignored
             ("margin-top", "-5"),        // clamped to 0
-            ("palette-first", "Paths, filefast"),
+            ("palette-first", "Paths, filefast, paths"), // repeat dropped
             ("esc-close", "2"),
             ("copy-toast", "Copied!"),
             ("header-style", "AURORA"),
