@@ -307,12 +307,13 @@ impl Entry {
 /// The full list: the group pinned on top (its header, then its visible
 /// rows), then the local matches.
 pub fn entries(local: &[usize], group: &LinkGroup, query: &str) -> Vec<Entry> {
-    let mut out: Vec<Entry> = Vec::new();
+    // The views first, the group below them: a long list of places reads
+    // from the bottom without pushing the views out of sight.
+    let mut out: Vec<Entry> = local.iter().map(|i| Entry::Local(*i)).collect();
     if group.header_shown(query) {
         out.push(Entry::Header);
         out.extend(group.visible(query).into_iter().map(Entry::Link));
     }
-    out.extend(local.iter().map(|i| Entry::Local(*i)));
     out
 }
 
@@ -464,20 +465,20 @@ mod tests {
         assert_eq!(g.visible("herdr dot"), vec![1]);
         assert!(g.header_shown("herdr zzzz"), "the name alone keeps the header");
         let list = entries(&[0], &g, "terminal");
-        assert_eq!(start_pos(&list, &g, "terminal"), 0, "the header: Return raises the terminal");
+        assert_eq!(start_pos(&list, &g, "terminal"), 1, "the header: Return raises the terminal");
         let list = entries(&[], &g, "herdr dot");
         assert_eq!(list, vec![Entry::Header, Entry::Link(1)]);
         assert_eq!(start_pos(&list, &g, "herdr dot"), 1);
     }
 
     #[test]
-    fn entries_pin_the_group_on_top() {
+    fn entries_list_the_group_below_the_views() {
         let mut g = group(2);
-        assert_eq!(entries(&[0, 1], &g, ""), vec![Entry::Header, Entry::Local(0), Entry::Local(1)]);
+        assert_eq!(entries(&[0, 1], &g, ""), vec![Entry::Local(0), Entry::Local(1), Entry::Header]);
         g.expanded = true;
         assert_eq!(
             entries(&[0], &g, ""),
-            vec![Entry::Header, Entry::Link(0), Entry::Link(1), Entry::Local(0)]
+            vec![Entry::Local(0), Entry::Header, Entry::Link(0), Entry::Link(1)]
         );
         g.enabled = false;
         assert_eq!(entries(&[0], &g, ""), vec![Entry::Local(0)]);
@@ -487,13 +488,13 @@ mod tests {
     fn cursor_starts_on_the_header_and_a_query_prefers_local_matches() {
         let mut g = group(2);
         let list = entries(&[0, 1], &g, "");
-        assert_eq!(start_pos(&list, &g, ""), 0, "the header: Return switches apps");
+        assert_eq!(start_pos(&list, &g, ""), 2, "the header: Return switches apps");
         g.opts.start_on_group = false;
-        assert_eq!(start_pos(&list, &g, ""), 1);
+        assert_eq!(start_pos(&list, &g, ""), 0);
         g.rows[1].title = "notes-ish".into();
         let list = entries(&[0], &g, "notes");
-        assert_eq!(list, vec![Entry::Header, Entry::Link(1), Entry::Local(0)]);
-        assert_eq!(start_pos(&list, &g, "notes"), 2, "the local match first");
+        assert_eq!(list, vec![Entry::Local(0), Entry::Header, Entry::Link(1)]);
+        assert_eq!(start_pos(&list, &g, "notes"), 0, "the local match first");
         let list = entries(&[], &g, "notes");
         assert_eq!(start_pos(&list, &g, "notes"), 1, "else the group match, not the header");
     }

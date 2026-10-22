@@ -925,17 +925,15 @@ mod switch_ui {
                 match m.entries.get(pos) {
                     Some(Entry::Local(i)) => *i,
                     Some(Entry::Header) => {
-                        let sep = matches!(m.entries.get(pos + 1), Some(Entry::Local(_)));
+                        let sep = pos > 0 && matches!(m.entries.get(pos - 1), Some(Entry::Local(_)));
                         drop(m);
                         self.draw_header(rect, selected, hovered);
                         return self.draw_group_rule(rect, sep);
                     }
                     Some(Entry::Link(j)) => {
                         let j = *j;
-                        let sep = matches!(m.entries.get(pos + 1), Some(Entry::Local(_)));
                         drop(m);
-                        self.draw_link(rect, j, selected, hovered);
-                        return self.draw_group_rule(rect, sep);
+                        return self.draw_link(rect, j, selected, hovered);
                     }
                     None => return,
                 }
@@ -968,9 +966,10 @@ mod switch_ui {
         /// The hairline under the pinned group, separating it from the views.
         fn draw_group_rule(&self, rect: crate::ui::chrome::Rect, on: bool) {
             use crate::ui::chrome::Rect;
+            // The rule sits on the header's top edge: the views end above it.
             if on {
                 let c = &self.colors;
-                let y = rect.y + rect.height - 1.0;
+                let y = rect.y;
                 style::fill_rect(Rect::new(rect.x + 14.0, y, rect.width - 28.0, 1.0), c.over(c.dim, 0.25, c.background));
             }
         }
@@ -2537,9 +2536,9 @@ mod tests {
     }
 
     #[test]
-    fn link_group_pinned_on_top_with_the_cursor_on_it() {
+    fn link_group_listed_below_the_views_with_the_cursor_on_it() {
         let p = linked();
-        assert_eq!(p.entries(), vec![Entry::Header, Entry::Local(0), Entry::Local(1), Entry::Local(2)]);
+        assert_eq!(p.entries(), vec![Entry::Local(0), Entry::Local(1), Entry::Local(2), Entry::Header]);
         let st = p.test_state();
         assert_eq!(st["linkGroup"]["expanded"], json!(false));
         assert_eq!(st["linkGroup"]["header"], json!("Terminal spaces · 2"));
@@ -2619,7 +2618,7 @@ mod tests {
         );
         assert!(p.links.expanded, "start-expanded applies at once with no query");
         p.show(&views(), None, None);
-        assert_eq!(p.entries()[..3], [Entry::Header, Entry::Link(0), Entry::Link(1)]);
+        assert_eq!(p.entries()[3..], [Entry::Header, Entry::Link(0), Entry::Link(1)]);
         assert_eq!(p.link_cursor, Some(Entry::Header));
         p.current_query = "terminal".into();
         p.move_selection(0);
