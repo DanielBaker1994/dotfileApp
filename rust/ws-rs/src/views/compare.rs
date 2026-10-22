@@ -4035,6 +4035,12 @@ impl CompareWindowModel {
             return;
         }
         let m = s.model_row(s.cursor);
+        // A line outside every difference is the same on both sides: say so
+        // instead of claiming a copy (and touching the undo stack).
+        if s.model.section_at(m).is_none() {
+            s.status = "nothing to copy: the line is the same on both sides".to_string();
+            return;
+        }
         if s.model.copy_rows(m..m + 1, from) {
             s.status = format!("line copied to the {}", from.other().raw());
             s.refresh(ctx);
@@ -6441,6 +6447,12 @@ mod tests {
             CompareRecent::new(&dir),
         );
         model.open_pair(None, None);
+        // On the matching row `a` there is nothing to copy: no engine call,
+        // and the status says so instead of "line copied".
+        assert_eq!(model.test_do("cursor:0"), None);
+        assert!(model.handle_key(key(15, true, true), false));
+        assert!(!stub.calls().iter().any(|(m, _)| m == "compare.copy_rows"));
+        assert_eq!(model.sessions[0].status, "nothing to copy: the line is the same on both sides");
         assert_eq!(model.test_do("cursor:1"), None);
         let last_copy = || {
             stub.calls()
