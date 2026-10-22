@@ -359,7 +359,8 @@ similar places, a documented shortcut with no handler, or a handler in no doc.
 Esc/Return/Tab/F-keys) is checked for a visible effect within 1 s: state (minus `input`, `lastKey`,
 pids, activations), `state.toast` (count + text of the toast pill), the clipboard, and files under the
 sandbox HOME. A step with none is listed under "Silent keys" in the run's `summary.md`; it is never a
-FAIL. Plain letters, arrows and typed text are not checked (editor text is not in state).
+FAIL. Plain letters, arrows and typed text are not checked (editor text is not in state), nor are
+text-editing keys (Tab, Return, Esc, Cmd+A/Z/C/V/X/L) while an editor/filter/search field has focus.
 
 ### Follow-up lanes
 

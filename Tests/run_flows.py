@@ -482,6 +482,18 @@ def expand(s: str, sb: Sandbox) -> str:
 VOLATILE_STATE = {"input", "lastKey", "activations", "frontmostPid", "pid"}
 SHORTCUT_KEY = re.compile(r"(^|\+)(cmd|ctrl|opt|alt)\+|^(esc|escape|return|enter|tab|shift\+tab|f\d+)$")
 SILENT_POLL_S = 1.0
+# Keys that edit or move within text: with a text field focused (or focus unknown, e.g. a
+# panel's own field) their effect is on text that state does not carry, so they're skipped.
+TEXT_FOCUS = re.compile(r"editor|filter|search|field")
+TEXT_KEYS = {"tab", "shift+tab", "return", "enter", "esc", "escape", "cmd+a", "cmd+z",
+             "cmd+shift+z", "cmd+c", "cmd+v", "cmd+x", "cmd+l"}
+
+
+def text_key_in_text_focus(sb: Sandbox, key: str) -> bool:
+    if key not in TEXT_KEYS:
+        return False
+    focus = ((sb.state(quiet=True) or {}).get("pane") or {}).get("focused") or ""
+    return not focus or bool(TEXT_FOCUS.search(focus))
 
 
 def effect_snapshot(sb: Sandbox) -> tuple:
@@ -521,7 +533,9 @@ def run_step(sb: Sandbox, inp: str, replies: dict, silent: list | None = None) -
         time.sleep(int(arg) / 1000)
         return
     if kind in ("key", "type"):
-        check = silent is not None and kind == "key" and SHORTCUT_KEY.search(arg.strip().lower())
+        k = arg.strip().lower()
+        check = (silent is not None and kind == "key" and SHORTCUT_KEY.search(k)
+                 and not text_key_in_text_focus(sb, k))
         snap = effect_snapshot(sb) if check else None
         before = (sb.state(quiet=True) or {}).get("input", {}).get("dropped", 0)
         sb.do(("input:key:" if kind == "key" else "input:text:") + arg)
