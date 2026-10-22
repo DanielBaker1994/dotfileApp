@@ -19,7 +19,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 6 | S3 | Notes sidebar | `.md` files created on disk in the notes folder never appear in the Notes sidebar; Cmd+N and a view round trip don't rescan | `FINAL-soak.md` S-2, `G2.md` | fixed 89dca62: rescan on Notes re-open / note open · unit test |
 | 7 | S3 | Notes / nvim | Cmd+= / Cmd+- (zoom) leaves nvim in Visual-line mode | `RUN-2026-10-20.md` item 5 (3/3) | fixed 9a96fec: a text event's key code 0 is no longer Cmd+A in the vim pane (`ui/popup.rs` `vim_pane_key` + `char_is`) · unit test `typed_text_is_not_select_all_in_the_vim_pane` |
 | 8 | S3 | Prose pop-out | The pop-out never refreshes when the note changes on disk; clicking pop-out again is a no-op | `RUN-2026-10-20.md` item 5 | fixed c895e7d: `ProseProcess::launch` retires a live child for the note instead of returning early, so a re-click respawns a child that re-reads the file (`views/notes.rs` `replace_live_child`/`retire_child`) · tests `a_live_popout_for_the_same_note_is_replaced_on_relaunch`, `retiring_a_tracked_child_kills_it_so_a_relaunch_replaces_the_popout` |
-| 9 | S3 | Notes | Renaming a note to an existing name silently does nothing (no error shown) | `RUN-2026-10-20.md` item 5 | fixed (see commit "toast: error pills…"): the "already exists" toast was shown but held only 1.4 s in the success tint, so it read as a no-op; error toasts (`exclamationmark…`) now hold 4 s in the warning tint (`ui/toast.rs` `hold_secs`) · unit test `error_toasts_hold_longer_than_info_toasts` · not yet re-checked on screen |
+| 9 | S3 | Notes | Renaming a note to an existing name silently does nothing (no error shown) | `RUN-2026-10-20.md` item 5 | fixed 8f30b1e: the "already exists" toast was shown but held only 1.4 s in the success tint, so it read as a no-op; error toasts (`exclamationmark…`) now hold 4 s in the warning tint (`ui/toast.rs` `hold_secs`) · unit test `error_toasts_hold_longer_than_info_toasts` · not yet re-checked on screen |
 | 10 | S3 | Notes | There is no way to delete a note from the app | `RUN-2026-10-20.md` item 5 | by-design? |
 | 11 | S1 | AI view | Clicking the AI header tab killed the app (`RefCell already borrowed`, `host.rs` `ai_surface`) | `RUN-2026-10-13.md` HDR-TAB-AI (2/2) | re-check: `do:open:ai` no longer crashes (flow `ai-open` PASS 2026-10-20); the header-tab *click* is untested, so lanes still must not click it |
 | 12 | S3 | Menu bar | The Window menu opens no dropdown | `RUN-2026-10-13.md` MB-WINDOW-01 (2/2) | re-check |
@@ -38,6 +38,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 25 | S2 | Config | `reload` returned ok for invalid configs, partly applied fatal errors, kept deleted keys' stale values | night lead (h-cfg, 2026-10-20) | fixed 349a2dc: fatal/non-UTF-8 config rejected + parked as `.broken-<epoch>`, reload parses into fresh defaults · unit test |
 | 26 | S2 | Compare | Folder rows below the top level had case-folded ancestor paths, so select-by-real-path failed | night lead (h-cmp, 2026-10-20) | fixed 8b3b743 + b2378b4 (keys stay folded) · unit test |
 | 27 | S2 | Compare | A pair past `[compare] max-bytes` was reported identical even when the bytes differ | night lead (h-cmp, 2026-10-20) | fixed e492a88: streamed byte compare from disk · unit test |
+| 28 | S2 | Shell | Ctrl+Tab only toggled Files <-> Notes (`host.rs` `cycle()` ignored `dir`); PRODUCT.md:42 says it cycles the views | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 675bf70: `cycle_target` walks the header nav icons both ways · unit test `cycle_walks_the_header_views_both_ways` · flow `cycle-views-all-header-views` · verified 2026-10-22 (VM flows + ks-drive replay) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
@@ -51,7 +52,6 @@ Full repros: `.build/night/20261020-2246/find/h-cmp|h-cfg/findings.jsonl`. Confi
 
 Full steps (`bin/ks-drive` commands) and screenshots: `.build/haiku/20261021-2242/<area>/`. Confirm before fixing.
 
-- S2 shell: Ctrl+Tab only toggles Files <-> Notes (`host.rs` `cycle()` ignores `dir`), while PRODUCT.md:42 says Ctrl+Tab cycles the views.
 - S2 shell: the Ctrl+B W switcher list wraps after 4 entries; Compare and AI can't be reached from it.
 - S2 compare: folder compare's Diffs / Same filter pills highlight but don't filter the rows.
 - S2 compare: clicking a folder-compare row doesn't select it (Return still acts on the old row); clicking an OPEN session in the sidebar doesn't switch to it.
