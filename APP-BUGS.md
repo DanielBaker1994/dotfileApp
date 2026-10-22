@@ -41,6 +41,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 28 | S2 | Shell | Ctrl+Tab only toggled Files <-> Notes (`host.rs` `cycle()` ignored `dir`); PRODUCT.md:42 says it cycles the views | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 675bf70: `cycle_target` walks the header nav icons both ways · unit test `cycle_walks_the_header_views_both_ways` · flow `cycle-views-all-header-views` · verified 2026-10-22 (VM flows + ks-drive replay) |
 | 29 | S2 | Jira | After Esc (focus on the list), Cmd+L did not focus the search box and typed text was dropped: Jira never bound Cmd+L | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 6c24cbb: `host.rs` `jira_key` Cmd+L -> `live_pane_focus("search")` · flow `jira-cmd-l-after-esc` · verified 2026-10-22 (VM flow + ks-drive replay) |
 | 30 | S2 | Compare | Start page: Tab in the Left path box did not move to the Right one (no key-view loop), so the second path replaced the first | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed e172144: `compare_view.rs` `do_command` moves Left <-> Right on Tab / Shift+Tab · flow `compare-start-tab-moves-to-right` · verified 2026-10-22 (VM flow + ks-drive replay) |
+| 31 | S2 | Compare | Start page: clicking back into a filled path box left the caret at the end so retyping appended, and a nonexistent path compared as "(no differences)" with no error | `.build/haiku/20261021-2242/HAIKU.md` (2/2) | fixed 80279a0: focus entering a path box selects its text (`publish_live_pane` -> `select_side_text`); `missing_compare_path` toasts and opens nothing · unit test `missing_compare_path_names_the_first_missing_side` · flow `compare-start-retype-and-missing-path` · verified 2026-10-22 (VM flow + ks-drive replay, ks-test2) |
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
@@ -57,5 +58,4 @@ Full steps (`bin/ks-drive` commands) and screenshots: `.build/haiku/20261021-224
 - S2 shell: the Ctrl+B W switcher list wraps after 4 entries; Compare and AI can't be reached from it.
 - S2 compare: folder compare's Diffs / Same filter pills highlight but don't filter the rows.
 - S2 compare: clicking a folder-compare row doesn't select it (Return still acts on the old row); clicking an OPEN session in the sidebar doesn't switch to it.
-- S2 compare: the start page's path fields keep the previous text, so retyping appends and compares a nonexistent path as "(no differences)" with no error.
 - S2 files: after Return into an empty folder, state says cwd=empty/rowCount 0 but the window still draws the parent's list and path (may be a stale redraw or a capture artifact: check on the real screen).
