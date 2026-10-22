@@ -127,7 +127,7 @@ def scan_start(left: str, right: str, options: dict, case_insensitive: bool) -> 
     session = {
         "left": left, "right": right, "options": options, "ci": case_insensitive,
         "rules": rules, "nodes": [], "roots": [], "errors": [], "truncated": False,
-        "stack": [(left, right, "", None, 0)],
+        "stack": [(left, right, "", "", None, 0)],
     }
     with _ALLOC:
         handle = _SESSION_NEXT[0]
@@ -154,7 +154,7 @@ def scan_step(handle: int, max_dirs: int = 24) -> dict:
     stack = session["stack"]
     processed = 0
     while stack and processed < max_dirs:
-        lp, rp, rel, parent_id, depth = stack.pop()
+        lp, rp, rel, key, parent_id, depth = stack.pop()
         processed += 1
         le = _list(lp, session["options"].get("hidden", True)) if lp else None
         re_ = _list(rp, session["options"].get("hidden", True)) if rp else None
@@ -189,7 +189,7 @@ def scan_step(handle: int, max_dirs: int = 24) -> dict:
                 break
             e = by_key[k]
             name = (e["l"] or e["r"])["name"]
-            node = {"id": len(nodes), "key": k if not rel else rel + "/" + k,
+            node = {"id": len(nodes), "key": k if not key else key + "/" + k,
                     "rel": name if not rel else rel + "/" + name, "name": name,
                     "parent": parent_id, "depth": depth,
                     "left": e["l"], "right": e["r"], "children": [],
@@ -202,7 +202,7 @@ def scan_step(handle: int, max_dirs: int = 24) -> dict:
             if _is_dir(node) and not _kind_mismatch(node):
                 stack.append((os.path.join(lp, node["left"]["name"]) if (node["left"] and lp) else None,
                               os.path.join(rp, node["right"]["name"]) if (node["right"] and rp) else None,
-                              node["rel"], node["id"], depth + 1))
+                              node["rel"], node["key"], node["id"], depth + 1))
         if parent_id is None:
             session["roots"] += children
     return {"count": len(nodes), "done": not stack,
