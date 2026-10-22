@@ -6095,7 +6095,10 @@ mod daemon_ui {
                         } else if tree.key_focused() {
                             tree.cursor_row().filter(|(_, _, root)| !root).map(|(p, _, _)| (p, None))
                         } else {
-                            None
+                            // From the editor: rename the open note, in place
+                            // on its sidebar row.
+                            let i = s.selected_index();
+                            s.selected_path().filter(|p| s.tab_path(i).as_deref() == Some(p.as_str())).map(|p| (p, Some(i)))
                         }
                     })
                     .flatten();
