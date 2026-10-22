@@ -32,6 +32,15 @@ const KEY_DELETE: u16 = 51;
 const KEY_FORWARD_DELETE: u16 = 117;
 const KEY_ENTER_NUMPAD: u16 = 76;
 
+/// Whether a typed key must reach a list's filter type-ahead before
+/// [`VimKeys`] sees it: `i` / `a` are the engine's insert command, which ate
+/// the letter and left the Files filter one character short. Every other
+/// letter already falls through to the type-ahead, and no modifier may be
+/// held (`Cmd+A` is select-all, not a typed letter).
+pub fn typeahead_before_vim(key: &KeyInput) -> bool {
+    matches!(key.chars, Some('i' | 'a')) && !key.cmd && !key.ctrl && !key.opt
+}
+
 /// `VimMode` (`"N"` / `"I"` / `"S"`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum VimMode {
@@ -1155,6 +1164,27 @@ mod tests {
             VimTarget::Rows(r) => assert_eq!(r.cursor, 2, "Ctrl+U moves back half a page"),
             _ => panic!(),
         }
+    }
+
+    /// The Files list type-ahead must see `i` / `a` before the vim engine:
+    /// `EnterInsert` for those two letters used to swallow the typed character
+    /// (the filter came out one character short, APP-BUGS N1).
+    #[test]
+    fn typeahead_beats_vim_insert_letters() {
+        for ch in ['i', 'a'] {
+            assert!(typeahead_before_vim(&key(0, Some(ch))), "{ch:?} starts the filter");
+            let mut cmd = key(0, Some(ch));
+            cmd.cmd = true;
+            assert!(!typeahead_before_vim(&cmd), "Cmd+{ch:?} is not a typed letter");
+            let mut ctrl = key(0, Some(ch));
+            ctrl.ctrl = true;
+            assert!(!typeahead_before_vim(&ctrl), "Ctrl+{ch:?} stays in the keymap");
+        }
+        // Every other letter already falls through to the type-ahead.
+        for ch in ['j', 'k', 'G', 'b', 'x', '/'] {
+            assert!(!typeahead_before_vim(&key(0, Some(ch))), "{ch:?} is not claimed early");
+        }
+        assert!(!typeahead_before_vim(&KeyInput::new(0)), "no character, no type-ahead");
     }
 
     #[test]

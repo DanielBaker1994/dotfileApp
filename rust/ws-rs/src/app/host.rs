@@ -5998,6 +5998,17 @@ mod daemon_ui {
                 popup::PrefixOutcome::Passthrough => {}
             }
 
+            // The Files list's type-ahead starts the filter with the typed
+            // letter (`filesKey`). `i` / `a` are also the vim engine's insert
+            // command, which would swallow them — the filter then began one
+            // character short — so the type-ahead gets those two first.
+            if crate::panes::vim_keys::typeahead_before_vim(&key)
+                && self.ivars().controller.current() == Some(SlotView::Files)
+                && self.files_key(&key)
+            {
+                return true;
+            }
+
             // `if !armed, VimKeys.shared.handle(e, in: w)`.
             if self.vim_key(event) {
                 return true;
