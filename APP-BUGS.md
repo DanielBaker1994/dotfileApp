@@ -46,3 +46,16 @@ Full repros: `.build/night/20261020-2246/find/h-cmp|h-cfg/findings.jsonl`. Confi
 - S2 compare: folder entries undecidable by size+time stay "unknown" forever (the content check is dead code).
 - S3 config: a UTF-8 BOM drops the whole `[app]` section; TOML arrays accepted as scalars; palette-first with a repeated id shows the command twice.
 - S3 compare: `max-lines`, `exclude` / `use-gitignore` / `ignore-file` are not enforced.
+
+## Leads (unverified: Haiku agents driving the real app in the VM, 2026-10-21, each 2/2+ by the agent)
+
+Full steps (`bin/ks-drive` commands) and screenshots: `.build/haiku/20261021-2242/<area>/`. Confirm before fixing.
+
+- S2 shell: Ctrl+Tab only toggles Files <-> Notes (`host.rs` `cycle()` ignores `dir`), while PRODUCT.md:42 says Ctrl+Tab cycles the views.
+- S2 shell: the Ctrl+B W switcher list wraps after 4 entries; Compare and AI can't be reached from it.
+- S2 compare: folder compare's Diffs / Same filter pills highlight but don't filter the rows.
+- S2 compare: clicking a folder-compare row doesn't select it (Return still acts on the old row); clicking an OPEN session in the sidebar doesn't switch to it.
+- S2 compare: the start page's path fields keep the previous text, so retyping appends and compares a nonexistent path as "(no differences)" with no error.
+- S2 compare: Tab in the start page doesn't move from the Left path to the Right path.
+- S2 files: after Return into an empty folder, state says cwd=empty/rowCount 0 but the window still draws the parent's list and path (may be a stale redraw or a capture artifact: check on the real screen).
+- S2 jira: after Esc, Cmd+L no longer focuses the search box; typed text is dropped.
