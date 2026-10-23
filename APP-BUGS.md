@@ -63,6 +63,10 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 50 | S3 | Notes finders | `<leader>sf` / `<leader>sg` (and the sidebar / pane finders): the "No file matches …" note was drawn on top of the typed query (frame math for an unflipped view; the panel root is flipped) | host GUI sandbox 2026-10-23, window captures 2/2 | fixed 12ce1d1: `views/note_find.rs` places it in the first row slot (3 finders) · verified 2026-10-23 (host sandbox capture) |
 | 51 | S3 | Notes finders | `<leader>sf` / `<leader>sg` "search the whole left rail" but missed every note inside a collapsed tree folder (`projects/plan.md`: "No file matches") | host GUI sandbox 2026-10-23 2/2 | fixed 12ce1d1: `rail_paths` adds `NotesTree::all_files` (walks the pinned roots, 5000-file / depth-12 cap) · unit test `all_files_walks_collapsed_folders_up_to_the_limit` · verified 2026-10-23 (host sandbox: `inner.md` two folders deep found; grep hit in `projects/plan.md`) |
 | 52 | S3 | Notes | Renaming a note with Cmd+A + a bare name (F2 in the editor or the sidebar) dropped `.md`: the note opened as `filetype=conf`, lost prose / PDF | host GUI sandbox 2026-10-23 1/1 | fixed 12ce1d1: `keep_note_extension` keeps the old extension when the typed name has none · unit test `a_bare_rename_keeps_the_note_extension` · verified 2026-10-23 (host sandbox: Beta.md -> "Gamma" gave Gamma.md, markdown) |
+| 53 | S2 | Switcher / palette / finders | The shared list never scrolled: past the panel's row cap (12) the cursor moved onto rows that were never drawn. Ctrl+B W with 8 terminal spaces showed 5; ↓ to the 8th left no highlight and Return acted on an invisible row | host GUI sandbox 2026-10-23 (real herdr spaces), captures before/after | fixed 57b9f7d: `ListRows` keeps the selection in view (`scroll_top`) · unit test `scroll_top_keeps_the_selection_in_view` · verified 2026-10-23 (host sandbox: the 8th space drawn and highlighted) |
+| 54 | S3 | Switcher | Ctrl+B W `/` ("type / for every command", `commands.toml:445`) listed nothing and Return did nothing; `/` alone + Return opened Files ("/" fuzzy-matched "~/files") | VM tester 2026-10-23 (2/2) | fixed 57b9f7d: `prepare_panel` passes every palette command, the key monitor lets Return reach the field in `/` mode, `accept()` never picks a view in `/` mode · unit test (command-mode assertion) · verified 2026-10-23 (VM: `/pretty` + Return opens Pretty Print) |
+| 55 | S3 | Pretty Print | The reformat replaced the typed text (jq drops duplicate keys: `{"id":1,…,"id":2}` lost `"id":1`) and Cmd+Z restored nothing, not even typing | VM tester 2026-10-23 (2/2) | fixed 57b9f7d: undo on, the reformat is an undoable replace, a text undone back to is not reformatted · verified 2026-10-23 (VM: Cmd+Z brings back the duplicate keys and stays; new input still formats) |
+| 56 | S2 | Terminal spaces (herdr prefix+L, dotfiles `herdr/plugins/last/last.sh`) | prefix+L kept going to kitchen-sink instead of the workspace you had just left: returning to Ghostty only recorded `term` (skipped by the jump), so any kitchen-sink visit outranked every workspace used afterwards | owner report 2026-10-23; replay with stub herdr/aerospace: old script `go-ks`, new `workspace focus wB` | fixed dotfiles b7f31aa: `app-focus` on Ghostty records `herdr:<focused workspace>` (`term` only when herdr does not answer) · verified 2026-10-23 (stub replay of 4 sequences: chain, toggle back to the app, Ctrl+B Shift+L, herdr down) |
 
 
 ## Leads (unverified: Opus host GUI sandbox with nvim, 2026-10-23)
@@ -71,9 +75,22 @@ Run notes: `.build/hammer/2026-10-23-opus/`. Owner decision or a second repro be
 
 - S4 prose export: in a 14-column table the narrow header cells break mid-word ("Colum / n") because of the `overflow-wrap: anywhere` that keeps wide tables on the page (fcc3d32). Trade-off, by-design?
 - S4 Files: after Cmd+Up the cursor sits on `..`, not on the folder you came from, so Return goes up again (Finder selects the child).
-- S? Notes: after an app restart the OPEN list is empty (sandbox, 1/1); intended?
+- S4 Notes: the OPEN rows show the file's mtime but are not repainted after nvim's autosave (Quill.md read 13:42 after a 14:07 save).
 - 1/4 lead: the first `ks-input type` right after the drawer toggled on lost one of two characters.
 - Test tooling, fixed in the same change (not app bugs): `do:input:text` with any non-ASCII character went to NSResponder's one-argument `insertText:`, which the nvim pane (SwiftTerm) ignores, so the whole string vanished; `window-shot` re-presented a showing view and moved focus back to its first pane. `state.views.files.rowCount` is a placeholder that is always 0.
+
+
+## Leads (unverified: Opus VM tester on ks-test2, 2026-10-23, each 2/2 unless noted)
+
+Shots: `.build/hammer/2026-10-23-opus/vm2/shots/`.
+
+- S2 Compare (text): no section editing at all. `commands.toml:535` "Return / typing / double-click = edit the section on the focused side" and `:466` "i / a … Compare's section editor", but `compare.rs` `handle_key` has no Return branch and `WSComparePaneView` has no `mouseDown` (a row click does not move the cursor either). Copy line / section, save, undo, redo and swap all wrote correct bytes.
+- S3 Jira board (Columns): clearing the search (Cmd+L, `zzz`, Esc Esc) leaves "No issues here" while state has 5 rows; it repaints on the next typed character.
+- S3 Create File (`filefast`): a name that exists is overwritten silently ("first version" lost). The code comment says overwrite is for repeat clicks; owner decision (warn or unique name). Return with an empty name or a `/` only beeps (the button shows a message).
+- S3 Jira board Table mode with the issue panel: the Columns/Table pill overlaps the inspector title, every header / key cell is "…".
+- S3 Compare: Cmd+0 (Home) from an open text compare focuses nothing (responder = window); typing is lost until a click.
+- S4 Jira board header count clipped at 900 pt ("5 issue…").
+- Tooling: `state.viewSwitcher.selection` and `state.compare.current.editing` are hardcoded.
 
 ## Leads (unverified: headless hunters, night 2026-10-20, each 3/3 by the worker)
 
