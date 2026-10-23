@@ -44,10 +44,9 @@ on-window-detected = [
   # never `*.md`, so the tiling rule below still owns it.
   { if = "test %{app-bundle-id} = dev.danielbaker.kitchen-sink && test %{window-title} ~= '[.]md$'", run = ['layout floating'] },
 
-  # kitchen-sink shares workspace 1 with Ghostty (the link bank switches
-  # between them): an accordion keeps both full size, so a jump is a focus
-  # change, not a workspace flip or a resize.
-  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 1', 'layout h_accordion'] },
+  # kitchen-sink lives on workspace 2 (Ghostty keeps 1); an accordion keeps
+  # it full size beside anything else there.
+  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 2', 'layout h_accordion'] },
 
   { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
 

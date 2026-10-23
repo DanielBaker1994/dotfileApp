@@ -40,6 +40,15 @@ if vim.fn.executable('pbcopy') == 1 and vim.fn.executable('pbpaste') == 1 then
   end
 end
 vim.keymap.set('x', 'p', 'P')
+-- ported from the regular nvim (~/.dotfiles/nvim/after/plugin/core.lua):
+-- Shift+J / K move the selected lines down / up (re-indented, still selected),
+-- < / > indent and keep the selection, jk / kj leave insert mode
+vim.keymap.set('x', 'K', ":m '<-2<CR>gv=gv", { silent = true })
+vim.keymap.set('x', 'J', ":m '>+1<CR>gv=gv", { silent = true })
+vim.keymap.set('x', '<', '<gv^', { silent = true })
+vim.keymap.set('x', '>', '>gv^', { silent = true })
+vim.keymap.set('i', 'jk', '<Esc>', { silent = true })
+vim.keymap.set('i', 'kj', '<Esc>', { silent = true })
 -- Space s f = find among the open notes, Space s g = ripgrep their contents:
 -- asks the app (its command socket, g:ws_sock) for the popup
 -- (NoteFindWindow.swift); Return there switches to the note
@@ -75,6 +84,19 @@ vim.keymap.set('n', '<leader>yp', function()
     path = path:gsub("^oil://", "")
     vim.fn.setreg('+', path)
 end, { desc = 'Yank file path' })
+vim.keymap.set('n', '<leader>yd', function()
+  local dir = vim.fn.expand('%:p:h')
+  vim.fn.setreg('+', dir)
+  print('Yanked path: ' .. dir)
+end, { desc = 'Yank file directory' })
+vim.keymap.set('n', '<leader>yn', function()
+  local name = vim.fn.expand('%:t')
+  vim.fn.setreg('+', name)
+  print('Yanked file name: ' .. name)
+end, { desc = 'Yank file name' })
+vim.keymap.set('n', '<leader>obw', function()
+  vim.system({ 'open', vim.fn.expand('%:p:h') })
+end, { desc = 'Open the note folder in Finder', silent = true })
 -- Space m d o = markdown -> PDF via the dotfiles' EXTERNAL_BUILD_AND_OPEN_PDF
 -- (pandoc + weasyprint, ~/.dotfiles/bash/external.sh), same as the regular
 -- nvim's <leader>mdo; async so the pane never blocks on the build

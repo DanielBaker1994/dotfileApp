@@ -438,6 +438,17 @@ mod appkit {
         Png,
     }
 
+    impl ExportCopy {
+        /// The file type's name and toast icon.
+        fn kind(self) -> (&'static str, &'static str) {
+            match self {
+                ExportCopy::Pdf => ("PDF", "doc.richtext"),
+                ExportCopy::Html => ("HTML", "chevron.left.forwardslash.chevron.right"),
+                ExportCopy::Png => ("PNG", "photo"),
+            }
+        }
+    }
+
     /// Export `note` off the main thread (`<note>.pdf`, `.html` and `.png`),
     /// copy the chosen file's absolute path and toast it. Shared by Cmd+P and
     /// the right-click "Copy PDF / HTML / PNG Path".
@@ -452,9 +463,15 @@ mod appkit {
             crate::app::logging::ws_log(&format!("prose pdf: skip (note empty or already exporting): {note}"));
             return;
         }
-        let fmt = if copy_toast.is_empty() { "Copied {} to clipboard".to_string() } else { copy_toast.to_string() };
-        crate::app::logging::ws_log(&format!("prose pdf: start {note}"));
-        crate::ui::toast::show("Generating PDF…", "doc.richtext");
+        let (kind, icon) = which.kind();
+        // The configured copy toast is the PDF's (Cmd+P); the HTML / PNG rows
+        // say which file's path landed on the clipboard.
+        let fmt = match which {
+            ExportCopy::Pdf if !copy_toast.is_empty() => copy_toast.to_string(),
+            _ => format!("Copied {kind} path {{}}"),
+        };
+        crate::app::logging::ws_log(&format!("prose pdf: start {note} ({kind})"));
+        crate::ui::toast::show(&format!("Generating {kind}…"), icon);
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 ProseRender::export_pdf(&note, &cfg, &colors)
@@ -472,18 +489,21 @@ mod appkit {
             ));
             crate::platform::run_on_main(move || {
                 EXPORTING.store(false, Ordering::SeqCst);
-                let (kind, path) = match which {
-                    ExportCopy::Pdf => ("PDF", r.out),
-                    ExportCopy::Html => ("HTML", r.html),
-                    ExportCopy::Png => ("PNG", r.png),
+                let path = match which {
+                    ExportCopy::Pdf => r.out,
+                    ExportCopy::Html => r.html,
+                    ExportCopy::Png => r.png,
                 };
                 match (r.ok, path) {
                     (true, Some(out)) => {
                         let _ = crate::platform::set_text(&out);
-                        crate::ui::toast::show(&fmt.replace("{}", &tilde(&out)), "doc.richtext");
+                        crate::ui::toast::show(&fmt.replace("{}", &tilde(&out)), icon);
                     }
                     (true, None) => crate::ui::toast::show(
-                        &format!("{kind} not created (PNG needs poppler: brew install poppler)"),
+                        &match which {
+                            ExportCopy::Png => "PNG not created (needs poppler: brew install poppler)".to_string(),
+                            _ => format!("{kind} not created"),
+                        },
                         "exclamationmark.triangle.fill",
                     ),
                     _ => crate::ui::toast::show(
