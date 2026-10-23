@@ -5080,9 +5080,6 @@ mod daemon_ui {
         /// time moved (a download, another app, the shell), re-list it — the
         /// list had no watcher and stayed stale until you left the folder.
         fn poll_files_dir(&self) {
-            if self.ivars().controller.current() != Some(SlotView::Files) {
-                return;
-            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
@@ -5091,6 +5088,9 @@ mod daemon_ui {
                 return;
             }
             self.ivars().last_files_check.set(now);
+            if self.ivars().controller.current() != Some(SlotView::Files) {
+                return;
+            }
             let changed = {
                 let state = self.ivars().state.borrow();
                 let Some(st) = state.as_ref() else { return };
