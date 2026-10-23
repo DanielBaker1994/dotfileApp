@@ -75,6 +75,28 @@ vim.keymap.set('n', '<leader>yp', function()
     path = path:gsub("^oil://", "")
     vim.fn.setreg('+', path)
 end, { desc = 'Yank file path' })
+-- Space m d o = markdown -> PDF via the dotfiles' EXTERNAL_BUILD_AND_OPEN_PDF
+-- (pandoc + weasyprint, ~/.dotfiles/bash/external.sh), same as the regular
+-- nvim's <leader>mdo; async so the pane never blocks on the build
+vim.keymap.set('n', '<leader>mdo', function()
+  local src = vim.fn.expand('%:p')
+  if not src:lower():match('%.md$') then
+    vim.notify('Current buffer name must contain ".md"', vim.log.levels.ERROR)
+    return
+  end
+  local out = vim.fn.expand('%:p:r')
+  vim.cmd('silent! write')
+  vim.notify('Building PDF from ' .. vim.fn.fnamemodify(src, ':~') .. ' ...')
+  local cmd = 'EXTERNAL_BUILD_AND_OPEN_PDF ' .. vim.fn.shellescape(src) .. ' ' .. vim.fn.shellescape(out)
+  vim.system({ 'bash', '-lc', cmd }, { text = true }, vim.schedule_wrap(function(ret)
+    if ret.code ~= 0 then
+      local err = (ret.stderr ~= '' and ret.stderr) or ret.stdout or 'unknown'
+      vim.notify('pandoc failed: ' .. err, vim.log.levels.ERROR)
+    else
+      vim.notify('PDF built: ' .. vim.fn.fnamemodify(out .. '.pdf', ':~'))
+    end
+  end))
+end, { desc = 'Convert markdown to PDF (pandoc) and open' })
 o.hidden = true
 o.autoread = true
 o.autowriteall = true
