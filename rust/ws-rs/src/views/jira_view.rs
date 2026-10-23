@@ -1443,6 +1443,10 @@ impl JiraList {
             self.col_filters.clear();
             self.selection = 0;
             self.refilter();
+            // The kanban follows the list (it kept "No issues here").
+            if self.on_board().is_some() {
+                self.refresh_board_columns();
+            }
             return true;
         }
         if self.back_to_board_list && self.on_board().is_some() {
@@ -5906,6 +5910,11 @@ mod tests {
         assert_eq!(l.on_board().as_deref(), Some("42"));
         assert_eq!(l.board_cols.len(), 2);
         assert_eq!(l.board_cols[0].name, "Ready");
+        assert_eq!(l.board_cols[0].cards[0].key, "DEMO-1");
+        // A search that empties the lanes, then Esc: the lanes come back.
+        l.handle(JiraEvent::Query("zzz".into()));
+        assert!(l.board_cols.iter().all(|c| c.cards.is_empty()));
+        assert!(l.escape_step());
         assert_eq!(l.board_cols[0].cards[0].key, "DEMO-1");
         let st = l.board_state();
         assert_eq!(st["id"], json!("42"));

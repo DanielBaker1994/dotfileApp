@@ -8023,7 +8023,29 @@ mod daemon_ui {
             if opened_sub {
                 self.ivars().controller.push_view(SlotView::CompareText);
             }
+            // Home (Cmd+0): the start page's Left path box takes the keyboard
+            // once it is built (nothing had focus; typing was lost).
+            if used && key.cmd && !key.shift && key.key_code == 29 {
+                self.compare_home_focus();
+            }
             used
+        }
+
+        /// Home (Cmd+0 / the sidebar's Home): repaint so the start page is
+        /// built, then give its Left path box the keyboard — and again after
+        /// the next drain, which may rebuild it (nothing had focus; typing
+        /// was lost until a click).
+        fn compare_home_focus(&self) {
+            if let Some(st) = self.ivars().state.borrow().as_ref() {
+                if let Some(s) = st.compare.as_ref() {
+                    s.invalidate();
+                }
+            }
+            self.sync_compare();
+            self.live_pane_focus("left-path");
+            on_ui(|ui| {
+                ui.live_pane_focus("left-path");
+            });
         }
 
         /// Run `f` on the shared compare model, then repaint the surface.
@@ -8058,7 +8080,11 @@ mod daemon_ui {
                     self.compare_with(|m| m.close_session(i));
                 }
                 E::Sidebar(SidebarEvent::Pinned(k)) => {
-                    self.compare_with(|m| if k == "home" { m.show_start_page() } else { m.start_pasted() });
+                    let home = k == "home";
+                    self.compare_with(|m| if home { m.show_start_page() } else { m.start_pasted() });
+                    if home {
+                        self.compare_home_focus();
+                    }
                 }
                 E::Sidebar(SidebarEvent::Rail(_)) => {
                     if let Some(st) = self.ivars().state.borrow().as_ref() {
