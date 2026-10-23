@@ -280,6 +280,8 @@ pub struct AppSettings {
     pub preview_border: Rgba,
     pub preview_border_width: f64,
     pub pane_focus_color: Rgba,
+    /// No `pane-focus-color` set: the ring takes the current view's accent.
+    pub pane_focus_themed: bool,
     pub pane_focus_width: f64,
     pub vim_keys: bool,
     pub vim_mode_badge: bool,
@@ -352,6 +354,7 @@ impl Default for AppSettings {
             preview_border: Rgba::new(0.753, 0.753, 0.753, 1.0),
             preview_border_width: 2.0,
             pane_focus_color: Rgba::new(0xC8 as f64 / 255.0, 0xCE as f64 / 255.0, 0xD8 as f64 / 255.0, 0.55),
+            pane_focus_themed: true,
             pane_focus_width: 1.0,
             vim_keys: true,
             vim_mode_badge: true,
@@ -596,8 +599,9 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
         .and_then(|v| v.parse::<f64>().ok())
         .map(|n| n.max(0.0).min(8.0))
         .unwrap_or(2.0);
-    settings.pane_focus_color = strv("pane-focus-color")
-        .and_then(|v| hex_color(&v))
+    let focus_color = strv("pane-focus-color").and_then(|v| hex_color(&v));
+    settings.pane_focus_themed = focus_color.is_none();
+    settings.pane_focus_color = focus_color
         .unwrap_or_else(|| {
             Rgba::new(0xC8 as f64 / 255.0, 0xCE as f64 / 255.0, 0xD8 as f64 / 255.0, 0.55)
         });

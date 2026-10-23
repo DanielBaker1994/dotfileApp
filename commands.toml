@@ -233,15 +233,15 @@ width = 768
 height = 585
 max-height = 730
 font = "Hack Nerd Font Mono"
-background-color = 181616
-header-color = "0B0A0A"
-browser-background = "12120F"
-terminal-background = "0D0C0C"
-text-color = "C5C9C5"
-dim-color = "A6A69C"
-highlight-color = "2D4F67"
-accent-color = "8BA4B0"
-palette = "A292A3, 87A987, C4B28A, C4746E, 8EA4A2"
+background-color = 303446
+header-color = 232634
+browser-background = "292C3C"
+terminal-background = 232634
+text-color = "C6D0F5"
+dim-color = "A5ADCE"
+highlight-color = "51576D"
+accent-color = "CA9EE6"
+palette = "8CAAEE, A6D189, E5C890, E78284, 81C8BE"
 
 [files]
 enabled = true

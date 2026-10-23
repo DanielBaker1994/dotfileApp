@@ -11,8 +11,8 @@ pub enum MenuEntry {
         title: String,
         checked: bool,
         enabled: bool,
-        /// A color swatch drawn as the item image (the theme presets).
-        swatch: Option<crate::ui::theme::Rgba>,
+        /// A theme preset's mini preview card drawn as the item image.
+        swatch: Option<Box<crate::ui::theme::ThemePreset>>,
         /// Runs while the row is highlighted (live preview on hover).
         hover: Option<std::rc::Rc<dyn Fn()>>,
         action: Box<dyn FnOnce()>,
@@ -22,7 +22,7 @@ pub enum MenuEntry {
     Submenu {
         title: String,
         checked: bool,
-        swatch: Option<crate::ui::theme::Rgba>,
+        swatch: Option<Box<crate::ui::theme::ThemePreset>>,
         hover: Option<std::rc::Rc<dyn Fn()>>,
         restore: Option<std::rc::Rc<dyn Fn()>>,
         entries: Vec<MenuEntry>,
@@ -49,10 +49,10 @@ impl MenuEntry {
         MenuEntry::Submenu { title: title.to_string(), checked: false, swatch: None, hover: None, restore: None, entries }
     }
 
-    /// Attach a color swatch (items and submenus).
-    pub fn with_swatch(mut self, c: crate::ui::theme::Rgba) -> Self {
+    /// Attach a theme preset's preview card (items and submenus).
+    pub fn with_swatch(mut self, p: &crate::ui::theme::ThemePreset) -> Self {
         match &mut self {
-            MenuEntry::Item { swatch, .. } | MenuEntry::Submenu { swatch, .. } => *swatch = Some(c),
+            MenuEntry::Item { swatch, .. } | MenuEntry::Submenu { swatch, .. } => *swatch = Some(Box::new(p.clone())),
             _ => {}
         }
         self
@@ -179,21 +179,46 @@ mod appkit {
         }
     }
 
-    /// A 14×14 rounded swatch image (`ThemePreset.swatch()`).
-    fn swatch_image(c: crate::ui::theme::Rgba) -> Retained<objc2_app_kit::NSImage> {
+    /// A 58×20 mini preview card of a theme (`ThemePreset.swatch()`): header
+    /// bar with an accent pill, text line, highlighted row, terminal strip
+    /// and the palette dots, on the preset background.
+    fn swatch_image(p: &crate::ui::theme::ThemePreset) -> Retained<objc2_app_kit::NSImage> {
         use objc2::AnyThread;
         use objc2_app_kit::{NSBezierPath, NSImage};
         use objc2_foundation::{NSRect, NSSize};
-        let img = NSImage::initWithSize(NSImage::alloc(), NSSize::new(14.0, 14.0));
+        const W: f64 = 58.0;
+        const H: f64 = 20.0;
+        // Swift drew into a flipped image; lockFocus is unflipped.
+        let rect = |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, H - y - h), NSSize::new(w, h));
+        let img = NSImage::initWithSize(NSImage::alloc(), NSSize::new(W, H));
         #[allow(deprecated)]
         img.lockFocus();
-        let r = NSRect::new(NSPoint::new(1.0, 1.0), NSSize::new(12.0, 12.0));
-        let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, 3.0, 3.0);
-        c.with_alpha(1.0).to_nscolor().setFill();
-        path.fill();
-        crate::ui::theme::Rgba::new(0.5, 0.5, 0.5, 0.6).to_nscolor().setStroke();
-        path.setLineWidth(0.5);
-        path.stroke();
+        let card = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(0.5, 0.5, W - 1.0, H - 1.0), 4.0, 4.0);
+        p.background.with_alpha(1.0).to_nscolor().setFill();
+        card.fill();
+        objc2_app_kit::NSGraphicsContext::saveGraphicsState_class();
+        card.addClip();
+        let fill = |c: crate::ui::theme::Rgba, r: NSRect| {
+            c.to_nscolor().setFill();
+            NSBezierPath::fillRect(r);
+        };
+        fill(p.header.with_alpha(1.0), rect(0.0, 0.0, W, 7.0));
+        p.accent.to_nscolor().setFill();
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(4.0, 1.5, 12.0, 4.0), 1.5, 1.5).fill();
+        fill(p.dim, rect(19.0, 3.0, 8.0, 1.2));
+        fill(p.terminal.with_alpha(1.0), rect(W - 14.0, 7.0, 14.0, H - 7.0));
+        fill(p.text, rect(4.0, 10.0, 18.0, 1.4));
+        fill(p.highlight, rect(3.0, 13.5, W - 20.0, 4.5));
+        fill(p.accent, rect(3.0, 13.5, 1.5, 4.5));
+        for (k, c) in [p.palette.accent2, p.palette.success, p.palette.warning, p.palette.danger].into_iter().enumerate() {
+            c.to_nscolor().setFill();
+            let (dx, dy) = ((k % 2) as f64 * 5.0, (k / 2) as f64 * 5.0);
+            NSBezierPath::bezierPathWithOvalInRect(rect(W - 12.0 + dx, 9.0 + dy, 3.6, 3.6)).fill();
+        }
+        objc2_app_kit::NSGraphicsContext::restoreGraphicsState_class();
+        crate::ui::theme::Rgba::new(0.0, 0.0, 0.0, 0.3).to_nscolor().setStroke();
+        card.setLineWidth(1.0);
+        card.stroke();
         #[allow(deprecated)]
         img.unlockFocus();
         img
@@ -226,7 +251,7 @@ mod appkit {
                     };
                     item.setState(if checked { NSControlStateValueOn } else { NSControlStateValueOff });
                     if let Some(c) = swatch {
-                        item.setImage(Some(&swatch_image(c)));
+                        item.setImage(Some(&swatch_image(&c)));
                     }
                     set_hover(&item, hover, hv);
                     let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&title));
@@ -264,7 +289,7 @@ mod appkit {
                     item.setEnabled(enabled);
                     item.setState(if checked { NSControlStateValueOn } else { NSControlStateValueOff });
                     if let Some(c) = swatch {
-                        item.setImage(Some(&swatch_image(c)));
+                        item.setImage(Some(&swatch_image(&c)));
                     }
                     set_hover(&item, hover, hv);
                     menu.addItem(&item);

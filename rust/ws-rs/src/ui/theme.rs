@@ -765,7 +765,7 @@ impl ThemePreset {
         })
     }
 
-    /// `ThemePreset.builtIn` — 30 presets, each 13 colors.
+    /// `ThemePreset.builtIn` plus the hue-forward set — 44 presets, each 13 colors.
     pub fn built_in() -> Vec<ThemePreset> {
         PRESET_DATA
             .iter()
@@ -858,6 +858,22 @@ const PRESET_DATA: &[(&str, &str)] = &[
     ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C8CCD9, 3760BF, 6172B0, B7C1E3, 2E7DE9, 9854F1, 587539, 8C6C3E, F52A65, 007197"),
     ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1, 268BD2, D33682, 859900, B58900, DC322F, 2AA198"),
     ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6, 007AFF, AF52DE, 248A3D, B25000, D70015, 0071A4"),
+    // Hue-forward presets: the classics above are nearly all slate-blue near
+    // black or near white, so these spread hue and lightness instead.
+    ("Oxblood", "2A1215, 220E11, 1C0B0D, 1A0A0C, F2DEDC, B8999A, 4E2228, E06C5A, E8A0BF, 9BC48A, E8C07A, FF5F56, 7FC8C8"),
+    ("Deep Forest", "12261B, 0E1F16, 0B1A12, 0A1710, DCEBDD, 98B39E, 24472F, 7FD38F, C6A0F6, A6E3A1, E5C07B, F07A7A, 6CCFCB"),
+    ("Aubergine", "2B1630, 241228, 1E0F21, 1B0D1E, EEDDF2, AE94B5, 4C2856, D88CF2, FF8FB8, 9AD69A, F2CB7E, FF6F86, 82D6E8"),
+    ("Espresso", "2B2018, 241A13, 1D150F, 1A130E, EFE1D1, B39C86, 4D3A2B, E0A458, D99CB8, A8C47F, F0C674, E0705A, 8CC0C0"),
+    ("Abyss Teal", "0C2E33, 09262A, 072023, 061C1F, D6F0EE, 8FB8B5, 1A5058, 4FD6C8, 9FB2FF, 8CD98C, F2D27A, F27A7A, 6BC6F2"),
+    ("Pure Black", "000000, 000000, 000000, 0A0A0A, E6E6E6, 8C8C8C, 262626, 0A84FF, BF5AF2, 30D158, FFD60A, FF453A, 64D2FF"),
+    ("Slate Dusk", "3B4A6B, 34425F, 2E3A54, 2A3550, EEF1F8, B4BDD3, 55688F, FFD27A, F2A1C6, A7E3A0, FFD27A, FF8A8A, 9FD8FF"),
+    ("Sage", "4A5A4C, 425144, 3B483D, 374339, EEF2EA, B9C4B4, 66796A, F2C57C, E0A6D0, B6E3A8, F2C57C, F28B82, 9AD3D6"),
+    ("Clay", "6B4A3C, 604235, 553A2F, 4F362B, FBF0EA, DCC3B6, 87604E, FFD08A, F7B3D2, C2E3A2, FFD08A, FF9B8A, A9DDE6"),
+    ("Parchment", "EAD9B5, E0CDA6, F2E6CC, D6C299, 3B2F1E, 7A6A50, D4BF92, A0522D, 7B3FA0, 4F7A28, A86F00, B22222, 2A7A8C"),
+    ("Mint", "DDF2E6, D0EADB, ECF8F1, C3E2D0, 1F3A2C, 5E7B6B, BFE0CC, 0F8F5F, 7A4FCF, 2E8B3E, B07800, C8323C, 1A7FA0"),
+    ("Blush", "F7E1E4, F0D4D8, FCEEF0, E9C9CE, 4A2329, 8A6066, E8BFC5, C2185B, 6A3FC0, 2E7D32, B26A00, C62828, 00838F"),
+    ("Sky", "DCEBFA, CFE2F6, ECF4FD, C2D8F0, 1B2E45, 5B708A, BCD3EE, 1565C0, 8E44AD, 2E7D32, B26A00, C62828, 00838F"),
+    ("Lavender", "E9E2F7, DED5F2, F4F0FB, D3C8EC, 2E2445, 6C6185, CFC2EC, 6A3FC0, C2185B, 2E7D32, B26A00, C62828, 00838F"),
 ];
 
 #[cfg(test)]
@@ -1038,7 +1054,7 @@ mod tests {
     #[test]
     fn presets_count_and_nightfox_values() {
         let all = ThemePreset::built_in();
-        assert_eq!(all.len(), 30);
+        assert_eq!(all.len(), 44);
 
         let nf = all.iter().find(|p| p.name == "Nightfox").unwrap();
         assert_eq!(HexColor::format_rgb(&nf.background), "192330");

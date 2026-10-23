@@ -6876,11 +6876,26 @@ mod daemon_ui {
             ok
         }
 
+        /// With no `pane-focus-color` set, color the focus ring from the
+        /// current view's accent so it sits in the theme instead of a fixed
+        /// silver hairline.
+        fn theme_focus_ring(&self) {
+            let s = self.ivars().controller.settings();
+            if !s.pane_focus_themed {
+                return;
+            }
+            let Some(v) = self.ivars().controller.current() else { return };
+            let c = crate::ui::theme::section_colors(theme_section(v)).accent.with_alpha(0.45);
+            let byte = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
+            self.ivars().live_nav.borrow_mut().style.color_argb = byte(c.a) << 24 | byte(c.r) << 16 | byte(c.g) << 8 | byte(c.b);
+        }
+
         /// `refreshSoon`: keep the ring on whatever holds the keyboard (a
         /// click, a sheet, a view switch) — run from the drain tick.
         fn live_pane_refresh(&self) {
             match self.live_panes() {
                 Some((w, panes)) => {
+                    self.theme_focus_ring();
                     self.ivars().live_nav.borrow_mut().refresh(&w, &panes);
                     self.vim_refresh(&w, &panes);
                     self.publish_live_pane(&w, &panes);
@@ -7292,7 +7307,7 @@ mod daemon_ui {
                             ui.preview_theme_preset(section, &pv, ThemeScope::Window);
                         }
                     });
-                    theme.push(entry.with_swatch(p.background).with_checked(on));
+                    theme.push(entry.with_swatch(&p).with_checked(on));
                 }
             }
             theme.push(MenuEntry::Separator);

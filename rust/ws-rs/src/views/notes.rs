@@ -3444,6 +3444,17 @@ mod macos {
         (shell, vec!["-l".to_string()], std::env::var("HOME").ok())
     }
 
+    /// Paint the body (everything under the header) the editor's solid
+    /// color. Left to the translucent window tint, the sidebar column read
+    /// darker than the editor beside it and the card's rounded corners showed
+    /// dark wedges.
+    fn paint_body(root: &NSView, colors: PopupColors) {
+        root.setWantsLayer(true);
+        if let Some(l) = root.layer() {
+            l.setBackgroundColor(Some(&colors.base().to_nscolor().CGColor()));
+        }
+    }
+
     pub struct NotesSurface {
         root: Retained<NSView>,
         editor: Retained<NSTextView>,
@@ -3570,6 +3581,7 @@ mod macos {
         let _sidebar_w = model.sidebar.width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let root = NotesFlippedView::new(mtm);
         root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0)));
+        paint_body(&root, colors);
         root.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -4753,6 +4765,7 @@ mod macos {
         pub fn retheme(&mut self) {
             let colors = crate::ui::theme::section_colors("notes");
             self.colors = colors;
+            paint_body(&self.root, colors);
             self.sidebar.set_colors(colors);
             self.tree.set_colors(colors);
             self.prose_switch.set_colors(colors);
