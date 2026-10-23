@@ -69,6 +69,7 @@ before a run so they don't re-report known items, and the orchestrator appends t
 | 56 | S2 | Terminal spaces (herdr prefix+L, dotfiles `herdr/plugins/last/last.sh`) | prefix+L kept going to kitchen-sink instead of the workspace you had just left: returning to Ghostty only recorded `term` (skipped by the jump), so any kitchen-sink visit outranked every workspace used afterwards | owner report 2026-10-23; replay with stub herdr/aerospace: old script `go-ks`, new `workspace focus wB` | fixed dotfiles b7f31aa: `app-focus` on Ghostty records `herdr:<focused workspace>` (`term` only when herdr does not answer) · verified 2026-10-23 (stub replay of 4 sequences: chain, toggle back to the app, Ctrl+B Shift+L, herdr down) |
 | 57 | S3 | Compare | Cmd+0 (Home) from an open compare, or the sidebar's Home, left nothing focused (responder = window): typing was lost and Tab / Cmd+L did nothing until a click | VM tester 2026-10-23 (2/2) | fixed 0d5ee2d: `compare_home_focus` repaints the start page and focuses its Left path box · verified 2026-10-23 (VM: Cmd+0 from an open text compare -> `left-path`, typed text in the box) |
 | 58 | S3 | Jira board | Esc that cleared a search (Cmd+L, `zzz`, Esc Esc) left the kanban on "No issues here" (state: 5 rows) until the next typed character | VM tester 2026-10-23 (2/2) | fixed 0d5ee2d: `escape_step` rebuilds the board lanes · unit test (`board_list_open_columns_and_pins_from_fixtures` extended) |
+| 59 | S3 | Create File | Saving under a name that already exists overwrote that file silently ("first version" lost); the path was copied as a normal success | VM tester 2026-10-23 (2/2) | fixed e5a38ff: `filefast_free_name` writes `name-2.ext` … when the name holds other text (same text = the same file, so repeat clicks make no duplicate) · unit test `filefast_never_overwrites_a_different_file` · not GUI-verified yet |
 
 
 ## Leads (unverified: Opus host GUI sandbox with nvim, 2026-10-23)
@@ -87,7 +88,7 @@ Run notes: `.build/hammer/2026-10-23-opus/`. Owner decision or a second repro be
 Shots: `.build/hammer/2026-10-23-opus/vm2/shots/`.
 
 - S2 Compare (text): no section editing at all. `commands.toml:535` "Return / typing / double-click = edit the section on the focused side" and `:466` "i / a … Compare's section editor", but `compare.rs` `handle_key` has no Return branch and `WSComparePaneView` has no `mouseDown` (a row click does not move the cursor either). Copy line / section, save, undo, redo and swap all wrote correct bytes.
-- S3 Create File (`filefast`): a name that exists is overwritten silently ("first version" lost). The code comment says overwrite is for repeat clicks; owner decision (warn or unique name). Return with an empty name or a `/` only beeps (the button shows a message).
+- S4 Create File: Return with an empty name or a `/` only beeps (the button shows a message).
 - S3 Jira board Table mode with the issue panel: the Columns/Table pill overlaps the inspector title, every header / key cell is "…".
 - S4 Jira board header count clipped at 900 pt ("5 issue…").
 - Tooling: `state.viewSwitcher.selection` and `state.compare.current.editing` are hardcoded.
