@@ -516,6 +516,26 @@ mod pp_handler {
     }
 }
 
+/// The name Create File writes under `dir`: `name` itself when it is free or
+/// already holds exactly `contents` (a repeat click rewrites the same file),
+/// else the first free `stem-2.ext`, `stem-3.ext` … (a different file of that
+/// name used to be overwritten without a word).
+#[cfg(any(target_os = "macos", test))]
+pub fn filefast_free_name(dir: &str, name: &str, contents: &str) -> String {
+    let same_or_free = |n: &str| match std::fs::read(std::path::Path::new(dir).join(n)) {
+        Ok(bytes) => bytes == contents.as_bytes(),
+        Err(_) => !std::path::Path::new(dir).join(n).exists(),
+    };
+    if same_or_free(name) {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    (2..1000).map(|n| format!("{stem}-{n}{ext}")).find(|n| same_or_free(n)).unwrap_or_else(|| name.to_string())
+}
+
 /// Run the filefast `cmd.script` with `FF_DIR`/`FF_NAME` and the paste contents
 /// on stdin (the `save` closure of `openFileFastWindow`); the outcome lands in
 /// the latch and [`ToolPanel::poll`] copies the path / dresses the status.
@@ -535,6 +555,7 @@ fn spawn_filefast(
         return false;
     }
     std::thread::spawn(move || {
+        let name = filefast_free_name(&dir, &name, &contents);
         let env: Vec<(String, String)> = std::env::vars()
             .chain([
                 ("FF_DIR".to_string(), dir),
@@ -2215,6 +2236,24 @@ impl ToolPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filefast_never_overwrites_a_different_file() {
+        let dir = std::env::temp_dir().join(format!("ks-ff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        assert_eq!(filefast_free_name(&d, "report.txt", "first"), "report.txt");
+        std::fs::write(dir.join("report.txt"), "first").unwrap();
+        // A repeat of the same save rewrites the same file; new text gets -2.
+        assert_eq!(filefast_free_name(&d, "report.txt", "first"), "report.txt");
+        assert_eq!(filefast_free_name(&d, "report.txt", "SECOND"), "report-2.txt");
+        std::fs::write(dir.join("report-2.txt"), "SECOND").unwrap();
+        assert_eq!(filefast_free_name(&d, "report.txt", "third"), "report-3.txt");
+        std::fs::write(dir.join("Makefile"), "x").unwrap();
+        assert_eq!(filefast_free_name(&d, "Makefile", "y"), "Makefile-2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn kind_names_round_trip() {
