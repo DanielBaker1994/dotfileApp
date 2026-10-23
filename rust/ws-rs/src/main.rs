@@ -367,24 +367,41 @@ fn config_schema() -> String {
     serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// `configCheckCLI`: the verdict as one JSON line on stdout — what
+/// `settings_hub/schema.py` parses (`{"ok", "problem"}`, and for `--file`
+/// `{"ok", "issues": [{line, message, fatal}]}`). The port printed plain text
+/// on stderr, so ws-settings silently fell back to its partial checks.
 fn config_check(argv: &[String]) -> i32 {
-    if argv.len() < 3 {
-        eprintln!("usage: kitchen-sink config-check SECTION KEY VALUE");
+    use serde_json::{json, Value};
+    if argv.len() == 2 && argv[0] == "--file" {
+        let path = crate::app::config::expand_tilde(&argv[1]);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            let msg = format!("can't read {}", argv[1]);
+            println!("{}", json!({"ok": false, "issues": [{"line": 0, "message": msg, "fatal": true}]}));
+            return 1;
+        };
+        configure_helper();
+        let issues = app::config::validate_config(&text);
+        let list: Vec<Value> =
+            issues.iter().map(|i| json!({"line": i.line, "message": i.message, "fatal": i.fatal})).collect();
+        println!("{}", json!({"ok": !issues.iter().any(|i| i.fatal), "issues": list}));
+        return 0;
+    }
+    if argv.len() != 3 {
+        eprintln!("usage: kitchen-sink config-check SECTION KEY VALUE | --file PATH");
         return 2;
     }
     match app::config::config_value_problem(&argv[0], &argv[1], &argv[2]) {
-        Some(problem) => {
-            eprintln!("{problem}");
-            1
-        }
-        None => 0,
+        Some(problem) => println!("{}", json!({"ok": false, "problem": problem})),
+        None => println!("{}", json!({"ok": true})),
     }
+    0
 }
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
     println!("usage: kitchen-sink [headless|window|notes|files|jira|confluence|ai|compare|terminal|ping|");
-    println!("                     config-check SECTION KEY VALUE | config-schema]");
+    println!("                     config-check SECTION KEY VALUE | config-check --file PATH | config-schema]");
 }
 
 #[cfg(test)]
