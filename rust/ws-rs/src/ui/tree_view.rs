@@ -431,6 +431,39 @@ mod appkit {
             }
         }
 
+        /// `vimRows()`: row names, the keyboard cursor and a page of rows.
+        pub fn vim_rows(&self) -> (Vec<String>, usize, usize) {
+            let t: Vec<String> = self.ivars().rows.borrow().iter().map(|r| r.name.clone()).collect();
+            let page = (self.geometry().list.height / ROW_H) as usize;
+            (t, self.ivars().cursor.get(), page.max(1))
+        }
+
+        /// `vimMove(to:)`: put the keyboard cursor on `row` and reveal it.
+        pub fn vim_move(&self, row: usize) {
+            self.ivars().cursor.set(row);
+            self.reveal_row(row);
+        }
+
+        /// Each row inside the visible list area (for the search highlight).
+        pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
+            let g = self.geometry();
+            let scroll = self.ivars().scroll.get();
+            let (top, bot) = (g.list.y, g.list.max_y());
+            (0..self.row_count())
+                .map(|i| (i, g.row_rect(i, scroll)))
+                .filter(|(_, r)| r.max_y() > top && r.y < bot)
+                .collect()
+        }
+
+        /// Activate row `i` like a click: a folder toggles, a file opens.
+        pub fn activate_row(&self, i: usize) {
+            let r = self.ivars().rows.borrow().get(i).cloned();
+            if let Some(r) = r {
+                self.ivars().cursor.set(i);
+                self.emit(TreeEvent::Click { path: r.path, is_dir: r.is_dir });
+            }
+        }
+
         pub fn row_count(&self) -> usize {
             self.ivars().rows.borrow().len()
         }

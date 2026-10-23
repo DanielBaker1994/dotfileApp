@@ -20,6 +20,8 @@ use objc2_web_kit::WKWebView;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RowsSource {
     Sidebar,
+    /// The notes rail's pinned-folder tree.
+    Tree,
     Files,
     Jira,
     Confluence,
@@ -134,6 +136,7 @@ impl DaemonUi {
                 let bar = as_any(&*pane.area).downcast_ref::<crate::ui::sidebar::SidebarView>()?;
                 Some(Live::Rows(RowsSource::Sidebar, Some(bar.retain())))
             }
+            "tree" if current == Some(SlotView::Notes) => Some(Live::Rows(RowsSource::Tree, None)),
             "files-list" => Some(Live::Rows(RowsSource::Files, None)),
             "list" if current.is_some_and(|v| v.is_jira()) => Some(Live::Rows(RowsSource::Jira, None)),
             "results" => Some(Live::Rows(RowsSource::Confluence, None)),
@@ -146,6 +149,7 @@ impl DaemonUi {
     fn vim_rows(&self, src: RowsSource, bar: Option<&crate::ui::sidebar::SidebarView>) -> Option<VimRows> {
         let (texts, cursor, page) = match src {
             RowsSource::Sidebar => bar?.vim_rows(),
+            RowsSource::Tree => self.notes_surface(|s| s.tree_view().vim_rows())?,
             RowsSource::Files => self.files_surface(|b| {
                 let t: Vec<String> = b.visible_rows().iter().map(|e| e.name.clone()).collect();
                 (t, b.selection(), 20)
@@ -166,6 +170,9 @@ impl DaemonUi {
                 if let Some(b) = bar {
                     b.vim_move(row);
                 }
+            }
+            RowsSource::Tree => {
+                self.notes_surface(|s| s.tree_view().vim_move(row));
             }
             RowsSource::Files => {
                 self.files_surface(|b| b.list.selection = row);
@@ -492,6 +499,11 @@ impl DaemonUi {
                 let b = bar.as_ref()?;
                 (Retained::into_super(Retained::into_super(b.clone())), b.vim_shown_rects())
             }
+            RowsSource::Tree => {
+                let t = self.notes_surface(|s| s.tree_view())?;
+                let rects = t.vim_shown_rects();
+                (Retained::into_super(Retained::into_super(t)), rects)
+            }
             RowsSource::Files => {
                 let view = self
                     .ivars()
@@ -655,6 +667,9 @@ impl DaemonUi {
                 if let Some(b) = bar {
                     b.activate_row(row);
                 }
+            }
+            RowsSource::Tree => {
+                self.notes_surface(|s| s.tree_view().activate_row(row));
             }
             RowsSource::Files => self.files_event(FilesEvent::Click {
                 row,

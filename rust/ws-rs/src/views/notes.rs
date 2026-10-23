@@ -5111,6 +5111,18 @@ mod macos {
             self.model.tabs.paths()
         }
 
+        /// What `<leader>sf` / `<leader>sg` search: everything the left rail
+        /// lists — the open notes, then each file row the tree shows.
+        pub fn rail_paths(&self) -> Vec<String> {
+            let mut out = self.open_paths();
+            for r in self.tree_model.rows() {
+                if !r.is_dir && !out.contains(&r.path) {
+                    out.push(r.path);
+                }
+            }
+            out
+        }
+
         /// `vimCommand(_:)` on the notes nvim pane.
         pub fn vim_command(&self, ex: &str) {
             if let Some(v) = &self.vim {

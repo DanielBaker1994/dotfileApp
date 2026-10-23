@@ -12232,7 +12232,7 @@ mod daemon_ui {
                     u
                 }
             };
-            let paths = self.notes_surface(|s| s.open_paths()).unwrap_or_default();
+            let paths = self.notes_surface(|s| s.rail_paths()).unwrap_or_default();
             ui.show(paths);
         }
 
