@@ -99,6 +99,31 @@ impl NotesTree {
         out
     }
 
+    /// Every file under the roots, collapsed folders included, in tree order:
+    /// what the rail finders (`<leader>sf` / `<leader>sg`) search. Capped at
+    /// `limit` files and a fixed depth so a huge or looping root can't stall.
+    pub fn all_files(&self, limit: usize) -> Vec<String> {
+        const MAX_DEPTH: usize = 12;
+        fn walk(t: &NotesTree, dir: &str, depth: usize, limit: usize, out: &mut Vec<String>) {
+            for (name, is_dir) in list_dir(Path::new(dir), t.show_hidden) {
+                if out.len() >= limit {
+                    return;
+                }
+                let path = format!("{dir}/{name}");
+                if !is_dir {
+                    out.push(path);
+                } else if depth < MAX_DEPTH {
+                    walk(t, &path, depth + 1, limit, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for r in &self.roots {
+            walk(self, r, 1, limit, &mut out);
+        }
+        out
+    }
+
     fn push_children(&self, dir: &str, depth: usize, out: &mut Vec<TreeRow>) {
         for (name, is_dir) in list_dir(Path::new(dir), self.show_hidden) {
             let path = format!("{dir}/{name}");
@@ -233,6 +258,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn all_files_walks_collapsed_folders_up_to_the_limit() {
+        let root = std::env::temp_dir().join(format!("ks-tree-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("projects/deep")).unwrap();
+        for f in ["a.md", "projects/plan.md", "projects/deep/inner.md", ".hidden.md"] {
+            std::fs::write(root.join(f), "x").unwrap();
+        }
+        let r = root.to_string_lossy().into_owned();
+        // Nothing expanded: rows() lists only the root, all_files sees inside.
+        let t = NotesTree::new(vec![r.clone()], BTreeSet::new(), false);
+        assert_eq!(t.rows().len(), 1);
+        let all = t.all_files(100);
+        assert_eq!(all, vec![format!("{r}/projects/deep/inner.md"), format!("{r}/projects/plan.md"), format!("{r}/a.md")]);
+        assert_eq!(t.all_files(2).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("ws-notes-tree-{tag}-{}", std::process::id()));

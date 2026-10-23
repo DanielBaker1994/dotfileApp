@@ -28,6 +28,8 @@ use std::time::Duration;
 pub const DEFAULT_NEW_NOTE_NAME: &str = "Untitled";
 pub const DEFAULT_NEW_DOC_NAME: &str = "doc";
 pub const DEFAULT_NEW_DOC_TEMPLATE: &str = "markdown_doc_catppuccin_latte";
+/// The most files `<leader>sf` / `<leader>sg` collect from the pinned tree.
+pub const RAIL_FIND_LIMIT: usize = 5000;
 pub const NOTES_LABEL: &str = "NOTES";
 pub const SIDEBAR_MIN_WIDTH: f64 = 140.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 480.0;
@@ -696,6 +698,28 @@ impl NotesTabs {
             .collect();
         hit
     }
+}
+
+/// The name a note rename writes: a typed name with no extension keeps the
+/// note's own (`doc-1.md` -> `plan` gives `plan.md`). Select-all + a bare name
+/// used to drop `.md`, and the note lost its markdown filetype and prose view.
+pub fn keep_note_extension(old: &str, new_name: &str, old_is_file: bool) -> String {
+    let typed = new_name.trim();
+    let ext = Path::new(old).extension().map(|e| e.to_string_lossy().into_owned());
+    match ext {
+        Some(ext) if old_is_file && !typed.is_empty() && !has_extension(typed) => {
+            format!("{typed}.{ext}")
+        }
+        _ => new_name.to_string(),
+    }
+}
+
+/// A name ends in a real extension (`.md`, `.txt`), not just a dot (`v1.2 notes`).
+fn has_extension(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .is_some_and(|e| (1..=8).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// `path` re-rooted after `old` moved to `new`: `Some` when `path` is `old`
@@ -4191,7 +4215,8 @@ mod macos {
             } else if sel_moves {
                 self.commit();
             }
-            let Some(dst) = crate::views::files::rename_into(old, new_name)? else {
+            let new_name = keep_note_extension(old, new_name, Path::new(old).is_file());
+            let Some(dst) = crate::views::files::rename_into(old, &new_name)? else {
                 return Ok(None);
             };
             self.model.tabs.retarget(old, &dst);
@@ -5112,12 +5137,15 @@ mod macos {
         }
 
         /// What `<leader>sf` / `<leader>sg` search: everything the left rail
-        /// lists — the open notes, then each file row the tree shows.
+        /// lists — the open notes, each file row the tree shows, then the files
+        /// inside its collapsed folders (they were unfindable).
         pub fn rail_paths(&self) -> Vec<String> {
             let mut out = self.open_paths();
-            for r in self.tree_model.rows() {
-                if !r.is_dir && !out.contains(&r.path) {
-                    out.push(r.path);
+            let mut seen: std::collections::HashSet<String> = out.iter().cloned().collect();
+            let shown = self.tree_model.rows().into_iter().filter(|r| !r.is_dir).map(|r| r.path);
+            for p in shown.chain(self.tree_model.all_files(RAIL_FIND_LIMIT)) {
+                if seen.insert(p.clone()) {
+                    out.push(p);
                 }
             }
             out
@@ -5876,6 +5904,18 @@ pub fn register(reg: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_rename_keeps_the_note_extension() {
+        assert_eq!(keep_note_extension("/n/doc-1.md", "plan", true), "plan.md");
+        assert_eq!(keep_note_extension("/n/doc-1.md", " plan ", true), "plan.md");
+        assert_eq!(keep_note_extension("/n/doc-1.md", "plan.txt", true), "plan.txt");
+        assert_eq!(keep_note_extension("/n/doc-1.md", "", true), "");
+        assert_eq!(keep_note_extension("/n/doc-1.md", "v1.2 notes", true), "v1.2 notes.md");
+        // Folders and extensionless files rename as typed.
+        assert_eq!(keep_note_extension("/n/projects", "work", false), "work");
+        assert_eq!(keep_note_extension("/n/Makefile", "Build", true), "Build");
+    }
 
     #[test]
     fn image_link_at_finds_the_link_under_the_cursor() {

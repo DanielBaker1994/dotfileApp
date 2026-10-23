@@ -377,13 +377,20 @@ pub mod appkit {
                     record(0, 1, Some("key window has no first responder".into()));
                     return;
                 };
-                let sel = objc2::sel!(insertText:);
-                if !objc2_foundation::NSObjectProtocol::respondsToSelector(&*r, sel) {
+                let ns = NSString::from_str(text);
+                // `NSTextInputClient` views (SwiftTerm's terminal, so the nvim
+                // pane) only take the two-argument form; their one-argument
+                // `insertText:` is NSResponder's and the text was dropped.
+                let client = objc2::sel!(insertText:replacementRange:);
+                if objc2_foundation::NSObjectProtocol::respondsToSelector(&*r, client) {
+                    let none = objc2_foundation::NSRange::new(objc2_foundation::NSNotFound as usize, 0);
+                    let _: () = unsafe { objc2::msg_send![&*r, insertText: &*ns, replacementRange: none] };
+                } else if objc2_foundation::NSObjectProtocol::respondsToSelector(&*r, objc2::sel!(insertText:)) {
+                    let _: () = unsafe { objc2::msg_send![&*r, insertText: &*ns] };
+                } else {
                     record(0, 1, Some("first responder does not accept text".into()));
                     return;
                 }
-                let ns = NSString::from_str(text);
-                let _: () = unsafe { objc2::msg_send![&*r, insertText: &*ns] };
                 record(text.chars().count() as u64, 0, None);
             }
             InputCmd::Click { x, y, count, right } => {

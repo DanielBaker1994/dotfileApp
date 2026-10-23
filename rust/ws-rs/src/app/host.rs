@@ -2921,10 +2921,14 @@ impl SwitcherController {
                 },
                 None => self.current(),
             };
-            // Always present: the capture needs the shared window on screen with
-            // a live window number, and `open` is what a `do:open:<view>` would do.
+            // Present unless the view is already up: the capture needs the shared
+            // window on screen with a live window number, and `open` is what a
+            // `do:open:<view>` would do. Re-presenting a showing view put the
+            // keyboard back on its first pane, so a capture moved focus.
             let view = target.unwrap_or(SlotView::Notes);
-            self.open(view);
+            if !(self.is_visible() && self.current() == Some(view)) {
+                self.open(view);
+            }
             // The `Present` command is drained before this `run_on_main` job, so
             // the member's `wid` is set by the time the closure runs.
             let inner = self.inner.clone();
@@ -4468,6 +4472,10 @@ mod daemon_ui {
         pinch_acc: Cell<f64>,
         /// Last `checktime` poll of the notes vim pane (Swift's note watcher).
         last_vim_check: Cell<f64>,
+        /// Last poll of the Files folder's modification time, and the
+        /// `(cwd, mtime)` it saw (an outside change re-lists the folder).
+        last_files_check: Cell<f64>,
+        files_dir_stamp: RefCell<Option<(String, std::time::SystemTime)>>,
         /// When the notes vim pane last relaunched (`:q`) — the
         /// `TerminalAutoRestart` reclaim window.
         last_vim_relaunch: Cell<f64>,
@@ -4577,6 +4585,8 @@ mod daemon_ui {
             pinch_monitor: RefCell::new(None),
             pinch_acc: Cell::new(0.0),
             last_vim_check: Cell::new(0.0),
+            last_files_check: Cell::new(0.0),
+            files_dir_stamp: RefCell::new(None),
             last_vim_relaunch: Cell::new(0.0),
             focus_watch: RefCell::new(super::FocusWatch::default()),
             bridge_path,
@@ -4749,6 +4759,7 @@ mod daemon_ui {
         fn apply_pending(&self) {
             // `onVimExit`: `:q` / a crash rebuilds the pane on the same note.
             self.poll_notes_vim();
+            self.poll_files_dir();
             // UI commands first, then the settling syncs, then the blocking
             // `do:` jobs: a `do:` caller waits on a main-queue job and must see
             // the window it just asked for (`views.*` / `windows`).
@@ -5062,6 +5073,44 @@ mod daemon_ui {
                     st.window.makeKeyAndOrderFront(None);
                 }
                 controller.log(&format!("aerospace focused our window {wid} — self-activated"));
+            }
+        }
+
+        /// Once a second while Files shows a folder: when its modification
+        /// time moved (a download, another app, the shell), re-list it — the
+        /// list had no watcher and stayed stale until you left the folder.
+        fn poll_files_dir(&self) {
+            if self.ivars().controller.current() != Some(SlotView::Files) {
+                return;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if now - self.ivars().last_files_check.get() < 1.0 {
+                return;
+            }
+            self.ivars().last_files_check.set(now);
+            let changed = {
+                let state = self.ivars().state.borrow();
+                let Some(st) = state.as_ref() else { return };
+                let Some(b) = st.files.as_ref() else { return };
+                // Never re-list under an inline rename.
+                if !st.window.isVisible()
+                    || b.rename.is_some()
+                    || b.rename_editor.is_some()
+                    || crate::ui::inline_rename::active()
+                {
+                    return;
+                }
+                let Some(stamp) = b.dir_stamp() else { return };
+                let mut last = self.ivars().files_dir_stamp.borrow_mut();
+                let changed = last.as_ref().is_some_and(|(cwd, t)| *cwd == b.cwd && *t != stamp);
+                *last = Some((b.cwd.clone(), stamp));
+                changed
+            };
+            if changed {
+                self.files_surface(|b| b.refresh_from_disk());
             }
         }
 

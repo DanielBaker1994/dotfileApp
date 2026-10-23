@@ -230,20 +230,30 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// `shortDate(_:)`: `"MMM d HH:mm"` this year, else `"MMM d yyyy"`.
+/// `shortDate(_:)`: `"MMM d HH:mm"` this year, else `"MMM d yyyy"`, in the
+/// Mac's local time zone (like `DateFormatter`; it used to print UTC).
 pub fn short_date(epoch: f64, now: f64) -> String {
     if epoch <= 0.0 {
         return String::new();
     }
-    let (y, m, d, hh, mm) = civil_from_epoch(epoch);
-    let now_year = if now > 0.0 { civil_from_epoch(now).0 } else { y };
-    if y == now_year {
+    let local = |t: f64| {
+        let d = crate::engines::screenshot_annotations::ShotDate::from_unix_local(t.floor() as i64);
+        (d.year, d.month as i64, d.day as i64, d.hour as i64, d.minute as i64)
+    };
+    let now_year = if now > 0.0 { Some(local(now).0) } else { None };
+    short_date_fields(local(epoch), now_year)
+}
+
+/// The `short_date` text for calendar fields `(y, m, d, hh, mm)`.
+fn short_date_fields((y, m, d, hh, mm): (i64, i64, i64, i64, i64), now_year: Option<i64>) -> String {
+    if y == now_year.unwrap_or(y) {
         format!("{} {} {:02}:{:02}", MONTHS[(m - 1) as usize], d, hh, mm)
     } else {
         format!("{} {} {}", MONTHS[(m - 1) as usize], d, y)
     }
 }
 
+#[cfg(test)]
 fn civil_from_epoch(epoch: f64) -> (i64, i64, i64, i64, i64) {
     let secs = epoch.floor() as i64;
     let days = secs.div_euclid(86400);
@@ -1050,8 +1060,17 @@ pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_
     e
 }
 
+/// Copy Contents refuses files larger than this: the read runs on the main
+/// thread, and the pasteboard silently drops huge strings (a 286 MB log
+/// toasted "Copied" and left the clipboard empty).
+pub const COPY_CONTENTS_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The file's text as UTF-8, or why it can't be copied as text.
 pub fn file_text_contents(path: &str) -> Result<String, String> {
+    let len = std::fs::metadata(path).map_err(|e| format!("Can't read {path}: {e}"))?.len();
+    if len > COPY_CONTENTS_MAX_BYTES {
+        return Err(format!("Too large to copy as text ({})", human_size(len as i64)));
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("Can't read {path}: {e}"))?;
     String::from_utf8(bytes).map_err(|_| "Not a text file".to_string())
 }
@@ -1066,10 +1085,13 @@ pub fn copy_contents_entry(path: &str) -> Option<crate::ui::menu_kit::MenuEntry>
     Some(crate::ui::menu_kit::MenuEntry::item("Copy Contents", move || {
         match file_text_contents(&p) {
             Ok(text) => {
-                crate::platform::set_text(&text);
                 let home = std::env::var("HOME").unwrap_or_default();
                 let name = crate::views::notes::tilde_path(&p, &home);
-                crate::ui::toast::show(&format!("Copied contents of {name}"), "doc.on.clipboard");
+                if crate::platform::set_text(&text) {
+                    crate::ui::toast::show(&format!("Copied contents of {name}"), "doc.on.clipboard");
+                } else {
+                    crate::ui::toast::show(&format!("Couldn't copy the contents of {name}"), "exclamationmark.triangle.fill");
+                }
             }
             Err(e) => crate::ui::toast::show(&e, "exclamationmark.triangle.fill"),
         }
@@ -1944,6 +1966,29 @@ impl FileBrowser {
         self.set_all(entries);
     }
 
+    /// The current folder's modification time (`None` on Recent / Arrived).
+    /// It moves when anything adds, removes or renames an entry in it.
+    pub fn dir_stamp(&self) -> Option<std::time::SystemTime> {
+        if self.virtual_index.is_some() {
+            return None;
+        }
+        std::fs::metadata(&self.cwd).and_then(|m| m.modified()).ok()
+    }
+
+    /// Re-list the folder after an outside change, keeping the selected and
+    /// marked rows by path (the list used to stay stale until you left it).
+    pub fn refresh_from_disk(&mut self) {
+        let sel = self.list.rows.get(self.list.selection).map(|e| e.path.clone());
+        let marked: Vec<String> =
+            self.list.marked.iter().filter_map(|&i| self.list.rows.get(i).map(|e| e.path.clone())).collect();
+        self.reload();
+        if let Some(i) = sel.and_then(|p| self.list.rows.iter().position(|e| e.path == p)) {
+            self.list.selection = i;
+        }
+        self.list.marked =
+            self.list.rows.iter().enumerate().filter(|(_, e)| marked.contains(&e.path)).map(|(i, _)| i).collect();
+    }
+
     /// `refilter()` for All / Local / Terminal / Dir / Recursive (the live
     /// app's search scheduling is out of scope — the walk runs inline).
     pub fn refilter(&mut self) {
@@ -2638,6 +2683,28 @@ mod tests {
     }
 
     #[test]
+    fn refresh_from_disk_lists_outside_changes_and_keeps_the_selection() {
+        let dir = std::env::temp_dir().join(format!("ks-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        std::fs::write(dir.join("d.txt"), "d").unwrap();
+        let mut b = FileBrowser::new(&dir.to_string_lossy());
+        b.sort_key = SortKey::Name;
+        b.reload();
+        let at = |b: &FileBrowser, n: &str| b.list.rows.iter().position(|e| e.name == n).unwrap();
+        b.list.selection = at(&b, "d.txt");
+        assert!(b.dir_stamp().is_some());
+        // Something else drops a file in: a plain reload keeps the stale index,
+        // the refresh shows the file and keeps d.txt selected.
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        b.refresh_from_disk();
+        assert!(b.list.rows.iter().any(|e| e.name == "a.txt"));
+        assert_eq!(b.list.rows[b.list.selection].name, "d.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_text_contents_reads_text_and_refuses_binary() {
         let dir = std::env::temp_dir().join(format!("ks-contents-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2647,6 +2714,10 @@ mod tests {
         let bin = dir.join("b.bin");
         std::fs::write(&bin, [0xff, 0xfe, 0x00, 0x80]).unwrap();
         assert_eq!(file_text_contents(&bin.to_string_lossy()).unwrap_err(), "Not a text file");
+        let big = dir.join("big.log");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(COPY_CONTENTS_MAX_BYTES + 1).unwrap();
+        assert!(file_text_contents(&big.to_string_lossy()).unwrap_err().starts_with("Too large to copy as text ("));
         assert!(copy_contents_entry(&dir.to_string_lossy()).is_none());
         assert!(copy_contents_entry(&md.to_string_lossy()).is_some());
         let _ = std::fs::remove_dir_all(&dir);
@@ -3043,12 +3114,21 @@ mod tests {
     fn short_date_and_ago() {
         assert_eq!(short_date(0.0, 0.0), "");
         // 2021-01-02 03:04 UTC
-        let s = short_date(1609556640.0, 1609556640.0);
+        let s = short_date_fields(civil_from_epoch(1609556640.0), Some(2021));
         assert_eq!(s, "Jan 2 03:04");
+        assert_eq!(short_date_fields(civil_from_epoch(1609556640.0), Some(2022)), "Jan 2 2021");
         assert_eq!(ago(0.0), "just now");
         assert_eq!(ago(120.0), "2m ago");
         assert_eq!(ago(7200.0), "2h ago");
         assert_eq!(ago(172800.0), "2d ago");
+    }
+
+    #[test]
+    fn short_date_is_local_time_not_utc() {
+        // The wall clock `localtime_r` gives for the instant, whatever the zone.
+        let t = 1609556640.0;
+        let d = crate::engines::screenshot_annotations::ShotDate::from_unix_local(t as i64);
+        assert_eq!(short_date(t, t), format!("{} {} {:02}:{:02}", MONTHS[d.month as usize - 1], d.day, d.hour, d.minute));
     }
 
     #[test]

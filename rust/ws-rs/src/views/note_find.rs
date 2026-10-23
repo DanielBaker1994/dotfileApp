@@ -287,8 +287,10 @@ impl NoteFindUi {
         );
         self.empty.setStringValue(&NSString::from_str(&note));
         self.empty.setHidden(n > 0 || note.is_empty());
+        // The panel root is flipped: the note sits in the first row slot, under
+        // the search field (it was drawn over the typed query).
         self.empty.setFrame(NSRect::new(
-            NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
+            NSPoint::new(18.0, crate::ui::list_panel::SEARCH_H + 7.0),
             NSSize::new(self.cfg.width - 36.0, 16.0),
         ));
     }
@@ -600,7 +602,7 @@ impl SidebarJumpUi {
         self.empty.setStringValue(&NSString::from_str(&note));
         self.empty.setHidden(n > 0);
         self.empty.setFrame(NSRect::new(
-            NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
+            NSPoint::new(18.0, crate::ui::list_panel::SEARCH_H + 7.0),
             NSSize::new(self.cfg.width - 36.0, 16.0),
         ));
     }
@@ -801,7 +803,7 @@ impl PaneFindUi {
         self.empty.setStringValue(&NSString::from_str(&note));
         self.empty.setHidden(n > 0);
         self.empty.setFrame(NSRect::new(
-            NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
+            NSPoint::new(18.0, crate::ui::list_panel::SEARCH_H + 7.0),
             NSSize::new(self.cfg.width - 36.0, 16.0),
         ));
     }
