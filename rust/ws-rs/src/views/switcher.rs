@@ -318,7 +318,9 @@ impl ViewSwitcherPanel {
     /// Return: the selected row's nav id (the filtered list's selection
     /// index); `None` while the cursor is on the link group.
     pub fn accept(&self) -> Option<i64> {
-        if self.link_cursor.is_some() && !self.command_mode() {
+        // `/` mode picks a command, never a view: "/" fuzzy-matched Files'
+        // "~/files" and opened it.
+        if self.command_mode() || self.link_cursor.is_some() {
             return None;
         }
         let idx = self.filter(&self.live_query());
@@ -2321,6 +2323,9 @@ mod tests {
         assert!(p.command_mode());
         p.current_query = "files".into();
         assert!(!p.command_mode());
+        // Return in `/` mode never picks a view ("/" matched Files' "~/src").
+        p.current_query = "/".into();
+        assert_eq!(p.accept(), None);
     }
 
     fn commands() -> Vec<(String, String)> {

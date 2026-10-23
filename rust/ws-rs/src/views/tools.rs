@@ -653,6 +653,9 @@ pub struct ToolPanel {
     /// Prettyprint: the debounce (last editor text + when it settled).
     pp_last_seen: String,
     pp_last_change: Option<std::time::Instant>,
+    /// Prettyprint: the text the last reformat replaced. Cmd+Z back to it
+    /// stays as typed (the debounce used to reformat it again at once).
+    pp_replaced: Option<String>,
     pp_status: Option<(String, bool)>,
     /// Prettyprint: the text last colored (the highlight pass's guard).
     #[cfg(target_os = "macos")]
@@ -736,6 +739,7 @@ impl ToolPanel {
             fmt_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pp_last_seen: String::new(),
             pp_last_change: None,
+            pp_replaced: None,
             pp_status: None,
             #[cfg(target_os = "macos")]
             pp_highlighted: String::new(),
@@ -1824,6 +1828,8 @@ impl ToolPanel {
                 let text = NSTextView::new(mtm);
                 text.setEditable(self.kind == ToolKind::PrettyPrint);
                 text.setSelectable(true);
+                // Cmd+Z in the prettyprint editor (typing and the reformat).
+                text.setAllowsUndo(self.kind == ToolKind::PrettyPrint);
                 // Rich text: the health panel paints ANSI runs, the prettyprint
                 // editor paints JSON/XML token colors — both live in the text
                 // storage's attributes.
@@ -2102,7 +2108,9 @@ impl ToolPanel {
                         && !raw.trim().is_empty()
                     {
                         self.pp_last_change = None;
-                        self.format_prettyprint();
+                        if self.pp_replaced.as_deref() != Some(raw.as_str()) {
+                            self.format_prettyprint();
+                        }
                     }
                 }
                 // Apply a completed format.
@@ -2111,7 +2119,16 @@ impl ToolPanel {
                     Some(Ok(Some(formatted))) => {
                         if let Some(editor) = &self.editor {
                             if editor.string().to_string() != formatted {
-                                editor.setString(&objc2_foundation::NSString::from_str(&formatted));
+                                // An undoable replace: Cmd+Z brings back what
+                                // was typed (jq drops duplicate keys, reorders).
+                                self.pp_last_seen = formatted.clone();
+                                self.pp_replaced = Some(editor.string().to_string());
+                                let ns = objc2_foundation::NSString::from_str(&formatted);
+                                let all = objc2_foundation::NSRange::new(0, editor.string().length());
+                                if editor.shouldChangeTextInRange_replacementString(all, Some(&ns)) {
+                                    editor.replaceCharactersInRange_withString(all, &ns);
+                                    editor.didChangeText();
+                                }
                             }
                             // Track what the editor actually holds so the
                             // debounce never sees this write as a fresh edit.

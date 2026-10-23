@@ -760,7 +760,7 @@ window-title = "ws-settings"
 undo-limit = 20
 
 # The link bank (PLAN-link-bank.md): herdr's workspaces as a group
-# pinned on top of Ctrl+B W. Return on the header raises Ghostty as it is;
+# listed below the views in Ctrl+B W. Return on the header raises Ghostty as it is;
 # → / l lists the workspaces, Return on one runs `herdr-pick go-id`, which
 # raises Ghostty through AeroSpace; herdr-pick reads our places over the
 # socket (`links` / `do:go:<id>`) for its own prefix+w.
@@ -777,7 +777,7 @@ launch = "open -a Ghostty"
 # Ctrl+B Shift+L: back to the terminal space you came from (herdr's prefix+L
 # history, shared through AeroSpace's focus hook).
 last = "~/.dotfiles/herdr/plugins/last/last.sh from-ks"
-# The group is pinned on top; open with the cursor on it so Ctrl+B W, Return
+# The group sits below the views; open with the cursor on it so Ctrl+B W, Return
 # jumps straight to Ghostty (false = start on the first view).
 start-on-group = true
 # The group opens with its spaces listed (false = collapsed until → / l).

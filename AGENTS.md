@@ -398,7 +398,7 @@ never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
 Ctrl+B is a 1.5 s prefix: L = previous view, Shift+L = the last terminal
 space (`[links] last` → herdr's `last.sh from-ks`; prefix+L in herdr comes
 back here through the shared places history), W = view switcher (herdr's
-workspaces pinned on top, open by default — `[links]`, `views/switcher.rs`;
+workspaces listed below the views, open by default — `[links]`, `views/switcher.rs`;
 typing a `[links] names` word keeps the group; Ctrl+K jumps there, Return
 runs `herdr-pick go-id`), T =
 terminal/prose, B = sidebar rail (every `SidebarView` pane: notes, files,

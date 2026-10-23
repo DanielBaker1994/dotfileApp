@@ -26,6 +26,21 @@ pub fn row_rect(i: usize, row_h: f64, width: f64) -> Rect {
     Rect::new(0.0, i as f64 * row_h, width, row_h)
 }
 
+/// The first row to draw so `selection` stays in a window of `visible` rows
+/// (scrolling as little as possible from `top`). The panel caps its height
+/// at a row limit; past it the selection used to move off the bottom unseen.
+pub fn scroll_top(top: usize, selection: usize, visible: usize, count: usize) -> usize {
+    let visible = visible.max(1);
+    let top = if selection < top {
+        selection
+    } else if selection >= top + visible {
+        selection + 1 - visible
+    } else {
+        top
+    };
+    top.min(count.saturating_sub(visible))
+}
+
 #[cfg(target_os = "macos")]
 pub use appkit::{ListPanel, ListRows};
 
@@ -52,6 +67,8 @@ mod appkit {
         drawer: RefCell<Option<Drawer>>,
         on_click: RefCell<Option<Box<dyn Fn(usize, f64, bool)>>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+        /// The first row drawn ([`scroll_top`]).
+        top: Cell<usize>,
     }
 
     define_class!(
@@ -100,11 +117,18 @@ mod appkit {
                 let rh = self.ivars().row_h.get();
                 let sel = self.ivars().selection.get();
                 let hov = self.ivars().hover.get();
+                let top = self.ivars().top.get();
                 if let Some(d) = self.ivars().drawer.borrow().as_ref() {
-                    for i in 0..self.ivars().count.get() {
-                        d(row_rect(i, rh, w), i, i == sel, hov == Some(i));
+                    for i in top..self.ivars().count.get() {
+                        d(row_rect(i - top, rh, w), i, i == sel, hov == Some(i));
                     }
                 }
+            }
+
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.reveal_selection();
             }
         }
 
@@ -119,7 +143,20 @@ mod appkit {
 
         fn row_at(&self, y: f64) -> Option<usize> {
             let i = (y / self.ivars().row_h.get()).floor();
-            (i >= 0.0 && (i as usize) < self.ivars().count.get()).then_some(i as usize)
+            let i = (i >= 0.0).then_some(i as usize + self.ivars().top.get())?;
+            (i < self.ivars().count.get()).then_some(i)
+        }
+
+        /// Scroll so the selection is drawn (rows that fit the current height).
+        fn reveal_selection(&self) {
+            let rh = self.ivars().row_h.get();
+            let visible = if rh > 0.0 { (self.bounds().size.height / rh).floor() as usize } else { 1 };
+            let count = self.ivars().count.get();
+            let top = scroll_top(self.ivars().top.get(), self.ivars().selection.get(), visible, count);
+            if top != self.ivars().top.get() {
+                self.ivars().top.set(top);
+                self.setNeedsDisplay(true);
+            }
         }
     }
 
@@ -128,6 +165,7 @@ mod appkit {
         pub fn set_count(&self, count: usize, selection: usize) {
             self.ivars().count.set(count);
             self.ivars().selection.set(selection);
+            self.reveal_selection();
             self.setNeedsDisplay(true);
         }
     }
@@ -179,6 +217,7 @@ mod appkit {
                 drawer: RefCell::new(None),
                 on_click: RefCell::new(None),
                 tracking: RefCell::new(None),
+                top: Cell::new(0),
             });
             let rows: Retained<ListRows> = unsafe {
                 msg_send![super(rows), initWithFrame: NSRect::new(NSPoint::new(0.0, SEARCH_H), NSSize::new(width, row_h))]
@@ -207,8 +246,7 @@ mod appkit {
 
         /// New rows / selection; the caller resizes the window to `height()`.
         pub fn set_rows(&self, count: usize, selection: usize) {
-            self.rows.ivars().count.set(count);
-            self.rows.ivars().selection.set(selection);
+            self.rows.set_count(count, selection);
             self.rows.setNeedsDisplay(true);
         }
 
@@ -221,6 +259,18 @@ mod appkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_top_keeps_the_selection_in_view() {
+        // 15 rows, 12 fit: moving down past the 12th scrolls one row at a time.
+        assert_eq!(scroll_top(0, 11, 12, 15), 0);
+        assert_eq!(scroll_top(0, 12, 12, 15), 1);
+        assert_eq!(scroll_top(1, 14, 12, 15), 3);
+        // Back up above the window, and a shrunk list never leaves a gap.
+        assert_eq!(scroll_top(3, 2, 12, 15), 2);
+        assert_eq!(scroll_top(3, 3, 12, 5), 0);
+        assert_eq!(scroll_top(0, 0, 0, 0), 0);
+    }
 
     #[test]
     fn height_clamps_rows() {

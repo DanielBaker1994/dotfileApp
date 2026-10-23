@@ -5469,7 +5469,11 @@ mod daemon_ui {
                 })
                 .collect();
             panel.set_icons(icons);
-            panel.set_commands(Vec::new());
+            // `/` lists every palette command (`in-palette`), not just the
+            // Hyper+S `[app] palette` rows.
+            panel.set_commands(
+                controller.registry().palette_commands().iter().map(|c| (c.id.clone(), c.title.clone())).collect(),
+            );
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -6523,6 +6527,11 @@ mod daemon_ui {
                             } else if code == popup::KEY_TAB {
                                 sw.move_selection(if shift { -1 } else { 1 });
                                 Out::Link(None)
+                            } else if (code == popup::KEY_RETURN || code == 76) && sw.command_mode() {
+                                // `/` mode: the search field's Return runs the
+                                // command under the list cursor (consuming it
+                                // here made `/pretty` + Return do nothing).
+                                Out::NotHandled
                             } else if code == popup::KEY_RETURN || code == 76 {
                                 match sw.link_action() {
                                     Some(pick) => Out::Link(Some(pick)),
