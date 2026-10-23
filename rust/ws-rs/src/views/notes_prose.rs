@@ -425,17 +425,27 @@ mod appkit {
         /// `exportPDF()` — `prose.pdf_export` off the main thread, then copy
         /// the PDF path and toast it.
         pub fn export_pdf(&self, cfg: &NotesConfig, copy_toast: &str) {
-            export_pdf_and_copy(self.last_path.clone(), cfg.clone(), self.colors, copy_toast);
+            export_pdf_and_copy(self.last_path.clone(), cfg.clone(), self.colors, copy_toast, ExportCopy::Pdf);
         }
     }
 
-    /// Export `note` to PDF off the main thread, copy the PDF's absolute path
-    /// and toast it. Shared by Cmd+P and the right-click "Copy PDF Path".
+    /// Which of the export's files ([`export_pdf_and_copy`] writes all three)
+    /// lands on the clipboard.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum ExportCopy {
+        Pdf,
+        Html,
+        Png,
+    }
+
+    /// Export `note` off the main thread (`<note>.pdf`, `.html` and `.png`),
+    /// copy the chosen file's absolute path and toast it. Shared by Cmd+P and
+    /// the right-click "Copy PDF / HTML / PNG Path".
     ///
     /// The `EXPORTING` latch is reset on every path that armed it: a worker
     /// panic is caught and reported like a failed export, so one bad render
     /// cannot wedge every later attempt in this process (PLAN-prose-popout H3).
-    pub fn export_pdf_and_copy(note: String, cfg: NotesConfig, colors: PopupColors, copy_toast: &str) {
+    pub fn export_pdf_and_copy(note: String, cfg: NotesConfig, colors: PopupColors, copy_toast: &str, which: ExportCopy) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static EXPORTING: AtomicBool = AtomicBool::new(false);
         if note.is_empty() || EXPORTING.swap(true, Ordering::SeqCst) {
@@ -453,6 +463,8 @@ mod appkit {
                 ok: false,
                 out: None,
                 error: Some("pdf export panicked".to_string()),
+                html: None,
+                png: None,
             });
             crate::app::logging::ws_log(&format!(
                 "prose pdf: result ok={} out={:?} err={:?}",
@@ -460,11 +472,20 @@ mod appkit {
             ));
             crate::platform::run_on_main(move || {
                 EXPORTING.store(false, Ordering::SeqCst);
-                match (r.ok, r.out) {
+                let (kind, path) = match which {
+                    ExportCopy::Pdf => ("PDF", r.out),
+                    ExportCopy::Html => ("HTML", r.html),
+                    ExportCopy::Png => ("PNG", r.png),
+                };
+                match (r.ok, path) {
                     (true, Some(out)) => {
                         let _ = crate::platform::set_text(&out);
                         crate::ui::toast::show(&fmt.replace("{}", &tilde(&out)), "doc.richtext");
                     }
+                    (true, None) => crate::ui::toast::show(
+                        &format!("{kind} not created (PNG needs poppler: brew install poppler)"),
+                        "exclamationmark.triangle.fill",
+                    ),
                     _ => crate::ui::toast::show(
                         r.error.as_deref().unwrap_or("pdf export failed"),
                         "exclamationmark.triangle.fill",
@@ -517,11 +538,16 @@ mod appkit {
                         crate::ui::toast::show(&format!("Copied {}", tilde(&n)), "doc.on.clipboard");
                     })
                 }
-                NoteMenuRow::CopyPdfPath => {
+                NoteMenuRow::CopyPdfPath | NoteMenuRow::CopyHtmlPath | NoteMenuRow::CopyPngPath => {
                     let n = note.to_string();
+                    let which = match row {
+                        NoteMenuRow::CopyHtmlPath => ExportCopy::Html,
+                        NoteMenuRow::CopyPngPath => ExportCopy::Png,
+                        _ => ExportCopy::Pdf,
+                    };
                     MenuEntry::item(row.label(), move || {
-                        crate::app::logging::ws_log("prose menu: picked copy pdf path");
-                        export_pdf_and_copy(n, NotesConfig::load(), colors, "");
+                        crate::app::logging::ws_log(&format!("prose menu: picked copy {which:?} path"));
+                        export_pdf_and_copy(n, NotesConfig::load(), colors, "", which);
                     })
                 }
                 _ => unreachable!("prose_menu_rows yields only copy rows"),

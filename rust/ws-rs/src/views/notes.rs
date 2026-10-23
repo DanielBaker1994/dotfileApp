@@ -60,6 +60,8 @@ pub enum NoteMenuRow {
     CopyImage,
     RevealInFiles,
     CopyPdfPath,
+    CopyHtmlPath,
+    CopyPngPath,
     OpenFilePath,
 }
 
@@ -72,6 +74,8 @@ impl NoteMenuRow {
             NoteMenuRow::CopyImage => "Copy Image",
             NoteMenuRow::RevealInFiles => "Reveal in Files",
             NoteMenuRow::CopyPdfPath => "Copy PDF Path",
+            NoteMenuRow::CopyHtmlPath => "Copy HTML Path",
+            NoteMenuRow::CopyPngPath => "Copy PNG Path",
             NoteMenuRow::OpenFilePath => "Open file at path…",
         }
     }
@@ -96,6 +100,8 @@ pub const NOTE_MENU_ORDER: &[NoteMenuRow] = &[
     NoteMenuRow::CopyImage,
     NoteMenuRow::RevealInFiles,
     NoteMenuRow::CopyPdfPath,
+    NoteMenuRow::CopyHtmlPath,
+    NoteMenuRow::CopyPngPath,
     NoteMenuRow::OpenFilePath,
 ];
 
@@ -108,7 +114,15 @@ pub fn prose_menu_rows() -> Vec<NoteMenuRow> {
         .iter()
         .copied()
         .filter(|r| !r.process_dependent())
-        .filter(|r| matches!(r, NoteMenuRow::CopyAbsolutePath | NoteMenuRow::CopyPdfPath))
+        .filter(|r| {
+            matches!(
+                r,
+                NoteMenuRow::CopyAbsolutePath
+                    | NoteMenuRow::CopyPdfPath
+                    | NoteMenuRow::CopyHtmlPath
+                    | NoteMenuRow::CopyPngPath
+            )
+        })
         .collect()
 }
 
@@ -937,6 +951,10 @@ pub struct PdfExport {
     pub ok: bool,
     pub out: Option<String>,
     pub error: Option<String>,
+    /// The `<note>.html` / `<note>.png` written beside the PDF (`None` when
+    /// that file could not be made, e.g. poppler missing for the PNG).
+    pub html: Option<String>,
+    pub png: Option<String>,
 }
 
 pub struct ProseRender;
@@ -1265,6 +1283,8 @@ impl ProseRender {
                 ok: false,
                 out: None,
                 error: Some("pdf export failed (python helper)".to_string()),
+                html: None,
+                png: None,
             };
         };
         if let Some(out) = v.get("out").and_then(Value::as_str) {
@@ -1272,6 +1292,8 @@ impl ProseRender {
                 ok: true,
                 out: Some(out.to_string()),
                 error: None,
+                html: v.get("html").and_then(Value::as_str).map(str::to_string),
+                png: v.get("png").and_then(Value::as_str).map(str::to_string),
             }
         } else {
             PdfExport {
@@ -1282,6 +1304,8 @@ impl ProseRender {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .or_else(|| Some("pdf export failed".to_string())),
+                html: None,
+                png: None,
             }
         }
     }
@@ -6646,14 +6670,19 @@ mod tests {
     }
 
     #[test]
-    fn prose_menu_rows_are_the_two_copy_rows() {
+    fn prose_menu_rows_are_the_copy_rows() {
         let rows = prose_menu_rows();
         assert_eq!(
             rows,
-            vec![NoteMenuRow::CopyAbsolutePath, NoteMenuRow::CopyPdfPath]
+            vec![
+                NoteMenuRow::CopyAbsolutePath,
+                NoteMenuRow::CopyPdfPath,
+                NoteMenuRow::CopyHtmlPath,
+                NoteMenuRow::CopyPngPath
+            ]
         );
         let labels: Vec<&str> = rows.iter().map(|r| r.label()).collect();
-        assert_eq!(labels, vec!["Copy Absolute Path", "Copy PDF Path"]);
+        assert_eq!(labels, vec!["Copy Absolute Path", "Copy PDF Path", "Copy HTML Path", "Copy PNG Path"]);
     }
 
     #[test]
@@ -6675,7 +6704,7 @@ mod tests {
         assert!(pos(NoteMenuRow::RevealInFiles) > pos(NoteMenuRow::CopyImage));
         // Every variant appears once, with a non-empty, unique label.
         let labels: Vec<&str> = NOTE_MENU_ORDER.iter().map(|r| r.label()).collect();
-        assert_eq!(labels.len(), 6);
+        assert_eq!(labels.len(), 8);
         assert!(labels.iter().all(|l| !l.is_empty()));
         let uniq: HashSet<&str> = labels.iter().copied().collect();
         assert_eq!(uniq.len(), labels.len());
