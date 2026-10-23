@@ -1387,7 +1387,9 @@ pub fn config_value_problem(section: &str, key: &str, value: &str) -> Option<Str
             ));
         }
     }
-    if key == "palette" && parse_palette(Some(value)).is_none() {
+    // `[app] palette` is the Hyper+S command id list (unknown ids are skipped
+    // when the palette opens); every other section's `palette` is colors.
+    if key == "palette" && section != "app" && parse_palette(Some(value)).is_none() {
         return Some("expected 5 hex colors: accent2, success, warning, danger, info".to_string());
     }
     if CONFIG_COLOR_KEYS.contains(&key) && hex_color(value).is_none() {
@@ -2004,11 +2006,12 @@ mod tests {
             Some("'nope' is not a hex color (RRGGBB / AARRGGBB)")
         );
         assert_eq!(config_value_problem("app", "preview-border", "#dde1e8"), None);
-        // palette
+        // palette: colors in a view section, command ids in [app]
         assert_eq!(
-            config_value_problem("app", "palette", "#111111").as_deref(),
+            config_value_problem("notes", "palette", "#111111").as_deref(),
             Some("expected 5 hex colors: accent2, success, warning, danger, info")
         );
+        assert_eq!(config_value_problem("app", "palette", "paths, filefast, text-table, prettyprint"), None);
         // enum
         assert_eq!(
             config_value_problem("app", "header-style", "bogus").as_deref(),
