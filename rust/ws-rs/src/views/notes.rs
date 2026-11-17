@@ -3992,8 +3992,6 @@ mod macos {
                 "findBar": self.find_shown,
                 "collapsed": self.model.sidebar.collapsed,
                 "tabs": self.model.tabs.titles(),
-                // The link bank's `note` rows (`links` socket verb).
-                "tabPaths": self.model.tabs.paths(),
                 "pinnedRoots": self.tree_model.roots,
                 "treeSelection": self.tree_model.selected,
                 "treeExpanded": self.tree_model.expanded,

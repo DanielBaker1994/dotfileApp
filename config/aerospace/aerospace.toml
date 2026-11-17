@@ -2,11 +2,9 @@ exec-on-workspace-change = [
   '/opt/homebrew/bin/bash', '-c', '~/.config/kitchen-sink/bin/no_stray_workspaces.sh &'
 ]
 
-# The focused window id for kitchen-sink, and kitchen-sink / Ghostty taking
-# focus for the shared prefix+L history (~/.dotfiles/herdr/plugins/last).
+# The focused window id for kitchen-sink.
 on-focus-changed = [
-  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"',
-  'exec-and-forget $HOME/.dotfiles/herdr/plugins/last/last.sh app-focus'
+  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"'
 ]
 
 config-version = 2

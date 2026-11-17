@@ -347,8 +347,7 @@ commands/windows (`[notes]`, `[files]`, … with `enabled = true`).
 per connection, served serially by `app/socket.rs`. Order: `ping` (no reply) →
 `state` → `do:ACTION` → raw verbs (`reload`/`restart` (JSON),
 `screenshot-permission` (`granted|denied`), `screenshot\t…`, `compare\t…`,
-`pane-shot\t…` — the last three answer later through a `socket::Reply`;
-`links` → the link bank's `links.v1` envelope, `PLAN-link-bank.md`) →
+`pane-shot\t…` — the last three answer later through a `socket::Reply`) →
 anything else is a launch/hotkey message. `state` returns one JSON line;
 `do:ACTION` executes, hops to main (flush), then returns the **same full state
 JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
@@ -395,12 +394,8 @@ The daemon UI installs one local `keyDown` monitor → `route_key_event`
 (Ctrl+B prefix, Ctrl+H/J/K/L pane moves, vim keys, overlays — palette,
 switcher, tool panels — Esc streak per `escCloseCount`/`esc-close` (0 =
 never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
-Ctrl+B is a 1.5 s prefix: L = previous view, Shift+L = the last terminal
-space (`[links] last` → herdr's `last.sh from-ks`; prefix+L in herdr comes
-back here through the shared places history), W = view switcher (herdr's
-workspaces listed below the views, open by default — `[links]`, `views/switcher.rs`;
-typing a `[links] names` word keeps the group; Ctrl+K jumps there, Return
-runs `herdr-pick go-id`), T =
+Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher
+(`views/switcher.rs`), T =
 terminal/prose, B = sidebar rail (every `SidebarView` pane: notes, files,
 jira, confluence, ai, compare; persisted per view as `sidebarRail.<view>`).
 `PaneNav` moves the focus ring between panes;

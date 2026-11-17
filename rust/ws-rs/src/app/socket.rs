@@ -40,8 +40,7 @@ const SEND_TIMEOUT_SECS: i64 = 5;
 const READ_MAX: usize = 2048;
 const LISTEN_BACKLOG: i32 = 64;
 
-const RAW_VERBS: [&str; 8] = [
-    "links",
+const RAW_VERBS: [&str; 7] = [
     "reload",
     "restart",
     "screenshot",
