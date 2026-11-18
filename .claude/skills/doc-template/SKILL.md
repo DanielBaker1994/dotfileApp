@@ -22,9 +22,8 @@ description: Start a polished, shareable document from the reusable professional
      example question rollback perf (the label is drawn by CSS). Badges:
      `<span class="badge ok|warn|bad|info|muted|accent">text</span>`.
    - Skeletons: snippets `markdown_doc_adr|postmortem|runbook|pr|status` (nvim `<leader>i`).
-4. Preview / export: in nvim, `<leader>mp` (`:Prose`) opens the live
-   reading view in the browser and `<leader>me` builds and opens the PDF; or from a
-   shell:
+4. Export: in nvim, `<leader>mdo` builds the PDF and opens the document; or
+   from a shell:
    ```bash
    pandoc -s -f gfm -t html5 --syntax-highlighting=tango -V lang=en \
      --metadata pagetitle="Title" \
@@ -35,7 +34,7 @@ description: Start a polished, shareable document from the reusable professional
    no heading stranded at a page bottom, no table or code block split.
 
 The CSS lives only in `~/.dotfiles/markdown_generator/friendly_document_styling.css`
-(shared by nvim's `:Prose` and `EXTERNAL_BUILD_AND_OPEN_PDF`). A new style = copy
-one `:root:has(.name) { … }` palette block there — `:ProseStyle` / `<leader>ms`
+(used by `EXTERNAL_BUILD_AND_OPEN_PDF`, nvim's `<leader>mdo`). A new style = copy
+one `:root:has(.name) { … }` palette block there — `:ProseStyle` / `<leader>mds`
 (the ◐ picker) reads the names from the stylesheet, nothing else to edit
 (optional snippet only).
