@@ -58,13 +58,13 @@ mkdir -p "$DIST"
 cp -p "$BIN" "$DIST/kitchen-sink"
 
 # Runtime assets the app resolves through Paths::asset_dir(): pylib/ is the
-# Python helper, vim/ the notes pane, jira//confluence//notify//settings_hub/
-# the Python CLIs, rules/ + config/ the seeded data.
-for d in pylib vim jira confluence notify settings_hub rules config; do
+# Python helper, jira//confluence//notify//settings_hub/ the Python CLIs,
+# rules/ + config/ the seeded data.
+for d in pylib jira confluence notify settings_hub rules config; do
     [ -d "$ROOT/$d" ] && cp -R "$ROOT/$d" "$DIST/$d"
 done
 for f in install.conf symlinks.sh UNINSTALL.sh app_icon.png jira_icon.png \
-         notes_icon.png confluence_icon.png; do
+         confluence_icon.png; do
     [ -f "$ROOT/$f" ] && cp -p "$ROOT/$f" "$DIST/$f"
 done
 

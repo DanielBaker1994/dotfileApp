@@ -1003,17 +1003,15 @@ pub struct FileMenuActions {
     pub trash: Option<FileMenuAction>,
     pub copy_file: Option<FileMenuAction>,
     pub copy_path: Option<FileMenuAction>,
-    pub open_in_notes: Option<FileMenuAction>,
 }
 
 /// THE rule-2 file context menu — one builder for the Files browser row menu,
 /// the terminal's selected-path menu and the "Find Recent Files" popup, so a
 /// right-click on a file reads the same everywhere. Canonical order:
 /// `Open / Reveal in Files / ── / Rename… / Compress / Move to Trash / ── /
-/// Copy File / Copy Absolute Path / Copy Contents / Open in Notes`. "Copy
+/// Copy File / Copy Absolute Path / Copy Contents`. "Copy
 /// Contents" (the file's text, like `cat | pbcopy`) rides on Copy Absolute
-/// Path and is skipped for a directory. "Open in Notes" is a
-/// file-only row (a directory has nothing to edit). Surfaces splice their
+/// Path and is skipped for a directory. Surfaces splice their
 /// extra rows (Quick Look, the Copy/Cut/Duplicate block, Compare) around the
 /// core; richer surface variants of a core row keep their own label and
 /// action and pass `None` here.
@@ -1041,11 +1039,6 @@ pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_
     if let Some(f) = a.copy_path {
         blocks[2].push(MenuEntry::item("Copy Absolute Path", f));
         blocks[2].extend(copy_contents_entry(path));
-    }
-    if !Path::new(path).is_dir() {
-        if let Some(f) = a.open_in_notes {
-            blocks[2].push(MenuEntry::item("Open in Notes", f));
-        }
     }
     let mut e: Vec<MenuEntry> = Vec::new();
     for block in blocks {
@@ -1086,7 +1079,7 @@ pub fn copy_contents_entry(path: &str) -> Option<crate::ui::menu_kit::MenuEntry>
         match file_text_contents(&p) {
             Ok(text) => {
                 let home = std::env::var("HOME").unwrap_or_default();
-                let name = crate::views::notes::tilde_path(&p, &home);
+                let name = crate::app::pathfmt::tilde_path(&p, &home);
                 if crate::platform::set_text(&text) {
                     crate::ui::toast::show(&format!("Copied contents of {name}"), "doc.on.clipboard");
                 } else {
@@ -2678,7 +2671,6 @@ mod tests {
             trash: Some(Box::new(|| {})),
             copy_file: Some(Box::new(|| {})),
             copy_path: Some(Box::new(|| {})),
-            open_in_notes: Some(Box::new(|| {})),
         }
     }
 
@@ -2747,14 +2739,13 @@ mod tests {
                 "Copy File",
                 "Copy Absolute Path",
                 "Copy Contents",
-                "Open in Notes",
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn file_context_menu_dir_drops_open_in_notes_only() {
+    fn file_context_menu_dir_drops_copy_contents_only() {
         let dir = std::env::temp_dir().join(format!("ks-menudir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2762,7 +2753,7 @@ mod tests {
             &dir.to_string_lossy(),
             all_menu_actions(),
         ));
-        // Only "Open in Notes" is dropped; the rest of the core — rename /
+        // Only "Copy Contents" is dropped; the rest of the core — rename /
         // compress / trash included — is a directory's too (Finder parity).
         assert_eq!(
             got,

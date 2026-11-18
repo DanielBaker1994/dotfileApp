@@ -53,82 +53,6 @@ fn main() {
             "config-check" => {
                 std::process::exit(config_check(&args[2..]));
             }
-            #[cfg(target_os = "macos")]
-            "prose" => {
-                configure_helper();
-                let opts = views::notes::ProseLaunchOptions::parse(&args[2..]);
-                // NSApplication exists before the window: the floating
-                // window needs its own run loop (mirrors `ProseProcess.run`'s
-                // standalone NSApplication), and its WKWebView + menu
-                // tracking want a live app object from creation onward
-                // (PLAN-prose-popout H2).
-                use objc2::MainThreadMarker;
-                use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-                let mtm = MainThreadMarker::new().expect("main thread");
-                let app = NSApplication::sharedApplication(mtm);
-                app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-                app::menu::install_main_menu(mtm, None);
-                if let Err(e) = views::notes::ProseProcess::run(&opts) {
-                    app::logging::ws_log(&format!("prose: {e}"));
-                    std::process::exit(2);
-                }
-                app.activate();
-                // One terse line per pop-out launch: the child has no other
-                // observable state (no socket), and a locked/unreachable
-                // window server fooled every external probe once
-                // (PLAN-prose-popout Step B).
-                {
-                    let wins = app.windows();
-                    let desc = wins
-                        .firstObject()
-                        .map(|w| {
-                            format!(
-                                "{:?} vis={} {:?}",
-                                w.title().to_string(),
-                                w.isVisible(),
-                                w.frame().size
-                            )
-                        })
-                        .unwrap_or_else(|| "none".to_string());
-                    app::logging::ws_log(&format!(
-                        "prose child: {} window(s): {desc}",
-                        wins.count()
-                    ));
-                }
-                // Closing the floating window ends this child, so the next
-                // pop-out click launches a fresh one (`launch` no-ops while a
-                // child for the note is still alive). The observer is scoped
-                // to the pop-out window itself: an unscoped one also fired
-                // when the right-click menu's tracking window closed, killing
-                // the child before the picked row ran (PLAN-prose-popout H1).
-                {
-                    use block2::RcBlock;
-                    use objc2::runtime::AnyObject;
-                    use objc2_app_kit::NSWindowWillCloseNotification;
-                    use objc2_foundation::{NSNotification, NSNotificationCenter};
-                    use std::ptr::NonNull;
-                    if let Some(win) = views::notes::ProseWindow::take_close_notifier() {
-                        let block = RcBlock::new(move |_n: NonNull<NSNotification>| {
-                            std::process::exit(0);
-                        });
-                        let center = NSNotificationCenter::defaultCenter();
-                        let target: &AnyObject = unsafe {
-                            &*(std::ptr::from_ref(&*win) as *const AnyObject)
-                        };
-                        let obs = unsafe {
-                            center.addObserverForName_object_queue_usingBlock(
-                                Some(NSWindowWillCloseNotification),
-                                Some(target),
-                                None,
-                                &block,
-                            )
-                        };
-                        std::mem::forget(obs);
-                    }
-                }
-                app.run();
-                return;
-            }
             _ => {}
         }
     }
@@ -400,7 +324,7 @@ fn config_check(argv: &[String]) -> i32 {
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
-    println!("usage: kitchen-sink [headless|window|notes|files|jira|confluence|ai|compare|terminal|ping|");
+    println!("usage: kitchen-sink [headless|window|files|jira|confluence|ai|compare|terminal|ping|");
     println!("                     config-check SECTION KEY VALUE | config-check --file PATH | config-schema]");
 }
 
@@ -430,7 +354,7 @@ mod tests {
         let enums = v["enumKeys"].as_object().expect("enumKeys");
         assert_eq!(
             enums["type"],
-            serde_json::json!(["files", "list", "note", "output", "shell"])
+            serde_json::json!(["files", "list", "output", "shell"])
         );
         assert_eq!(enums["header-style"].as_array().unwrap().len(), 7);
     }

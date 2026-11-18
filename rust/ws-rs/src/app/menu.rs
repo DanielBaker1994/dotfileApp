@@ -523,7 +523,7 @@ mod appkit {
     /// transient overlays (tool panels, Quick Look, sheets) close themselves.
     ///
     /// Only File ▸ "Reset Window Size" goes through `target`; the row (and its
-    /// separator) is omitted when `target` is `None` (the `prose` child).
+    /// separator) is omitted when `target` is `None`.
     pub fn install_main_menu(mtm: MainThreadMarker, target: Option<&MenuTarget>) {
         let app = NSApplication::sharedApplication(mtm);
         let main_menu = NSMenu::new(mtm);
@@ -549,7 +549,7 @@ mod appkit {
         // to the controller's close request (hide), and it lets transient
         // overlays (tool panels, Quick Look, sheets) close themselves instead
         // of hiding the window behind them. Only "Reset Window Size" needs the
-        // target; it is omitted for the target-less `prose` child.
+        // target; it is omitted when there is none.
         add_leaf(mtm, &file_menu, "Close Window", Some(sel!(performClose:)), "w");
         if let Some(target) = target {
             file_menu.addItem(&NSMenuItem::separatorItem(mtm));

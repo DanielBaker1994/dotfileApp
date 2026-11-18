@@ -291,7 +291,7 @@ pub enum PrefixOutcome {
     /// the tabs bar's nav keys have no Rust counterpart yet).
     Passthrough,
     /// The armed prefix resolved: `l` previous view, `w` view switcher, `t`
-    /// prose/terminal, `b` sidebar rail.
+    /// terminal, `b` sidebar rail.
     Command(char),
     /// Ctrl+H/J/K/L while unarmed: move pane focus (consumed).
     PaneMove(Direction),
@@ -422,7 +422,7 @@ fn window_size_key(_config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     if key.cmd && (plus || minus) {
         let sign = if plus { 1 } else { -1 };
         // `windowSizeKey`: Cmd+Opt+± resizes the window, Cmd+± zooms the
-        // text (prose page / font sizes / list zoom).
+        // text (font sizes / list zoom).
         if key.opt {
             return Some(KeyAction::ResizeStep(sign));
         }

@@ -7,7 +7,7 @@
 //! daemon UI bridge (`install_daemon_ui`: the shared host window, the tool
 //! panels, the command palette, and the local key monitor that drives
 //! `PopupWindow.handleKey`'s full action set — list keys, window geometry,
-//! the notes find bar / rail / commit, and the path sheet).
+//! the find bar / rail / commit, and the path sheet).
 //!
 //! The controller model stays `Send + Sync` (per-view `MemberState` rows) so it
 //! can be handed to `CommandServer`; AppKit lives only behind the main-thread
@@ -42,14 +42,13 @@ const COMMAND_SECTION_SKIPS: [&str; 11] = [
     "compare",
     "notifications",
     "pane-shot",
-    "notes-find",
+    "pane-find",
     "setup",
     "settings-hub",
 ];
 
 /// Every `SlotView`, in `testQuery`'s order (`kitchen_sink.swift:3111`).
-pub const ALL_VIEWS: [SlotView; 11] = [
-    SlotView::Notes,
+pub const ALL_VIEWS: [SlotView; 10] = [
     SlotView::Files,
     SlotView::Jira,
     SlotView::Detail,
@@ -63,9 +62,8 @@ pub const ALL_VIEWS: [SlotView; 11] = [
 ];
 
 /// The `SharedWindow.escViews` set, for the `escHides` document.
-const ESC_VIEWS: [SlotView; 6] = [
+const ESC_VIEWS: [SlotView; 5] = [
     SlotView::Files,
-    SlotView::Notes,
     SlotView::Ai,
     SlotView::Jira,
     SlotView::Confluence,
@@ -118,8 +116,6 @@ pub enum UiCommand {
     /// Show / hide the Ctrl+B W view switcher (`do:switcher`).
     ShowSwitcher,
     HideSwitcher,
-    /// Toggle one notes-window drawer.
-    ToggleDrawer(DrawerSide),
     /// The paths shelf tool window (`do:paths:*`).
     Paths(PathsCmd),
     /// Toggle the `/terminal` tool panel (`do:term`, Ctrl+B T).
@@ -137,11 +133,6 @@ pub enum UiCommand {
     PaneMove(PaneDir),
     /// `do:pane:focus:<id>`.
     PaneFocus(String),
-    /// `do:notes-delete:<path>` — the note context menu's Delete… (confirm
-    /// sheet, then Trash).
-    NotesDelete(String),
-    /// `do:notes-find` (false) / `do:notes-grep` (true) — `NoteFindWindow`.
-    NoteFind(bool),
     /// `do:jira-jump` — `SidebarJumpWindow` over the Jira rail.
     JiraJump,
     /// `do:board:*` — the Jira board verbs, applied to the real list model.
@@ -168,13 +159,6 @@ pub enum UiCommand {
     /// `do:input:*` — real key / mouse events posted into the app's own
     /// event queue (`app::synth_input`).
     Input(crate::app::synth_input::InputCmd),
-}
-
-/// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DrawerSide {
-    Terminal,
-    Browser,
 }
 
 /// The `do:paths:*` grammar's UI side.
@@ -228,7 +212,7 @@ pub fn hyper_palette<'a>(all: Vec<&'a PaletteCommand>, ids: &[String]) -> Vec<&'
 }
 
 /// The view the daemon presents when it cold-starts with no launch mode.
-pub const DEFAULT_VIEW: SlotView = SlotView::Notes;
+pub const DEFAULT_VIEW: SlotView = SlotView::Files;
 
 /// The mutable model behind the controller's `Mutex`.
 struct ControllerInner {
@@ -281,9 +265,6 @@ struct ControllerInner {
     paths_state: Value,
     /// `[paths] enabled = "true"`; gates `do:paths:show` like Swift.
     paths_enabled: bool,
-    /// The notes drawers' shown flags (`views.notes.terminal` / `.browser`).
-    notes_terminal: bool,
-    notes_browser: bool,
     /// `views.jira.tab` — the Jira view's selected surface (the
     /// `Tickets | Config` pill).
     jira_tab: crate::views::jira_view::JiraSurface,
@@ -291,10 +272,6 @@ struct ControllerInner {
     window_count: i64,
     /// Per-view window titles (`cmd.windowName`, used by `present`).
     window_titles: HashMap<SlotView, String>,
-    /// An `open:<path>` launch message waiting for the notes surface.
-    pending_note_open: Option<String>,
-    /// A `Cmd+O` path-sheet result waiting for the notes surface.
-    pending_note_external: Option<String>,
     last_key: String,
     /// `[section] esc-close` values parsed from commands.toml.
     esc_sections: HashMap<String, i64>,
@@ -452,10 +429,7 @@ impl ControllerInner {
     }
 
     fn cycle(&mut self, dir: i32) {
-        match self.current {
-            Some(SlotView::Files) => self.open(SlotView::Notes),
-            _ => self.open(SlotView::Files),
-        }
+        self.open(SlotView::Files);
         self.logs.push(format!(
             "cycle: dir={dir} now={}",
             self.current.map(|v| v.raw()).unwrap_or("nil")
@@ -506,9 +480,6 @@ impl ControllerInner {
         if let Some(n) = self.esc_sections.get(v.raw()) {
             return *n;
         }
-        if v == SlotView::Notes {
-            // Notes counts Esc in its own panes; default to the app value.
-        }
         self.esc_app
     }
 
@@ -540,18 +511,11 @@ impl ControllerInner {
                     json!([r.x.round() as i64, r.y.round() as i64, r.w.round() as i64, r.h.round() as i64])
                 }),
             });
-            // The `PopupWindow.testState` keys the Swift notes / files / jira
+            // The `PopupWindow.testState` keys the Swift files / jira
             // members always report (the state probes read these).
-            if matches!(v, SlotView::Notes | SlotView::Files | SlotView::Jira) {
-                let notes = v == SlotView::Notes;
+            if matches!(v, SlotView::Files | SlotView::Jira) {
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("name".into(), json!(v.raw()));
-                    obj.insert("terminal".into(), json!(notes && self.notes_terminal));
-                    obj.insert("browser".into(), json!(notes && self.notes_browser));
-                    obj.insert(
-                        "drawerInset".into(),
-                        json!(if notes && self.notes_terminal { 200 } else { 0 }),
-                    );
                     obj.insert("findBar".into(), json!(false));
                     obj.insert("query".into(), json!(""));
                     obj.insert("rowCount".into(), json!(0));
@@ -702,11 +666,7 @@ pub struct SwitcherController {
 fn needs_window(action: &str) -> bool {
     action == "paths:show"
         || action == "switcher"
-        || action == "toggle-terminal"
-        || action == "toggle-browser"
         || action == "term"
-        || action == "notes-find"
-        || action == "notes-grep"
         || action == "jira-jump"
         || action == "reset-size"
         || action.starts_with("tool:")
@@ -750,7 +710,7 @@ impl SwitcherController {
         let inner = ControllerInner {
             current: None,
             previous: None,
-            last: SlotView::Notes,
+            last: SlotView::Files,
             last_jira: SlotView::Jira,
             stack: Vec::new(),
             history: Vec::new(),
@@ -781,13 +741,9 @@ impl SwitcherController {
             switcher_rows: Vec::new(),
             paths_state: json!({ "shown": false, "rows": [] }),
             paths_enabled: false,
-            notes_terminal: false,
-            notes_browser: false,
             jira_tab: crate::views::jira_view::JiraSurface::Tickets,
             window_count: 0,
             window_titles: HashMap::new(),
-            pending_note_open: None,
-            pending_note_external: None,
             last_key: String::new(),
             esc_sections: HashMap::new(),
             esc_app,
@@ -858,7 +814,6 @@ impl SwitcherController {
         {
             let mut inner = self.inner.lock().unwrap();
             inner.window_titles = [
-                (SlotView::Notes, title_of("notes", "notes")),
                 (SlotView::Files, title_of("files", "files")),
                 (SlotView::Jira, title_of("jira", "jira")),
                 (SlotView::Confluence, title_of("confluence", "confluence")),
@@ -869,8 +824,6 @@ impl SwitcherController {
             .into_iter()
             .collect();
         }
-
-        crate::views::notes::register(&mut self.registry);
 
         crate::views::jira::register(&mut self.registry, section_flag(&sections, "jira", false));
 
@@ -980,8 +933,8 @@ impl SwitcherController {
         ordered
     }
 
-    /// The header switcher, mirroring `SharedWindow.navIcons`: files first,
-    /// then notes, then jira always; confluence / compare / ai while enabled.
+    /// The header switcher, mirroring `SharedWindow.navIcons`: files and
+    /// jira always; confluence / compare / ai while enabled.
     fn build_nav(
         &self,
         sections: &HashMap<String, HashMap<String, String>>,
@@ -991,7 +944,6 @@ impl SwitcherController {
         let label_of = label_of(sections);
 
         let mut nav = vec![
-            (SlotView::Notes, label_of("notes", "Notes"), icon(&s.notes_icon_name)),
             (SlotView::Files, label_of("files", "Files"), icon(&s.files_icon_name)),
             (SlotView::Jira, label_of("jira", "Jira"), icon(&s.jira_icon_name)),
         ];
@@ -1133,16 +1085,6 @@ impl SwitcherController {
         self.inner.lock().unwrap().member(v).wid = wid;
     }
 
-    /// Queue an `open:<path>` launch for the notes surface (`openNoteFile`).
-    pub fn set_pending_note_open(&self, path: &str) {
-        self.inner.lock().unwrap().pending_note_open = Some(path.to_string());
-    }
-
-    /// Take the queued `open:<path>` (the daemon UI drains it on present).
-    pub fn take_pending_note_open(&self) -> Option<String> {
-        self.inner.lock().unwrap().pending_note_open.take()
-    }
-
     pub fn set_view_state(&self, v: SlotView, state: Value) {
         self.inner.lock().unwrap().member(v).state = state;
     }
@@ -1221,33 +1163,6 @@ impl SwitcherController {
         self.inner.lock().unwrap().tools.remove(name);
     }
 
-    /// A `Cmd+O` path-sheet result; the daemon UI drains it on the next tick.
-    pub fn set_pending_note_external(&self, path: String) {
-        self.inner.lock().unwrap().pending_note_external = Some(path);
-    }
-
-    /// Take the pending external open (once).
-    pub fn take_pending_note_external(&self) -> Option<String> {
-        self.inner.lock().unwrap().pending_note_external.take()
-    }
-
-    /// `views.notes.terminal` / `.browser`.
-    pub fn set_notes_drawer(&self, side: DrawerSide, on: bool) {
-        let mut inner = self.inner.lock().unwrap();
-        match side {
-            DrawerSide::Terminal => inner.notes_terminal = on,
-            DrawerSide::Browser => inner.notes_browser = on,
-        }
-    }
-
-    pub fn notes_drawer(&self, side: DrawerSide) -> bool {
-        let inner = self.inner.lock().unwrap();
-        match side {
-            DrawerSide::Terminal => inner.notes_terminal,
-            DrawerSide::Browser => inner.notes_browser,
-        }
-    }
-
     /// `[paths] enabled` — gates `do:paths:show` (Swift `pathsCommand`).
     pub fn set_paths_enabled(&self, on: bool) {
         self.inner.lock().unwrap().paths_enabled = on;
@@ -1281,9 +1196,9 @@ impl SwitcherController {
                 self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
             }
             "terminal" => self.toggle_terminal_panel(),
-            "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
+            "window" | "show" | "files" | "jira" | "confluence" | "ai"
             | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
-            | "text-table" | "notes-find" | "notes-grep" => {
+            | "text-table" => {
                 self.toggle_command(name)
             }
             _ => {
@@ -1380,7 +1295,7 @@ impl SwitcherController {
 
     /// Ctrl+Tab / Ctrl+Shift+Tab: the next / previous header view (the nav
     /// icons, so only the shown views), opened as its header click would.
-    /// Without nav icons (no views registered) it is the Files <-> Notes toggle.
+    /// Without nav icons (no views registered) it opens Files.
     pub fn cycle(&self, dir: i32) {
         let views: Vec<SlotView> = self.registry.nav_icons().iter().map(|n| n.view).collect();
         match cycle_target(&views, self.current(), dir) {
@@ -1526,11 +1441,6 @@ impl SwitcherController {
         use crate::app::registry::nav;
         let mut inner = self.inner.lock().unwrap();
         match id {
-            nav::NOTES => {
-                if inner.current != Some(SlotView::Notes) {
-                    inner.open(SlotView::Notes);
-                }
-            }
             nav::FILES => {
                 if inner.current != Some(SlotView::Files) {
                     inner.show_files();
@@ -1737,14 +1647,6 @@ impl SwitcherController {
 
     /// `toggleCommand(_:)`: map a hotkey mode name onto a view / toggle.
     pub fn toggle_command(&self, name: &str) {
-        // `open:<path>` (the vim test's tab switch / a CLI open): show notes
-        // and hand the path to the surface (`openNoteFile`).
-        if let Some(path) = name.strip_prefix("open:") {
-            self.set_pending_note_open(path);
-            self.open(SlotView::Notes);
-            return;
-        }
-        let name = if name == "voice" { "notes" } else { name };
         match name {
             "window" => {
                 self.toggle();
@@ -1764,9 +1666,6 @@ impl SwitcherController {
             "jira-poll-on" | "jira-poll-off" | "jira-poll-toggle" => self.jira_poll(name),
             "jira-setup" => {
                 self.inner.lock().unwrap().ui_push(UiCommand::JiraSetup(None));
-            }
-            "notes" => {
-                self.hotkey(SlotView::Notes);
             }
             "files" => {
                 self.hotkey(SlotView::Files);
@@ -1801,14 +1700,6 @@ impl SwitcherController {
             }
             "health" | "health-checks" | "prettyprint" | "filefast" | "text-table" => {
                 self.toggle_tool(name);
-            }
-            // `startCommandServer`'s fall-through: the notes vim pane's
-            // leader+sf / leader+sg send these raw (no `do:`) over `g:ws_sock`.
-            "notes-find" | "notes-grep" => {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .ui_push(UiCommand::NoteFind(name == "notes-grep"));
             }
             _ => {
                 self.inner
@@ -1959,14 +1850,6 @@ impl SwitcherController {
                     None => json!({ "error": "timeout" }),
                 });
             }
-        }
-        if let Some(p) = action.strip_prefix("notes-delete:") {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.main_queue.is_none() {
-                return Some(json!({ "error": "needs the window" }));
-            }
-            inner.ui_push(UiCommand::NotesDelete(crate::app::config::expand_tilde(p)));
-            return None;
         }
         if let Some(v) = action.strip_prefix("pane:") {
             let mut inner = self.inner.lock().unwrap();
@@ -2270,18 +2153,6 @@ impl SwitcherController {
                 self.toggle();
                 None
             }
-            "toggle-terminal" => {
-                let mut inner = self.inner.lock().unwrap();
-                inner.notes_terminal = !inner.notes_terminal;
-                inner.ui_push(UiCommand::ToggleDrawer(DrawerSide::Terminal));
-                None
-            }
-            "toggle-browser" => {
-                let mut inner = self.inner.lock().unwrap();
-                inner.notes_browser = !inner.notes_browser;
-                inner.ui_push(UiCommand::ToggleDrawer(DrawerSide::Browser));
-                None
-            }
             "term" => {
                 self.inner.lock().unwrap().flip_terminal_panel();
                 None
@@ -2292,11 +2163,6 @@ impl SwitcherController {
             }
             "switcher-hide" => {
                 self.view_switcher_hide();
-                None
-            }
-            "notes-find" | "notes-grep" => {
-                let inner = self.inner.lock().unwrap();
-                inner.ui_push(UiCommand::NoteFind(action == "notes-grep"));
                 None
             }
             "jira-jump" => {
@@ -2570,7 +2436,7 @@ impl SwitcherController {
             // window on screen with a live window number, and `open` is what a
             // `do:open:<view>` would do. Re-presenting a showing view put the
             // keyboard back on its first pane, so a capture moved focus.
-            let view = target.unwrap_or(SlotView::Notes);
+            let view = target.unwrap_or(SlotView::Files);
             if !(self.is_visible() && self.current() == Some(view)) {
                 self.open(view);
             }
@@ -2782,13 +2648,13 @@ fn strip_comment(v: &str) -> &str {
     v
 }
 
-/// The four views whose left pane is resizable (`do:sidebar-width:*`).
-const SIDEBAR_VIEWS: [&str; 4] = ["notes", "jira", "confluence", "compare"];
+/// The views whose left pane is resizable (`do:sidebar-width:*`).
+const SIDEBAR_VIEWS: [&str; 3] = ["jira", "confluence", "compare"];
 
 /// The views whose left column is a `SidebarView` with a collapse-to-rail
 /// toggle (`do:rail:*`, Ctrl+B B). Files and AI ride along: fixed-width
 /// sidebars, but the same rail.
-const RAIL_VIEWS: [&str; 6] = ["notes", "files", "jira", "confluence", "ai", "compare"];
+const RAIL_VIEWS: [&str; 5] = ["files", "jira", "confluence", "ai", "compare"];
 
 /// The `[view] sidebar-width` fallback when unset.
 fn pane_sidebar_default(view: &str) -> f64 {
@@ -3429,7 +3295,7 @@ pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, Str
 mod daemon_ui {
     mod host_vim;
     use super::{
-        compare_before_rail, DrawerSide, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue,
+        compare_before_rail, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue,
         DEFAULT_VIEW,
     };
     use crate::app::registry::{RectI, SlotView};
@@ -3497,14 +3363,14 @@ mod daemon_ui {
 
     /// Picks that are *meant* to bring kitchen-sink forward: "Kitchen Sink"
     /// and the shared window's views. Every other pick — every popup (tool
-    /// panels, terminal, paths, screenshot, the notes finders), all
+    /// panels, terminal, paths, screenshot, the finders), all
     /// non-activating and taking the keyboard without activating us — and
     /// workspaces leave the user's app focused.
     fn pick_keeps_app(action: &PaletteAction) -> bool {
         match action {
             PaletteAction::Command(name) => matches!(
                 name.as_str(),
-                "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
+                "window" | "files" | "jira" | "confluence" | "ai" | "compare"
                     | "jira-config"
             ),
             PaletteAction::Workspace(_) => false,
@@ -3563,70 +3429,14 @@ mod daemon_ui {
         }
     }
 
-    /// The `presentPathSheet` OK/Cancel target (a `TextFieldSheet` mirror).
-    pub struct PathSheetHandlerIvars {
-        sheet: Retained<objc2_app_kit::NSWindow>,
-        field: Retained<NSTextField>,
-        on_result: RefCell<Option<Box<dyn FnMut(Option<String>)>>>,
-    }
-
     thread_local! {
-        static PATH_SHEET_HANDLERS: RefCell<Vec<Retained<PathSheetHandler>>> = const { RefCell::new(Vec::new()) };
         /// The folder tree's Quick Look panel source (menu ▸ Quick Look).
         static COMPARE_QUICK_LOOK: RefCell<crate::views::files::QuickLook> = RefCell::new(crate::views::files::QuickLook::new());
     }
 
-    /// A terminal selection as an existing absolute path (drawer shells
-    /// start in `$HOME`, so relative paths resolve there).
-    fn terminal_selection_path(sel: &str) -> Option<String> {
-        let home = std::env::var("HOME").unwrap_or_default();
-        crate::views::notes::terminal_path(sel, &home, &|p| std::path::Path::new(p).exists())
-    }
-
     /// `~`-abbreviated path for prompts and toasts.
     fn tilde_path(p: &str) -> String {
-        crate::views::notes::tilde_path(p, &std::env::var("HOME").unwrap_or_default())
-    }
-
-    define_class!(
-        #[unsafe(super(NSObject))]
-        #[thread_kind = MainThreadOnly]
-        #[name = "WSPathSheetHandler"]
-        #[ivars = PathSheetHandlerIvars]
-        pub struct PathSheetHandler;
-
-        impl PathSheetHandler {
-            #[unsafe(method(ok:))]
-            fn ok(&self, _sender: Option<&AnyObject>) {
-                let value = self.ivars().field.stringValue().to_string();
-                self.end();
-                let cb = self.ivars().on_result.borrow_mut().take();
-                if let Some(mut cb) = cb {
-                    cb(Some(value));
-                }
-            }
-
-            #[unsafe(method(cancel:))]
-            fn cancel(&self, _sender: Option<&AnyObject>) {
-                self.end();
-                let cb = self.ivars().on_result.borrow_mut().take();
-                if let Some(mut cb) = cb {
-                    cb(None);
-                }
-            }
-        }
-
-        unsafe impl NSObjectProtocol for PathSheetHandler {}
-    );
-
-    impl PathSheetHandler {
-        fn end(&self) {
-            if let Some(parent) = self.ivars().sheet.sheetParent() {
-                parent.endSheet(&self.ivars().sheet);
-            } else {
-                self.ivars().sheet.orderOut(None);
-            }
-        }
+        crate::app::pathfmt::tilde_path(p, &std::env::var("HOME").unwrap_or_default())
     }
 
     struct DaemonUiState {
@@ -3635,8 +3445,6 @@ mod daemon_ui {
         content: Retained<NSView>,
         views: HashMap<SlotView, Retained<NSView>>,
         current: Option<SlotView>,
-        /// The notes surface (kept so its drawers/editor stay addressable).
-        notes: Option<crate::views::notes::NotesSurface>,
         /// The files surface (kept so its list keys stay addressable).
         files: Option<crate::views::files::FileBrowser>,
         /// The live AI window.
@@ -3789,9 +3597,6 @@ mod daemon_ui {
         /// `(cwd, row)` of the last plain click in the file list: a second
         /// click on the same row arms the inline rename.
         static FILES_LAST_CLICK: std::cell::RefCell<Option<(String, usize)>> = const { std::cell::RefCell::new(None) };
-        /// `(path, time)` of the last plain click on a notes sidebar / tree
-        /// row: a second single click on the same row soon after renames it.
-        static NOTES_LAST_CLICK: std::cell::RefCell<Option<(String, f64)>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Last `gather_workspaces()` result, so the palette opens instantly.
@@ -4106,21 +3911,10 @@ mod daemon_ui {
         last_esc_at: Cell<f64>,
         /// The local keyDown guard (`PopupWindow.installMonitors`).
         key_monitor: RefCell<Option<MonitorHandle>>,
-        /// Right-clicks on the notes drawer terminal (its context menu).
-        menu_monitor: RefCell<Option<MonitorHandle>>,
-        /// Trackpad pinches over the note editor (font zoom).
-        pinch_monitor: RefCell<Option<MonitorHandle>>,
-        /// The pinch built up since the last font step.
-        pinch_acc: Cell<f64>,
-        /// Last `checktime` poll of the notes vim pane (Swift's note watcher).
-        last_vim_check: Cell<f64>,
         /// Last poll of the Files folder's modification time, and the
         /// `(cwd, mtime)` it saw (an outside change re-lists the folder).
         last_files_check: Cell<f64>,
         files_dir_stamp: RefCell<Option<(String, std::time::SystemTime)>>,
-        /// When the notes vim pane last relaunched (`:q`) — the
-        /// `TerminalAutoRestart` reclaim window.
-        last_vim_relaunch: Cell<f64>,
         /// The polled didResignKey/didBecomeKey observers
         /// (`SharedWindow.checkFocusLoss`, `startFocusBridge`).
         focus_watch: RefCell<super::FocusWatch>,
@@ -4140,13 +3934,10 @@ mod daemon_ui {
         live_pane_sig: RefCell<String>,
         /// `VimKeys.shared` + its search bar / mode badge.
         vim: RefCell<host_vim::VimHost>,
-        /// `noteFindWindow` / `noteGrepWindow` (leader+sf / leader+sg).
-        note_find: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
-        note_grep: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
         /// `sidebarJumpWindow` (`do:jira-jump`).
-        sidebar_jump: RefCell<Option<Rc<crate::views::note_find::SidebarJumpUi>>>,
-        /// The `<leader>sf` item finder on the non-nvim panes.
-        pane_find: RefCell<Option<Rc<crate::views::note_find::PaneFindUi>>>,
+        sidebar_jump: RefCell<Option<Rc<crate::views::pane_find::SidebarJumpUi>>>,
+        /// The `/` item finder on the list panes.
+        pane_find: RefCell<Option<Rc<crate::views::pane_find::PaneFindUi>>>,
         /// The Cmd+K action picker while it is up.
         action_picker: RefCell<Option<Retained<crate::ui::action_picker::ActionPicker>>>,
         /// The Jira live-search bar's state (Cmd+F).
@@ -4223,13 +4014,8 @@ mod daemon_ui {
             esc_streak: Cell::new(0),
             last_esc_at: Cell::new(0.0),
             key_monitor: RefCell::new(None),
-            menu_monitor: RefCell::new(None),
-            pinch_monitor: RefCell::new(None),
-            pinch_acc: Cell::new(0.0),
-            last_vim_check: Cell::new(0.0),
             last_files_check: Cell::new(0.0),
             files_dir_stamp: RefCell::new(None),
-            last_vim_relaunch: Cell::new(0.0),
             focus_watch: RefCell::new(super::FocusWatch::default()),
             bridge_path,
             bridge_mtime: Cell::new(None),
@@ -4238,8 +4024,6 @@ mod daemon_ui {
             live_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
             live_pane_sig: RefCell::new(String::new()),
             vim: RefCell::new(host_vim::VimHost::default()),
-            note_find: RefCell::new(None),
-            note_grep: RefCell::new(None),
             sidebar_jump: RefCell::new(None),
             pane_find: RefCell::new(None),
             action_picker: RefCell::new(None),
@@ -4295,20 +4079,6 @@ mod daemon_ui {
                 .unwrap_or(false)
         });
         *ui.ivars().key_monitor.borrow_mut() = Some(monitor);
-        // SwiftTerm has no menu of its own: right-clicks on the notes drawer
-        // terminal get ours (rule 2: copy file / path, open in notes, reveal).
-        let weak = Weak::new(&*ui);
-        let menu_monitor = popup::install_local_monitor_mask(mtm, objc2_app_kit::NSEventMask::RightMouseDown, move |event| {
-            weak.load().map(|ui| ui.terminal_right_click(event)).unwrap_or(false)
-        });
-        *ui.ivars().menu_monitor.borrow_mut() = Some(menu_monitor);
-        // A trackpad pinch over the note editor steps its font like Cmd+± (the
-        // reading view magnifies natively).
-        let weak = Weak::new(&*ui);
-        let pinch_monitor = popup::install_local_monitor_mask(mtm, objc2_app_kit::NSEventMask::Magnify, move |event| {
-            weak.load().map(|ui| ui.notes_pinch(event)).unwrap_or(false)
-        });
-        *ui.ivars().pinch_monitor.borrow_mut() = Some(pinch_monitor);
         // `startFocusBridge`'s global click monitor: a click outside our
         // windows marks `lastOtherAppClick` (the user left on purpose, so an
         // AeroSpace focus echo must not pull the app back).
@@ -4358,20 +4128,6 @@ mod daemon_ui {
     // closure; callers assemble them in the canonical order
     // (open → view → copy → edit → navigation).
 
-    /// "Open in Notes": show the file in the Notes view.
-    fn file_action_open_in_notes(
-        path: &str,
-        weak: &objc2::rc::Weak<DaemonUi>,
-    ) -> crate::ui::menu_kit::MenuEntry {
-        let p = path.to_string();
-        let w = weak.clone();
-        crate::ui::menu_kit::MenuEntry::item("Open in Notes", move || {
-            if let Some(ui) = w.load() {
-                ui.open_in_notes(&p);
-            }
-        })
-    }
-
     /// "Copy Absolute Path": the path text to the pasteboard + the standard toast.
     fn file_action_copy_path(path: &str) -> crate::ui::menu_kit::MenuEntry {
         let p = path.to_string();
@@ -4399,8 +4155,6 @@ mod daemon_ui {
 
     impl DaemonUi {
         fn apply_pending(&self) {
-            // `onVimExit`: `:q` / a crash rebuilds the pane on the same note.
-            self.poll_notes_vim();
             self.poll_files_dir();
             // UI commands first, then the settling syncs, then the blocking
             // `do:` jobs: a `do:` caller waits on a main-queue job and must see
@@ -4421,7 +4175,6 @@ mod daemon_ui {
                         UiCommand::HidePalette => self.hide_palette(),
                         UiCommand::ShowSwitcher => self.show_switcher(),
                         UiCommand::HideSwitcher => self.hide_switcher(),
-                        UiCommand::ToggleDrawer(side) => self.toggle_drawer(side),
                         UiCommand::Paths(cmd) => self.run_paths_cmd(cmd),
                         UiCommand::TerminalPanel => self.toggle_terminal_panel(),
                         UiCommand::Tool(kind) => self.open_tool(kind),
@@ -4430,7 +4183,6 @@ mod daemon_ui {
                             self.route_reset_size();
                         }
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
-                        UiCommand::NoteFind(grep) => self.show_note_find(grep),
                         UiCommand::JiraJump => self.show_sidebar_jump(),
                         UiCommand::Board(cmd) => self.board_cmd(cmd),
                         UiCommand::JiraEnable(ok, msg) => self.ivars().controller.jira_enable_result(ok, &msg),
@@ -4455,7 +4207,6 @@ mod daemon_ui {
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }
-                        UiCommand::NotesDelete(p) => self.notes_confirm_delete(p),
                         UiCommand::PaneFocus(id) => {
                             if !self.live_pane_focus(&id) {
                                 self.ivars().controller.log(&format!("pane:focus:{id}: no such pane"));
@@ -4756,59 +4507,6 @@ mod daemon_ui {
             }
         }
 
-        /// The notes vim pane's `onVimExit` poll + the note watcher's
-        /// `checktime` (cheap; every drain tick, checktime once a second).
-        fn poll_notes_vim(&self) {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let due = now - self.ivars().last_vim_check.get() >= 1.0;
-            if due {
-                self.ivars().last_vim_check.set(now);
-            }
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(st) = state.as_mut() {
-                // The shells' `TerminalAutoRestart` (drawer + /terminal panel).
-                if let Some(tp) = st.terminal_panel.as_mut() {
-                    tp.poll_restart();
-                }
-                if let Some(surface) = st.notes.as_ref() {
-                    surface.terminal_poll_restart();
-                }
-                if let Some(surface) = st.notes.as_mut() {
-                    let relaunched = surface.vim_poll_exit(mtm);
-                    // The nvim inline-image sidecar (throttled inside).
-                    surface.tick_vim_images();
-                    if relaunched {
-                        self.ivars().last_vim_relaunch.set(now);
-                    }
-                    // Swift's `TerminalAutoRestart`: after a relaunch, the new
-                    // terminal takes the keyboard back — and keeps it through
-                    // the next stretch (AppKit may drop the window's key status
-                    // or first responder while the pane is rebuilt).
-                    let reclaiming = now - self.ivars().last_vim_relaunch.get() <= 2.0;
-                    if st.window.isVisible() && reclaiming && !st.window.isKeyWindow() {
-                        st.window.makeKeyAndOrderFront(None);
-                    }
-                    if st.window.isVisible()
-                        && (relaunched
-                            || (reclaiming && st.window.isKeyWindow() && !surface.vim_has_focus()))
-                    {
-                        surface.focus_editor();
-                    }
-                    if due && st.window.isVisible() {
-                        if let Some(pane) = surface.vim_pane() {
-                            pane.command_rpc_only("silent! checktime");
-                        }
-                    }
-                }
-            }
-        }
-
         /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
         fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
             let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
@@ -4947,14 +4645,6 @@ mod daemon_ui {
             if let Some(b) = st.files.as_ref() {
                 w.insert(SlotView::Files, b.where_text());
             }
-            if let Some(name) = st
-                .notes
-                .as_ref()
-                .and_then(|s| s.selected_path())
-                .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().into_owned()))
-            {
-                w.insert(SlotView::Notes, name.trim_end_matches(".json").to_string());
-            }
             if let Some((l, _)) = st.jira.as_ref() {
                 let sb = l.snapshot().sidebar;
                 let t = match &sb.pinned_selected {
@@ -5000,7 +4690,6 @@ mod daemon_ui {
                     // palette; only the `[section]` is needed here (for aliases).
                     let section = match n.view {
                         SlotView::Files => "files",
-                        SlotView::Notes => "notes",
                         SlotView::Confluence => "confluence",
                         SlotView::Compare | SlotView::CompareText => "compare",
                         SlotView::Ai => "ai",
@@ -5010,7 +4699,7 @@ mod daemon_ui {
                     let loc = wheres.get(&key).cloned().unwrap_or_default();
                     icons.push((n.id, nav_icon_image(n.view, n.image_key.as_deref(), &assets)));
                     let mut v = SwitchView::new(n.id, &n.tip, loc);
-                    v.aliases = crate::views::notes::section_value(section, "aliases")
+                    v.aliases = crate::app::pathfmt::section_value(section, "aliases")
                         .unwrap_or_default()
                         .split(',')
                         .map(|a| a.trim().to_string())
@@ -5102,26 +4791,6 @@ mod daemon_ui {
             if let Some(mtm) = MainThreadMarker::new() {
                 self.ivars().controller.set_window_count(visible_window_count(mtm));
             }
-        }
-
-        fn toggle_drawer(&self, side: DrawerSide) {
-            let controller = self.ivars().controller.clone();
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(st) = state.as_mut() {
-                if let Some(surface) = st.notes.as_mut() {
-                    let which = match side {
-                        DrawerSide::Terminal => "terminal",
-                        DrawerSide::Browser => "browser",
-                    };
-                    if let Some(on) = surface.toggle_drawer(which) {
-                        controller.set_notes_drawer(side, on);
-                    }
-                    return;
-                }
-            }
-            // No notes surface yet: undo the optimistic model flip.
-            let on = controller.notes_drawer(side);
-            controller.set_notes_drawer(side, !on);
         }
 
         /// `showPaths` / `do:paths:*` — the shelf tool window.
@@ -5688,30 +5357,6 @@ mod daemon_ui {
                 return true;
             }
 
-            // F2 on the notes rail / tree cursor row: rename that file in place.
-            if event.keyCode() == 120 && self.ivars().controller.current() == Some(SlotView::Notes) {
-                let target = self
-                    .notes_surface(|s| {
-                        let (bar, tree) = (s.sidebar_view(), s.tree_view());
-                        if bar.key_focused() {
-                            let i = bar.cursor_list_row()?;
-                            s.tab_path(i).map(|p| (p, Some(i)))
-                        } else if tree.key_focused() {
-                            tree.cursor_row().filter(|(_, _, root)| !root).map(|(p, _, _)| (p, None))
-                        } else {
-                            // From the editor: rename the open note, in place
-                            // on its sidebar row.
-                            let i = s.selected_index();
-                            s.selected_path().filter(|p| s.tab_path(i).as_deref() == Some(p.as_str())).map(|p| (p, Some(i)))
-                        }
-                    })
-                    .flatten();
-                if let Some((path, tab)) = target {
-                    self.notes_begin_rename(path, tab);
-                    return true;
-                }
-            }
-
             // Ctrl+N / Ctrl+P ("next / previous difference") are the compare
             // window's own chords and the session sidebar's list nav claims
             // them too (`ui::sidebar::nav_key`); give the model first refusal
@@ -5731,11 +5376,6 @@ mod daemon_ui {
                 let any: &AnyObject = unsafe { &*(&*r as *const objc2_app_kit::NSResponder as *const AnyObject) };
                 if let Some(bar) = any.downcast_ref::<crate::ui::sidebar::SidebarView>() {
                     if bar.handle_nav_key(event) {
-                        return true;
-                    }
-                }
-                if let Some(tree) = any.downcast_ref::<crate::ui::tree_view::TreeView>() {
-                    if tree.handle_nav_key(event) {
                         return true;
                     }
                 }
@@ -5786,37 +5426,8 @@ mod daemon_ui {
                 }
             }
             let current = self.ivars().controller.current();
-            if current == Some(SlotView::Notes) {
-                if let Some(r) = self.route_notes_key(&key, event.timestamp()) {
-                    return r;
-                }
-            }
-            let (edit_mode, vim_active) = {
-                let state = self.ivars().state.borrow();
-                // `config.editMode` is per-window: only the notes member is an
-                // editor; files/jira keep their list-key routing.
-                let notes = current == Some(SlotView::Notes);
-                let vim = notes
-                    && state
-                        .as_ref()
-                        .and_then(|st| st.notes.as_ref())
-                        .map(|s| s.vim_active())
-                        .unwrap_or(false);
-                (notes, vim)
-            };
-            let (find_shown, _) = {
-                let state = self.ivars().state.borrow();
-                let surface = state.as_ref().and_then(|st| st.notes.as_ref());
-                (
-                    surface.map(|s| s.find_shown()).unwrap_or(false),
-                    surface.map(|s| s.rail_collapsed()).unwrap_or(false),
-                )
-            };
             let cfg = PopupConfig {
-                edit_mode,
-                vim_focus: vim_active,
                 has_cycle_view_hook: current.is_some(),
-                find_bar_shown: find_shown,
                 has_file_browser: current == Some(SlotView::Files),
                 browser_has_focus: current == Some(SlotView::Files),
                 esc_close_count: current
@@ -5850,37 +5461,17 @@ mod daemon_ui {
                         self.ivars().controller.back(true);
                         return true;
                     }
-                    if find_shown {
-                        // Swift `editorKey`: the find bar closes before the
-                        // window's own Esc policy runs.
-                        self.notes_find_close();
-                        return true;
-                    }
                     let closes = popup::esc_streak_closes(key.esc_streak, cfg.esc_close_count);
-                    if vim_active {
-                        // Swift `editorKey`: Esc belongs to nvim; the window
-                        // closes only on the configured streak from Normal mode.
-                        let normal = if closes {
-                            self.notes_vim_mode().as_deref() == Some("n")
-                        } else {
-                            false
-                        };
-                        if closes && normal {
-                            let v = current.map(|v| v.raw()).unwrap_or("");
-                            self.ivars().controller.hide(&format!("Esc ({v})"));
-                        } else {
-                            self.notes_vim_keys("\u{1b}");
-                        }
-                        return true;
-                    }
                     if closes {
                         let v = current.map(|v| v.raw()).unwrap_or("");
                         self.ivars().controller.hide(&format!("Esc ({v})"));
                     }
                     true
                 }
-                KeyAction::Vim(op) => self.perform_vim_op(op),
-                KeyAction::Edit(popup::EditOp::Find) => self.route_find_toggle(),
+                // Vim ops only come from an editor pane (edit_mode), and no
+                // view is one since the notes editor was removed.
+                KeyAction::Vim(_) => false,
+                KeyAction::Edit(popup::EditOp::Find) => false,
                 KeyAction::Edit(op) | KeyAction::SheetEdit(op) | KeyAction::Terminal(op) => {
                     self.perform_edit_op(op)
                 }
@@ -5904,14 +5495,12 @@ mod daemon_ui {
                     self.ivars().controller.cycle(dir);
                     true
                 }
-                KeyAction::CycleTabs(dir) => self.route_cycle_tabs(dir),
+                KeyAction::CycleTabs(_) => false,
                 KeyAction::ToggleSidebarRail => self.route_rail_toggle(),
                 KeyAction::PaneResize(dir) => self.route_resize(dir),
                 KeyAction::ResizeStep(sign) => self.route_resize_by(sign),
                 KeyAction::FontStep(sign) => {
-                    if current == Some(SlotView::Notes) {
-                        self.notes_surface(|s| s.step_font(sign)).is_some()
-                    } else if current == Some(SlotView::Files) {
+                    if current == Some(SlotView::Files) {
                         self.files_text_zoom(sign);
                         true
                     } else if current.is_some_and(|v| v.is_jira()) {
@@ -5931,10 +5520,12 @@ mod daemon_ui {
                     }
                 }
                 KeyAction::ResizeReset => self.route_reset_size(),
-                KeyAction::CommandF => self.route_find_toggle(),
-                KeyAction::FindNext(dir) => self.route_find_step(dir),
-                KeyAction::EditorCommit => self.route_commit(),
-                KeyAction::EditorOpenPath => self.route_open_path_prompt(),
+                // The editor-only actions (find bar, commit, Cmd+O path sheet)
+                // belonged to the removed notes editor.
+                KeyAction::CommandF
+                | KeyAction::FindNext(_)
+                | KeyAction::EditorCommit
+                | KeyAction::EditorOpenPath => false,
                 KeyAction::FileBrowser(action) => self.route_file_browser(action),
                 KeyAction::CommandK => match current {
                     Some(v) if v.is_jira() => {
@@ -5969,7 +5560,7 @@ mod daemon_ui {
                     return false;
                 }
             }
-            if self.note_find_key(event) || self.paths_key(event) {
+            if self.paths_key(event) {
                 return true;
             }
 
@@ -6136,186 +5727,6 @@ mod daemon_ui {
             }
         }
 
-        /// Run an op against the notes vim pane (`PopupWindow.vimPaneKey`).
-        fn perform_vim_op(&self, op: popup::VimOp) -> bool {
-            let state = self.ivars().state.borrow();
-            let Some(pane) = state
-                .as_ref()
-                .and_then(|st| st.notes.as_ref())
-                .and_then(|s| s.vim_pane())
-            else {
-                return false;
-            };
-            let visual = || {
-                pane.eval("mode()")
-                    .map(|m| matches!(m.trim(), "v" | "V" | "\u{16}"))
-                    .unwrap_or(false)
-            };
-            match op {
-                popup::VimOp::Copy => {
-                    if visual() {
-                        pane.remote("\"+y");
-                    }
-                }
-                popup::VimOp::Cut => {
-                    if visual() {
-                        pane.remote("\"+d");
-                    }
-                }
-                popup::VimOp::Paste => {
-                    // Swift `vimPaste`: an image on the clipboard wins — it is
-                    // saved next to the note (`assets/img-<epoch>.png`) and
-                    // pasted as `![](assets/…)`; otherwise the text.
-                    let mut clip: Option<String> = None;
-                    #[cfg(target_os = "macos")]
-                    if let Some(note) = pane.file() {
-                        clip = crate::views::notes_vim::save_pasteboard_image(note)
-                            .map(|rel| format!("![]({rel})"));
-                    }
-                    let text = clip.or_else(crate::platform::get_text);
-                    if let Some(text) = text {
-                        if !text.is_empty() {
-                            // `nvim_paste` first, bracketed paste fallback.
-                            pane.paste(&text);
-                        }
-                    }
-                }
-                popup::VimOp::SelectAll => pane.remote("<C-\\><C-N>ggVG"),
-                popup::VimOp::Undo => pane.remote("<C-\\><C-N>u"),
-                popup::VimOp::Save => pane.flush(),
-                popup::VimOp::Search => pane.remote("<C-\\><C-N>/"),
-                popup::VimOp::Close => self.ivars().controller.hide("Cmd+W"),
-                popup::VimOp::OpenPath => {
-                    self.route_open_path_prompt();
-                }
-            }
-            true
-        }
-
-        /// The notes vim pane's current mode (`vimEval("mode()")`).
-        fn notes_vim_mode(&self) -> Option<String> {
-            let state = self.ivars().state.borrow();
-            state
-                .as_ref()
-                .and_then(|st| st.notes.as_ref())
-                .and_then(|s| s.vim_pane())
-                .and_then(|p| p.eval("mode()"))
-                .map(|m| m.trim().to_string())
-        }
-
-        /// Send raw keys to the notes vim pane.
-        fn notes_vim_keys(&self, keys: &str) {
-            let state = self.ivars().state.borrow();
-            if let Some(pane) = state
-                .as_ref()
-                .and_then(|st| st.notes.as_ref())
-                .and_then(|s| s.vim_pane())
-            {
-                pane.send_keys(keys);
-            }
-        }
-
-        /// The notes window's own keys ahead of the shared router — Swift
-        /// `handleKey`'s prose search, `overlayKey` Esc, `windowSizeKey` page
-        /// zoom and the `modifiedKey` notes branches.
-        fn route_notes_key(&self, key: &popup::KeyInput, now: f64) -> Option<bool> {
-            use crate::views::notes::Mods;
-            let code = key.key_code;
-            let m = Mods { command: key.cmd, control: key.ctrl, option: key.opt, shift: key.shift };
-            let prose = self.notes_surface(|s| s.prose_shown()).unwrap_or(false);
-            if prose {
-                if let Some(Some(r)) = self.notes_surface(|s| s.prose_pane().and_then(|p| p.search_key(code, m, now))) {
-                    if r && code != popup::KEY_ESC {
-                        self.notes_surface(|s| s.focus_prose());
-                    }
-                    return Some(r);
-                }
-                if code == popup::KEY_ESC && !key.cmd && !key.ctrl && !key.opt {
-                    self.notes_surface(|s| s.set_prose(false));
-                    return Some(true);
-                }
-                let plus = code == popup::KEY_PLUS || code == popup::KEY_KEYPAD_PLUS;
-                let minus = code == popup::KEY_MINUS || code == popup::KEY_KEYPAD_MINUS;
-                if key.cmd && !key.opt && (plus || minus) {
-                    let f = if plus { 1.1 } else { 1.0 / 1.1 };
-                    self.notes_surface(|s| s.prose_pane().map(|p| p.zoom_by(f)));
-                    return Some(true);
-                }
-                if key.cmd && !key.opt && code == popup::KEY_ZERO {
-                    self.notes_surface(|s| s.prose_pane().map(|p| p.reset_zoom()));
-                    return Some(true);
-                }
-            }
-            if key.cmd && key.shift && !key.ctrl && code == popup::KEY_P {
-                if self.notes_surface(|s| s.has_prose_source()) == Some(true) {
-                    self.notes_surface(|s| s.set_prose(!s.prose_shown()));
-                    return Some(true);
-                }
-            }
-            if key.cmd && key.shift && !key.ctrl && code == popup::KEY_O {
-                if self.notes_surface(|s| s.has_prose_source()) == Some(true) {
-                    self.notes_prose_switch_event(crate::ui::prose_switch::ProseSwitchEvent::PopOut);
-                    return Some(true);
-                }
-            }
-            if prose && code == popup::KEY_P && m == Mods::CMD {
-                let toast = self.ivars().controller.settings().copy_toast.clone();
-                self.notes_surface(|s| {
-                    let cfg = crate::views::notes::NotesConfig::load();
-                    if let Some(p) = s.prose_pane() {
-                        p.export_pdf(&cfg, &toast);
-                    }
-                });
-                return Some(true);
-            }
-            if code == popup::KEY_N && m == Mods::CMD {
-                self.notes_surface(|s| s.new_note_from(false));
-                return Some(true);
-            }
-            if code == popup::KEY_N && m == Mods::CTRL {
-                // Not in the drawer shell, and only from vim Normal mode.
-                let ok = self
-                    .notes_surface(|s| {
-                        if s.terminal_has_focus() {
-                            return false;
-                        }
-                        if !s.vim_has_focus() {
-                            return true;
-                        }
-                        s.vim_pane()
-                            .and_then(|v| v.eval("mode() . (get(g:, 'ws_picking', 0) ? 'p' : '')"))
-                            .map(|m| m.trim() == "n")
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if ok {
-                    self.notes_surface(|s| s.new_note_from(true));
-                    return Some(true);
-                }
-            }
-            if (code == popup::KEY_J || code == popup::KEY_K) && key.ctrl && key.shift && !key.cmd && !key.opt {
-                if self.notes_surface(|s| s.vim_has_focus()) == Some(true) {
-                    let plug = if code == popup::KEY_J {
-                        "<Plug>(VM-Add-Cursor-Down)"
-                    } else {
-                        "<Plug>(VM-Add-Cursor-Up)"
-                    };
-                    self.notes_surface(|s| s.vim_pane().map(|v| v.remote(plug)));
-                    return Some(true);
-                }
-            }
-            if prose && m.is_empty() && (code == popup::KEY_J || code == popup::KEY_K) {
-                let dy = if code == popup::KEY_J {
-                    crate::views::notes::PROSE_LINE_STEP
-                } else {
-                    -crate::views::notes::PROSE_LINE_STEP
-                };
-                self.notes_surface(|s| s.prose_pane().map(|p| p.scroll_by(dy)));
-                return Some(true);
-            }
-            None
-        }
-
         /// `showShortcuts(on:view:)` — Cmd+/: the view's `[shortcuts]` rows
         /// then the shared groups, in a sheet over the window.
         fn show_shortcuts(&self) {
@@ -6359,17 +5770,13 @@ mod daemon_ui {
         fn run_prefix_command(&self, ch: char) {
             match ch {
                 'l' => {
-                    // `previousNav ?? (current == .files ? navNotes : navFiles)`
+                    // `previousNav ?? navFiles`
                     use crate::app::registry::nav;
                     let c = &self.ivars().controller;
-                    let id = c.previous_nav().unwrap_or(if c.current() == Some(SlotView::Files) {
-                        nav::NOTES
-                    } else {
-                        nav::FILES
-                    });
+                    let id = c.previous_nav().unwrap_or(nav::FILES);
                     c.nav_clicked(id);
                 }
-                // Ctrl+B W: the in-app view switcher (Files / Notes / Confluence
+                // Ctrl+B W: the in-app view switcher (Files / Confluence
                 // / Jira). Hyper+S keeps the full two-pane palette.
                 'w' => {
                     let c = &self.ivars().controller;
@@ -6380,12 +5787,7 @@ mod daemon_ui {
                     }
                 }
                 't' => {
-                    // `toggleProseFromPrefix`: the notes vim pane / reading
-                    // view flips prose; anything else gets the terminal.
-                    let notes = self.ivars().controller.current() == Some(SlotView::Notes);
-                    if !(notes && self.notes_surface(|s| s.toggle_prose_from_prefix()) == Some(true)) {
-                        self.ivars().controller.toggle_terminal_panel();
-                    }
+                    self.ivars().controller.toggle_terminal_panel();
                 }
                 'b' => {
                     self.route_rail_toggle();
@@ -6394,13 +5796,11 @@ mod daemon_ui {
             }
         }
 
-        /// Run `f` against the notes surface when it exists.
         /// The current member's `navPanes` (real AppKit views) + the window.
         fn live_panes(&self) -> Option<(Retained<SlotHostWindow>, Vec<crate::app::live_panes::LivePane>)> {
             let state = self.ivars().state.borrow();
             let st = state.as_ref()?;
             let panes = match st.current? {
-                SlotView::Notes => st.notes.as_ref()?.nav_panes(),
                 SlotView::Files => st.files.as_ref()?.view.as_ref()?.nav_panes(),
                 SlotView::Jira => st.jira.as_ref()?.1.nav_panes(),
                 SlotView::Confluence => st.confluence.as_ref()?.view.nav_panes(),
@@ -6420,7 +5820,7 @@ mod daemon_ui {
         /// `PaneNav.shared.move(_:in:)` on the live window (Ctrl+HJKL).
         fn live_pane_move(&self, dir: PaneDir) -> bool {
             let Some((w, panes)) = self.live_panes() else { return false };
-            let split = |d: PaneDir| self.notes_surface(|s| s.vim_split_move(d)).unwrap_or(false);
+            let split = |_d: PaneDir| false;
             let moved = self.ivars().live_nav.borrow_mut().move_dir(&w, &panes, dir, &split);
             self.publish_live_pane(&w, &panes);
             moved
@@ -6493,14 +5893,6 @@ mod daemon_ui {
                 *self.ivars().live_pane_sig.borrow_mut() = sig;
                 self.ivars().controller.set_live_pane_state(doc);
             }
-        }
-
-        fn notes_surface<R>(&self, f: impl FnOnce(&mut crate::views::notes::NotesSurface) -> R) -> Option<R> {
-            let mut state = self.ivars().state.borrow_mut();
-            state
-                .as_mut()
-                .and_then(|st| st.notes.as_mut())
-                .map(f)
         }
 
         /// Run `f` against the files browser when it exists.
@@ -6797,7 +6189,6 @@ mod daemon_ui {
             }
         }
 
-        /// The notes sidebar: select / close / "+" / rail / row menu.
         /// The header app-icon menu (`onChromeIconClick`): Theme ▸ and the
         /// window settings (`addWindowSettingsItems`), Open Config, then the
         /// shortcuts list.
@@ -6817,7 +6208,6 @@ mod daemon_ui {
                 .unwrap_or_default();
             let presets = ThemePreset::all_from(&overrides);
             let current_bg = crate::ui::theme::section_colors(section).base();
-            let notes = v == SlotView::Notes;
             let mut theme = Vec::new();
             for (i, (_, title, group)) in grouped_by_tone(&presets).into_iter().enumerate() {
                 if i > 0 {
@@ -6826,38 +6216,13 @@ mod daemon_ui {
                 theme.push(MenuEntry::Header(title.to_string()));
                 for p in group {
                     let on = HexColor::format_rgb(&p.background) == HexColor::format_rgb(&current_bg);
-                    let entry = if notes {
-                        // `themeScopes`: the notes window adds per-part scopes.
-                        let mut scopes = Vec::new();
-                        for (j, (scope, label)) in [
-                            (ThemeScope::Window, "Whole Window"),
-                            (ThemeScope::Notepad, "Notepad Only"),
-                            (ThemeScope::Terminal, "Terminal Only"),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            let weak = objc2::rc::Weak::from_retained(&self.retain());
-                            let p = p.clone();
-                            scopes.push(MenuEntry::item(label, move || {
-                                if let Some(ui) = weak.load() {
-                                    ui.apply_theme_preset(section, &p, scope);
-                                }
-                            }));
-                            if j == 0 {
-                                scopes.push(MenuEntry::Separator);
-                            }
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let pc = p.clone();
+                    let entry = MenuEntry::item(&p.name, move || {
+                        if let Some(ui) = weak.load() {
+                            ui.apply_theme_preset(section, &pc, ThemeScope::Window);
                         }
-                        MenuEntry::submenu(&p.name, scopes)
-                    } else {
-                        let weak = objc2::rc::Weak::from_retained(&self.retain());
-                        let pc = p.clone();
-                        MenuEntry::item(&p.name, move || {
-                            if let Some(ui) = weak.load() {
-                                ui.apply_theme_preset(section, &pc, ThemeScope::Window);
-                            }
-                        })
-                    };
+                    });
                     let wk = objc2::rc::Weak::from_retained(&self.retain());
                     let pv = p.clone();
                     let entry = entry.with_hover(move || {
@@ -6898,8 +6263,8 @@ mod daemon_ui {
                 }),
                 MenuEntry::Separator,
                 MenuEntry::item("Open commands.toml", move || {
-                    c.set_pending_note_external(conf.to_string_lossy().into_owned());
-                    c.open(SlotView::Notes);
+                    let _ = &c;
+                    open_path(&conf.to_string_lossy());
                 }),
                 MenuEntry::item("Keyboard Shortcuts  ⌘/", move || {
                     if let Some(ui) = w3.load() {
@@ -6942,36 +6307,24 @@ mod daemon_ui {
         /// The `[section]` keys a preset writes for `scope`.
         fn theme_preset_kv(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) -> Vec<(String, Option<String>)> {
             use crate::ui::theme::HexColor;
-            let cur = |k: &str| crate::views::notes::section_value(section, k).and_then(|v| HexColor::parse(v.trim()));
+            let cur = |k: &str| crate::app::pathfmt::section_value(section, k).and_then(|v| HexColor::parse(v.trim()));
             // `max(current alpha, presetMinOpacity)`
             let paint = |k: &str, c: crate::ui::theme::Rgba| -> (String, Option<String>) {
                 let a = cur(k).map(|x| x.a).unwrap_or(1.0).max(0.6);
                 (k.to_string(), Some(HexColor::format(&c.with_alpha(a))))
             };
             let mut kv: Vec<(String, Option<String>)> = Vec::new();
-            let notes = section == "notes";
             match scope {
                 ThemeScope::Window => {
                     kv.push(paint("background-color", p.background));
                     kv.push(paint("header-color", p.header));
-                    if notes || section == "files" {
-                        kv.push(paint("browser-background", if notes { p.browser } else { p.background }));
-                    }
-                    if notes {
-                        kv.push(paint("terminal-background", p.terminal));
+                    if section == "files" {
+                        kv.push(paint("browser-background", p.background));
                     }
                     kv.push(("terminal-foreground".to_string(), None));
                 }
-                ThemeScope::Notepad => {
-                    kv.push(paint("background-color", p.background));
-                    kv.push(paint("header-color", p.header));
-                }
-                ThemeScope::Terminal => {
-                    kv.push(paint("terminal-background", p.background));
-                    kv.push(("terminal-foreground".to_string(), Some(HexColor::format_rgb(&p.text))));
-                }
             }
-            if matches!(scope, ThemeScope::Window | ThemeScope::Notepad) {
+            {
                 for (k, c) in [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight), ("accent-color", p.accent)] {
                     kv.push((k.to_string(), Some(HexColor::format_rgb(&c))));
                 }
@@ -6995,8 +6348,8 @@ mod daemon_ui {
             self.after_theme_change(None);
         }
 
-        /// Reload `[theme]` + sections, then re-color the notes surface in
-        /// place and rebuild any other current view with the new colors.
+        /// Reload `[theme]` + sections, then rebuild the current view with
+        /// the new colors.
         fn after_theme_change(&self, over: Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>) {
             let sections = over.unwrap_or_else(|| {
                 let text = crate::app::config::read_config_text().unwrap_or_default();
@@ -7004,10 +6357,6 @@ mod daemon_ui {
             });
             crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections);
             let Some(v) = self.ivars().controller.current() else { return };
-            if v == SlotView::Notes {
-                self.notes_surface(|s| s.retheme());
-                return;
-            }
             {
                 let mut state = self.ivars().state.borrow_mut();
                 let Some(st) = state.as_mut() else { return };
@@ -7029,476 +6378,6 @@ mod daemon_ui {
                 st.current = None;
             }
             self.present(v);
-        }
-
-        /// The prose capsule: Prose / nvim segments, ⤢ pop out, ◐ doc style
-        /// (`installProseSwitch`).
-        fn notes_prose_switch_event(&self, ev: crate::ui::prose_switch::ProseSwitchEvent) {
-            use crate::ui::prose_switch::ProseSwitchEvent as P;
-            match ev {
-                P::Mode(on) => {
-                    self.notes_surface(|s| s.set_prose(on));
-                }
-                P::PopOut => {
-                    self.notes_surface(|s| {
-                        if let Some(v) = s.vim_pane() {
-                            v.command("silent! update");
-                        }
-                        s.pop_out_prose();
-                    });
-                }
-                P::Style => self.notes_doc_style_menu(),
-            }
-        }
-
-        /// A message from the reading view's page scripts.
-        fn notes_prose_msg(&self, m: crate::views::notes_prose::ProseMsg) {
-            use crate::views::notes_prose::ProseMsg as M;
-            match m {
-                M::Search(state) => {
-                    self.notes_surface(|s| {
-                        if let Some(p) = s.prose_pane() {
-                            p.state.set_search_state(&state);
-                        }
-                    });
-                }
-                M::Jump(n) => {
-                    self.notes_surface(|s| s.prose_jump(n));
-                }
-                M::Image(path) => self.notes_open_image(path),
-            }
-        }
-
-        /// `PopupTextView.onPasteImage` — save the pasted image next to the
-        /// note (`assets/img-<epoch>.png`) and insert it as an inline
-        /// attachment.
-        fn notes_paste_image(&self, img: objc2::rc::Retained<objc2_app_kit::NSImage>) {
-            #[cfg(target_os = "macos")]
-            {
-                self.notes_surface(|s| {
-                    let Some(path) = s.selected_path() else { return };
-                    if let Some(rel) = crate::views::notes_vim::save_image(&path, &img) {
-                        s.insert_image_attachment(&rel, &img);
-                    }
-                });
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = img;
-            }
-        }
-
-        /// `FilePopup.show(path, over: panel)` — the floating image popup.
-        fn notes_open_image(&self, path: String) {
-            // Attachment clicks carry the markdown-relative target; resolve it
-            // against the selected note before showing.
-            let resolved = self
-                .notes_surface(|s| s.resolve_image_path(&path))
-                .unwrap_or_else(|| path.clone());
-            let parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> = self
-                .ivars()
-                .state
-                .borrow()
-                .as_ref()
-                .map(|st| st.window.clone().into_super());
-            crate::views::file_popup::show(&resolved, parent.as_deref());
-        }
-
-        /// `docTemplateMenu` — the ◐ document-style menu
-        /// (`doc_templates.menu` → pick → `doc_templates.edit`).
-        fn notes_doc_style_menu(&self) {
-            use crate::ui::menu_kit::{popup, MenuEntry};
-            let Some(Some(text)) = self.notes_surface(|s| s.prose_markdown()) else { return };
-            let configured = crate::views::notes::section_value("notes", "doc-templates").unwrap_or_default();
-            let css_path = crate::views::notes::section_value("notes", "pdf-css")
-                .map(|v| v.trim().to_string())
-                .unwrap_or_default();
-            let css = if css_path.is_empty() {
-                String::new()
-            } else {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let p = match css_path.strip_prefix("~/") {
-                    Some(rest) => format!("{home}/{rest}"),
-                    None => css_path.clone(),
-                };
-                std::fs::read_to_string(p).unwrap_or_default()
-            };
-            let menu = crate::app::python_helper::PythonHelper::shared()
-                .call(
-                    "doc_templates.menu",
-                    serde_json::json!({"text": text, "configured": configured, "css": css}),
-                    std::time::Duration::from_secs(3),
-                    std::time::Duration::from_secs(3),
-                )
-                .ok();
-            let names: Option<Vec<String>> = menu.as_ref().and_then(|m| {
-                m.get("names")?
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            });
-            let current = menu
-                .as_ref()
-                .and_then(|m| m.get("current"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let mouse = objc2_app_kit::NSEvent::mouseLocation();
-            let Some(names) = names else {
-                popup(vec![MenuEntry::disabled("Document styles unavailable (python helper)")], None, mouse.x, mouse.y);
-                return;
-            };
-            let mut entries = vec![MenuEntry::Header("Document style".to_string())];
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            entries.push(MenuEntry::checked("Plain (no style)", current.is_none(), move || {
-                if let Some(ui) = weak.load() {
-                    ui.notes_apply_doc_template(None);
-                }
-            }));
-            entries.push(MenuEntry::Separator);
-            for name in names {
-                let weak = objc2::rc::Weak::from_retained(&self.retain());
-                let on = current.as_deref() == Some(name.as_str());
-                let n = name.clone();
-                entries.push(MenuEntry::checked(&name, on, move || {
-                    if let Some(ui) = weak.load() {
-                        ui.notes_apply_doc_template(Some(n));
-                    }
-                }));
-            }
-            popup(entries, None, mouse.x, mouse.y);
-        }
-
-        /// `applyDocTemplate` + `applyDocTemplateChange`.
-        fn notes_apply_doc_template(&self, name: Option<String>) {
-            let Some(Some(text)) = self.notes_surface(|s| s.prose_markdown()) else { return };
-            let r = crate::app::python_helper::PythonHelper::shared().call(
-                "doc_templates.edit",
-                serde_json::json!({"text": text, "template": name}),
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(3),
-            );
-            let edit = r.ok().and_then(|v| {
-                let remove = v.get("remove")?.as_i64()?;
-                let insert: Vec<String> = v
-                    .get("insert")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect();
-                Some((remove, insert))
-            });
-            let Some((remove, insert)) = edit else {
-                crate::ui::toast::show("Style change failed (python helper)", "exclamationmark.triangle.fill");
-                return;
-            };
-            if remove == 0 && insert.is_empty() {
-                return;
-            }
-            self.notes_surface(|s| s.apply_doc_template_change(remove as usize, &insert));
-            self.notes_surface(|s| s.refresh_prose());
-            let msg = match &name {
-                Some(n) => format!("Style: {n}"),
-                None => "Style removed".to_string(),
-            };
-            crate::ui::toast::show(&msg, "paintpalette");
-        }
-
-        /// The notes pinned-folder tree: clicks toggle folders / open files;
-        /// the right-click menu follows the file-browser rule (copy absolute
-        /// path, copy file, open in notes, reveal in the app's own Files view).
-        fn notes_tree_event(&self, ev: crate::ui::tree_view::TreeEvent) {
-            use crate::ui::menu_kit::{popup, MenuEntry};
-            use crate::ui::tree_view::TreeEvent as E;
-            match ev {
-                E::ToggleSection => {
-                    self.notes_surface(|s| s.tree_toggle_section());
-                }
-                E::Click { path, is_dir } => {
-                    // Finder's slow second click on the open file renames it.
-                    let was_open = !is_dir && self.notes_surface(|s| s.tree_selected()).flatten().as_deref() == Some(path.as_str());
-                    let arm = Self::notes_click_arms_rename(&path) && was_open;
-                    self.notes_surface(|s| s.tree_click(&path, is_dir));
-                    if arm {
-                        schedule_click_rename(move |ui| ui.notes_begin_rename(path, None));
-                    }
-                }
-                E::Menu { path, is_dir, is_root, x, y } => {
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone());
-                    let mut entries = Vec::new();
-                    if is_dir {
-                        let w = weak.clone();
-                        entries.push(MenuEntry::item("New Note Here", move || {
-                            if let Some(ui) = w.load() {
-                                ui.notes_surface(|s| s.tree_new_note_in(&p4));
-                            }
-                        }));
-                        let w = weak.clone();
-                        entries.push(MenuEntry::item("Collapse / Expand", move || {
-                            if let Some(ui) = w.load() {
-                                ui.notes_surface(|s| s.tree_click(&p5, true));
-                            }
-                        }));
-                        entries.push(MenuEntry::Separator);
-                    } else {
-                        let w = weak.clone();
-                        entries.push(MenuEntry::item("Open in Notes", move || {
-                            if let Some(ui) = w.load() {
-                                ui.notes_surface(|s| s.tree_click(&p4, false));
-                            }
-                        }));
-                        entries.push(MenuEntry::Separator);
-                    }
-                    let pc = path.clone();
-                    entries.push(MenuEntry::item("Copy File", move || {
-                        copy_files_toast(&[pc]);
-                    }));
-                    if !is_root {
-                        let (w, pd) = (weak.clone(), path.clone());
-                        entries.push(MenuEntry::item("Duplicate", move || {
-                            use crate::engines::file_ops::FileOps;
-                            let o = FileOps::duplicate(&[pd], FileOps::shared());
-                            if let Some(ui) = w.load() {
-                                if let Some(msg) = o.failed.as_deref() {
-                                    crate::ui::toast::show(msg, "exclamationmark.triangle");
-                                }
-                                ui.notes_surface(|s| s.tree_refresh());
-                            }
-                        }));
-                    }
-                    entries.push(MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)));
-                    entries.extend(crate::views::files::copy_contents_entry(&path));
-                    entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])));
-                    if !is_root {
-                        entries.push(MenuEntry::Separator);
-                        let (w, pr) = (weak.clone(), path.clone());
-                        entries.push(MenuEntry::item("Rename\u{2026}  F2", move || {
-                            if let Some(ui) = w.load() {
-                                ui.notes_begin_rename(pr.clone(), None);
-                            }
-                        }));
-                        let (w, pt) = (weak.clone(), path.clone());
-                        entries.push(MenuEntry::item("Delete…", move || {
-                            if let Some(ui) = w.load() {
-                                ui.notes_confirm_delete(pt.clone());
-                            }
-                        }));
-                    }
-                    popup(entries, None, x, y);
-                }
-            }
-        }
-
-        /// Right-click ▸ Delete… on a note (tree or sidebar): confirm, move it
-        /// to the Trash, close its tab and drop it from the tree.
-        fn notes_confirm_delete(&self, path: String) {
-            let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            crate::ui::sheet::alert_sheet(
-                &window,
-                &format!("Delete \u{201c}{name}\u{201d}?"),
-                "It goes to the Trash.",
-                &["Move to Trash", "Cancel"],
-                move |b| {
-                    if b == 0 {
-                        if let Some(ui) = weak.load() {
-                            ui.notes_delete_now(&path);
-                        }
-                    }
-                },
-            );
-        }
-
-        /// Move a note to the Trash now (the confirmed half of
-        /// [`Self::notes_confirm_delete`], and `do:notes:delete:<path>`).
-        fn notes_delete_now(&self, path: &str) {
-            use crate::engines::file_ops::FileOps;
-            let o = FileOps::trash(&[path.to_string()], FileOps::shared());
-            match o.failed.as_deref() {
-                Some(msg) => crate::ui::toast::show(msg, "exclamationmark.triangle"),
-                None => {
-                    self.notes_surface(|s| s.tree_removed(path));
-                    crate::ui::toast::show("Moved to the Trash", "trash");
-                }
-            }
-        }
-
-        /// Finder's slow second click: a plain single click on the same row
-        /// as the previous one (within a few seconds) arms an inline rename;
-        /// a double-click cancels any pending one.
-        fn notes_click_arms_rename(path: &str) -> bool {
-            use objc2_app_kit::NSEventModifierFlags as F;
-            let Some(mtm) = MainThreadMarker::new() else { return false };
-            // `clickCount` is only defined for mouse events: on a KeyDown (the
-            // rail's Return) it raises an NSException, which unwound out of the
-            // sidebar's event callback and left the rail deaf to every click.
-            let single = NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| {
-                let m = e.modifierFlags();
-                matches!(
-                    e.r#type(),
-                    objc2_app_kit::NSEventType::LeftMouseDown | objc2_app_kit::NSEventType::LeftMouseUp
-                ) && e.clickCount() <= 1
-                    && !m.intersects(F::Command | F::Shift | F::Control | F::Option)
-            });
-            if !single {
-                cancel_click_rename();
-                NOTES_LAST_CLICK.with(|c| *c.borrow_mut() = None);
-                return false;
-            }
-            let now = now_secs();
-            let armed = NOTES_LAST_CLICK.with(|c| c.borrow().as_ref().is_some_and(|(p, t)| p == path && now - t < 4.0));
-            NOTES_LAST_CLICK.with(|c| *c.borrow_mut() = if armed { None } else { Some((path.to_string(), now)) });
-            if !armed {
-                cancel_click_rename();
-            }
-            armed
-        }
-
-        /// Rename a note file / folder in place: an edit field over its row
-        /// in the Open list (`tab = Some(i)`) or the pinned tree. A collapsed
-        /// rail (no row to edit over) asks in a sheet instead.
-        fn notes_begin_rename(&self, path: String, tab: Option<usize>) {
-            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            if name.is_empty() {
-                return;
-            }
-            let is_dir = std::path::Path::new(&path).is_dir();
-            let spot = self
-                .notes_surface(|s| -> Option<(Retained<NSView>, NSRect)> {
-                    match tab {
-                        Some(i) => {
-                            let v = s.sidebar_view();
-                            let r = v.title_rect(i)?;
-                            Some((Retained::into_super(Retained::into_super(v)), r))
-                        }
-                        None => {
-                            let v = s.tree_view();
-                            let r = v.name_rect(&path)?;
-                            Some((Retained::into_super(Retained::into_super(v)), r))
-                        }
-                    }
-                })
-                .flatten();
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let Some((parent, rect)) = spot else {
-                let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-                crate::ui::sheet::form_sheet(
-                    &window,
-                    "Rename",
-                    &tilde_path(&path),
-                    vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
-                    "Rename",
-                    move |answer| {
-                        let Some(text) = answer.and_then(|v| v.into_iter().next()) else { return };
-                        if let Some(ui) = weak.load() {
-                            ui.notes_rename_commit(&path, &text);
-                        }
-                    },
-                );
-                return;
-            };
-            let wp = objc2::rc::Weak::from_retained(&parent);
-            crate::ui::inline_rename::begin(
-                &parent,
-                rect,
-                &name,
-                is_dir,
-                crate::ui::theme::section_colors("notes"),
-                12.5,
-                Box::new(move |text| {
-                    let Some(ui) = weak.load() else { return };
-                    if let Some(t) = text {
-                        ui.notes_rename_commit(&path, &t);
-                    }
-                    // Give the keyboard back to the editor unless the click
-                    // that ended the rename went into another text input.
-                    let typing = wp
-                        .load()
-                        .and_then(|p| p.window())
-                        .and_then(|w| w.firstResponder())
-                        .is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSTextView as objc2::ClassType>::class()));
-                    if !typing {
-                        ui.notes_surface(|s| s.focus_editor());
-                    }
-                }),
-            );
-        }
-
-        fn notes_rename_commit(&self, path: &str, name: &str) {
-            match self.notes_surface(|s| s.rename_path(path, name)) {
-                Some(Err(msg)) => crate::ui::toast::show(&msg, "exclamationmark.triangle.fill"),
-                Some(Ok(Some(dst))) => {
-                    let n = std::path::Path::new(&dst).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    crate::ui::toast::show(&format!("Renamed to {n}"), "pencil");
-                }
-                _ => {}
-            }
-        }
-
-        fn notes_sidebar_event(&self, ev: crate::ui::sidebar::SidebarEvent) {
-            use crate::ui::sidebar::SidebarEvent as E;
-            match ev {
-                E::Select(i) => {
-                    // Click the open note's row again (Finder's slow second
-                    // click) to rename it in place.
-                    let path = self.notes_surface(|s| s.tab_path(i)).flatten();
-                    let arm = path.as_deref().is_some_and(Self::notes_click_arms_rename);
-                    self.notes_surface(|s| s.click_row(i));
-                    if let (true, Some(p)) = (arm, path) {
-                        schedule_click_rename(move |ui| ui.notes_begin_rename(p, Some(i)));
-                    }
-                }
-                E::Close(i) => {
-                    self.notes_surface(|s| s.close_tab(i));
-                }
-                E::Add => {
-                    self.notes_surface(|s| s.new_note());
-                }
-                E::Rail(c) => {
-                    self.notes_surface(|s| s.rail_changed(c));
-                }
-                E::MenuRow(i, x, y) => {
-                    use crate::ui::menu_kit::{popup, MenuEntry};
-                    let Some(Some(path)) = self.notes_surface(|s| s.tab_path(i)) else { return };
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p3, pr, w) = (path.clone(), path.clone(), path.clone(), weak.clone());
-                    let (pd, wd) = (path.clone(), weak.clone());
-                    popup(
-                        [vec![
-                            MenuEntry::item("Rename\u{2026}  F2", move || {
-                                if let Some(ui) = w.load() {
-                                    ui.notes_begin_rename(pr.clone(), Some(i));
-                                }
-                            }),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
-                        ],
-                        crate::views::files::copy_contents_entry(&path).into_iter().collect(),
-                        vec![
-                            MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Close", move || {
-                                if let Some(ui) = weak.load() {
-                                    ui.notes_surface(|s| s.close_tab(i));
-                                }
-                            }),
-                            MenuEntry::item("Delete\u{2026}", move || {
-                                if let Some(ui) = wd.load() {
-                                    ui.notes_confirm_delete(pd.clone());
-                                }
-                            }),
-                        ],
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .collect(),
-                        None,
-                        x,
-                        y,
-                    );
-                }
-                _ => {}
-            }
         }
 
         /// `CompareWindow.handleKey` from the key router: the model's verdict
@@ -7963,16 +6842,8 @@ mod daemon_ui {
             if on_side && !t.is_folder {
                 e.extend(crate::views::files::copy_contents_entry(&p));
             }
-            let (p1, p2) = (p.clone(), p.clone());
+            let p1 = p.clone();
             e.push(item("Reveal in Files", on_side, Box::new(move || reveal_in_files(&[p1]))));
-            if !t.is_folder {
-                let w = weak.clone();
-                e.push(item("Open in Notes", on_side, Box::new(move || {
-                    if let Some(ui) = w.load() {
-                        ui.open_in_notes(&p2);
-                    }
-                })));
-            }
             let w = weak.clone();
             e.push(item("Quick Look  Space", t.has_left || t.has_right, Box::new(move || {
                 let Some(ui) = w.load() else { return };
@@ -8163,20 +7034,10 @@ mod daemon_ui {
             let path = info.path.clone();
             let has_path = path.is_some();
             let p = path.clone().unwrap_or_default();
-            let (p1, p2, p3) = (p.clone(), p.clone(), p.clone());
+            let (p1, p2) = (p.clone(), p.clone());
             e.push(item("Copy Absolute Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
             e.extend(crate::views::files::copy_contents_entry(&p));
             e.push(item("Reveal in Files", has_path, Box::new(move || reveal_in_files(&[p2]))));
-            let w = weak.clone();
-            e.push(item(
-                "Open in Notes",
-                has_path,
-                Box::new(move || {
-                    if let Some(ui) = w.load() {
-                        ui.open_in_notes(&p3);
-                    }
-                }),
-            ));
             let w = weak.clone();
             e.push(MenuEntry::item("Open File into This Side…  (⌘O)", move || {
                 let opts = crate::platform::PickOpts {
@@ -8410,7 +7271,7 @@ mod daemon_ui {
                     if let Some(Some(i)) = idx {
                         ui.ai_select(i);
                     }
-                    ui.open_in_notes(&path);
+                    open_path(&path);
                 },
             );
         }
@@ -8423,7 +7284,10 @@ mod daemon_ui {
             let (r2, r3) = (r.clone(), r.clone());
             popup(
                 [vec![
-                    file_action_open_in_notes(&r.path, &weak),
+                    {
+                        let p = r.path.clone();
+                        MenuEntry::item("Open", move || open_path(&p))
+                    },
                     MenuEntry::Separator,
                     file_action_copy_path(&r.path),
                 ],
@@ -10521,11 +9385,9 @@ mod daemon_ui {
                     }
                 }));
                 if let Some(Some(r)) = self.ai_surface(|a| a.model.rule().cloned()) {
-                    let c = self.ivars().controller.clone();
                     let path = r.path.clone();
-                    out.push(MenuEntry::item(&format!("Edit “{}” in Notes", r.name), move || {
-                        c.set_pending_note_external(path.clone());
-                        c.open(SlotView::Notes);
+                    out.push(MenuEntry::item(&format!("Edit “{}”", r.name), move || {
+                        open_path(&path);
                     }));
                 }
                 if let Some(dir) = self.ai_surface(|a| a.model.rules_dir()) {
@@ -11688,15 +10550,6 @@ mod daemon_ui {
                         let p = first.clone();
                         move || copy_text_to_pasteboard(&p)
                     })),
-                    open_in_notes: Some(Box::new({
-                        let w = weak.clone();
-                        let p = first.clone();
-                        move || {
-                            if let Some(ui) = w.load() {
-                                ui.open_in_notes(&p);
-                            }
-                        }
-                    })),
                 };
                 entries = crate::views::files::file_context_menu(&first, actions);
                 if let Some(e) = quick_look {
@@ -11771,58 +10624,9 @@ mod daemon_ui {
             }
         }
 
-        /// `showNoteFind(grep:)`: the open-notes picker / ripgrep window.
-        fn show_note_find(&self, grep: bool) {
-            use crate::views::note_find::{NoteFindConfig, NoteFindUi};
-            use crate::views::notes::NoteFindMode;
-            let Some(mtm) = MainThreadMarker::new() else { return };
-            let slot = if grep { &self.ivars().note_grep } else { &self.ivars().note_find };
-            let own = slot.borrow().clone();
-            // `showNoteFind`: toggle the same panel, and hide the other mode's
-            // window first (files vs grep).
-            if let Some(u) = &own {
-                if u.is_shown() {
-                    u.hide();
-                    return;
-                }
-            }
-            let other = if grep { &self.ivars().note_find } else { &self.ivars().note_grep };
-            if let Some(o) = other.borrow().clone() {
-                o.hide();
-            }
-            let ui = match own {
-                Some(u) => u,
-                None => {
-                    let text = crate::app::config::read_config_text().unwrap_or_default();
-                    let sec = super::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
-                    let mode = if grep { NoteFindMode::Grep } else { NoteFindMode::Files };
-                    let u = NoteFindUi::new(mtm, mode, NoteFindConfig::from_section(&sec));
-                    u.set_on_open(Box::new(|path, line| {
-                        let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) else { return };
-                        ui.open_in_notes(&path);
-                        if let Some(n) = line {
-                            // `vimCommand("normal! NGzz")` once nvim has the buffer.
-                            dispatch2::DispatchQueue::main()
-                                .after(dispatch2::DispatchTime::NOW.time(250_000_000), move || {
-                                    let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) else { return };
-                                    ui.notes_surface(|s| s.vim_command(&format!("normal! {n}Gzz")));
-                                })
-                                .ok();
-                        }
-                    }));
-                    let c = self.ivars().controller.clone();
-                    u.set_on_log(Box::new(move |m| c.log(&m)));
-                    *slot.borrow_mut() = Some(u.clone());
-                    u
-                }
-            };
-            let paths = self.notes_surface(|s| s.rail_paths()).unwrap_or_default();
-            ui.show(paths);
-        }
-
         /// `showSidebarJump(_:)`: toggle the jump list over the Jira rail.
         fn show_sidebar_jump(&self) {
-            use crate::views::note_find::{JumpItem, NoteFindConfig, SidebarJumpUi};
+            use crate::views::pane_find::{JumpItem, PaneFindConfig, SidebarJumpUi};
             let Some(mtm) = MainThreadMarker::new() else { return };
             let Some(bar) = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|j| j.1.sidebar())) else {
                 self.ivars().controller.log("jira-jump: the Jira view is not built");
@@ -11837,8 +10641,8 @@ mod daemon_ui {
             }
             let ui = existing.unwrap_or_else(|| {
                 let text = crate::app::config::read_config_text().unwrap_or_default();
-                let sec = super::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
-                let u = SidebarJumpUi::new(mtm, NoteFindConfig::from_section(&sec));
+                let sec = super::parse_sections(&text).get("pane-find").cloned().unwrap_or_default();
+                let u = SidebarJumpUi::new(mtm, PaneFindConfig::from_section(&sec));
                 *self.ivars().sidebar_jump.borrow_mut() = Some(u.clone());
                 u
             });
@@ -12029,201 +10833,6 @@ mod daemon_ui {
             true
         }
 
-        /// `NoteFindWindow.key(_:_:)` while its panel is key.
-        fn note_find_key(&self, event: &NSEvent) -> bool {
-            use objc2_app_kit::NSEventModifierFlags as F;
-            if let Some(j) = self.ivars().sidebar_jump.borrow().clone().filter(|u| u.has_key()) {
-                use objc2_app_kit::NSEventModifierFlags as F;
-                let ctrl = event.modifierFlags().contains(F::Control);
-                match event.keyCode() {
-                    popup::KEY_ESC => j.hide(),
-                    popup::KEY_DOWN => j.move_selection(1),
-                    45 if ctrl => j.move_selection(1),
-                    popup::KEY_UP => j.move_selection(-1),
-                    35 if ctrl => j.move_selection(-1),
-                    popup::KEY_RETURN | 76 => j.open(j.selection()),
-                    _ => return false,
-                }
-                if !j.is_shown() {
-                    if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
-                        if w.isVisible() {
-                            w.makeKeyAndOrderFront(None);
-                        }
-                    }
-                }
-                return true;
-            }
-            // The `<leader>sf` pane item finder (Jira / Confluence / files /
-            // sidebar): nav + accept only, so typing reaches its search field.
-            let pf_open = self.ivars().pane_find.borrow().clone();
-            if let Some(pf) = pf_open.filter(|u| u.has_key()) {
-                let ctrl = event.modifierFlags().contains(F::Control);
-                match event.keyCode() {
-                    popup::KEY_ESC => pf.hide(),
-                    popup::KEY_DOWN => pf.move_selection(1),
-                    45 if ctrl => pf.move_selection(1),
-                    popup::KEY_UP => pf.move_selection(-1),
-                    35 if ctrl => pf.move_selection(-1),
-                    popup::KEY_RETURN | 76 => pf.open(pf.selection()),
-                    _ => return false,
-                }
-                if !pf.is_shown() {
-                    if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
-                        if w.isVisible() {
-                            w.makeKeyAndOrderFront(None);
-                        }
-                    }
-                }
-                return true;
-            }
-            let ui = [&self.ivars().note_find, &self.ivars().note_grep]
-                .iter()
-                .find_map(|s| s.borrow().clone().filter(|u| u.has_key()));
-            let Some(ui) = ui else { return false };
-            let mods = event.modifierFlags();
-            let (cmd, ctrl) = (mods.contains(F::Command), mods.contains(F::Control));
-            match event.keyCode() {
-                popup::KEY_ESC => ui.hide(),
-                13 if cmd => ui.hide(),
-                popup::KEY_DOWN => ui.move_selection(1),
-                45 if ctrl => ui.move_selection(1),
-                popup::KEY_UP => ui.move_selection(-1),
-                35 if ctrl => ui.move_selection(-1),
-                popup::KEY_RETURN | 76 => ui.open(ui.selection()),
-                8 if cmd && !ui.field_has_selection() => {
-                    if let Some(p) = ui.selected_path() {
-                        copy_text_to_pasteboard(&p);
-                        crate::ui::toast::show(&format!("Copied {}", p.replace(&std::env::var("HOME").unwrap_or_default(), "~")), "checkmark.circle.fill");
-                    }
-                }
-                _ => return false,
-            }
-            if !ui.is_shown() {
-                // `hide(restore: true)`: the keyboard returns to the notes window.
-                if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
-                    if w.isVisible() {
-                        w.makeKeyAndOrderFront(None);
-                    }
-                }
-            }
-            true
-        }
-
-        /// `PopupTextView.menu(for:)`: the plain notes editor's right-click.
-        /// On an image link: Open Full Size, then Copy Absolute Path (the
-        /// image); then Copy Absolute Path (the note) and Open file at path….
-        ///
-        /// Labels and order follow the shared [`crate::views::notes::NOTE_MENU_ORDER`]
-        /// (see also [`crate::views::notes::prose_menu_rows`] and the
-        /// `NoteMenuRow::process_dependent` rule: this is an in-process surface,
-        /// so process-dependent rows are valid here; the prose pop-out omits them).
-        fn notes_editor_menu(&self, idx: usize) {
-            use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let Some((image, note, view)) = self.notes_surface(|s| {
-                s.editor_view()
-                    .map(|v| (s.image_path_at(idx), s.selected_path(), v))
-            }).flatten() else {
-                return;
-            };
-            let mut e = Vec::new();
-            if let Some(path) = image {
-                let weak = objc2::rc::Weak::from_retained(&self.retain());
-                let p = path.clone();
-                e.push(MenuEntry::item("Open Full Size", move || {
-                    if let Some(ui) = weak.load() {
-                        ui.notes_open_image(p);
-                    }
-                }));
-                e.push(MenuEntry::Separator);
-                e.push(file_action_copy_path(&path));
-            } else if let Some(note) = note {
-                // Only when the click is not on an image: otherwise the image's
-                // "Copy Absolute Path" is the row the user wants, and a second
-                // identically-labelled row copying the note would just confuse.
-                e.push(file_action_copy_path(&note));
-                e.extend(crate::views::files::copy_contents_entry(&note));
-            }
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            e.push(MenuEntry::item("Open file at path…", move || {
-                if let Some(ui) = weak.load() {
-                    ui.route_open_path_prompt();
-                }
-            }));
-            popup_context(e, &view);
-        }
-
-        /// One font step per ~12% of pinch over the note editor.
-        fn notes_pinch(&self, event: &NSEvent) -> bool {
-            if self.ivars().controller.current() != Some(SlotView::Notes) {
-                return false;
-            }
-            if self.notes_surface(|s| s.editor_contains(event)) != Some(true) {
-                return false;
-            }
-            if event.phase().contains(objc2_app_kit::NSEventPhase::Began) {
-                self.ivars().pinch_acc.set(0.0);
-            }
-            let acc = self.ivars().pinch_acc.get() + event.magnification();
-            if acc.abs() >= 0.12 {
-                let sign = if acc > 0.0 { 1 } else { -1 };
-                self.notes_surface(|s| s.step_font(sign));
-                self.ivars().pinch_acc.set(0.0);
-            } else {
-                self.ivars().pinch_acc.set(acc);
-            }
-            true
-        }
-
-        /// The notes drawer terminal's right-click menu (Swift
-        /// `terminalMenu(for:)` plus rule 2's file items, which act on the
-        /// selected text as a path). `false` = not on the terminal.
-        fn terminal_right_click(&self, event: &NSEvent) -> bool {
-            if self.ivars().controller.current() != Some(SlotView::Notes) {
-                return false;
-            }
-            if self.notes_surface(|s| s.terminal_contains(event)) != Some(true) {
-                return false;
-            }
-            let at = NSEvent::mouseLocation();
-            // Pop the menu after this event returns (not inside the monitor).
-            let (x, y) = (at.x, at.y);
-            on_ui(move |ui| ui.terminal_menu(x, y));
-            true
-        }
-
-        fn terminal_menu(&self, x: f64, y: f64) {
-            use crate::ui::menu_kit::MenuEntry;
-            let selection = self.notes_surface(|s| s.terminal_selection()).flatten();
-            let path = selection.as_deref().and_then(terminal_selection_path);
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let edit = |title: &str, action: objc2::runtime::Sel| {
-                let w = weak.clone();
-                MenuEntry::item(title, move || {
-                    if let Some(ui) = w.load() {
-                        ui.notes_surface(|s| s.terminal_edit(action));
-                    }
-                })
-            };
-            let mut e = vec![
-                if selection.is_some() { edit("Copy", sel!(copy:)) } else { MenuEntry::disabled("Copy") },
-                edit("Paste", sel!(paste:)),
-            ];
-            if let Some(p) = path {
-                // The shared rule-2 core, so a path right-clicked in the
-                // terminal reads like Files: Open / Reveal / Rename… /
-                // Compress / Move to Trash / Copy / Open in Notes. There is
-                // no row to edit over here, so Rename… prompts in a sheet.
-                e.push(MenuEntry::Separator);
-                e.extend(crate::views::files::file_context_menu(
-                    &p,
-                    self.popup_file_actions(&p, None),
-                ));
-                e.push(MenuEntry::Separator);
-            }
-            e.push(edit("Select All", sel!(selectAll:)));
-            crate::ui::menu_kit::popup_at(e, x, y);
-        }
-
         // -- shared popup file actions ----------------------------------------
         //
         // The row popups without a FileBrowser/inline editor behind them —
@@ -12248,8 +10857,8 @@ mod daemon_ui {
             let w = objc2::rc::Weak::from_retained(&self.retain());
             let (po, pr, pre) = (path.to_string(), path.to_string(), path.to_string());
             let (pc, pt, pcf) = (path.to_string(), path.to_string(), path.to_string());
-            let (pcp, pn) = (path.to_string(), path.to_string());
-            let (wr, wc, wt, wn) = (w.clone(), w.clone(), w.clone(), w.clone());
+            let pcp = path.to_string();
+            let (wr, wc, wt) = (w.clone(), w.clone(), w);
             crate::views::files::FileMenuActions {
                 open: Some(Box::new(move || open_path(&po))),
                 reveal: Some(Box::new(move || reveal_in_files(&[pr]))),
@@ -12272,16 +10881,11 @@ mod daemon_ui {
                     copy_files_toast(&[pcf]);
                 })),
                 copy_path: Some(Box::new(move || copy_text_to_pasteboard(&pcp))),
-                open_in_notes: Some(Box::new(move || {
-                    if let Some(ui) = wn.load() {
-                        ui.open_in_notes(&pn);
-                    }
-                })),
             }
         }
 
         /// Finder-style "Rename…" for surfaces with no row to edit over:
-        /// the same `form_sheet` prompt the notes tree's Rename… flow uses
+        /// the same `form_sheet` prompt the old tree Rename… flow used
         /// when its rail hides the row, and the same commit semantics
         /// ([`Self::popup_rename_commit`]).
         fn popup_prompt_rename(
@@ -12321,7 +10925,7 @@ mod daemon_ui {
             );
         }
 
-        /// `notes_rename_commit`'s pattern on [`crate::views::files::rename_into`]:
+        /// the shared rename pattern on [`crate::views::files::rename_into`]:
         /// the "Renamed to …" toast on success, the warning on failure, and
         /// the recents rows repainted either way the shelf changed. The
         /// destination comes back to the caller so a preview can follow the
@@ -12406,16 +11010,6 @@ mod daemon_ui {
             });
         }
 
-        /// `openNoteFile(_:)` from a file browser: show notes on `path`.
-        fn open_in_notes(&self, path: &str) {
-            self.ivars().controller.open(SlotView::Notes);
-            self.present(SlotView::Notes);
-            let p = path.to_string();
-            // `open_external_path` adds (or selects) the tab so the sidebar
-            // lists the file; `open_note` alone only swapped the editor.
-            self.notes_surface(|s| s.open_external_path(&p));
-        }
-
         /// Show `paths` in the app's **own** file browser (`SlotView::Files`)
         /// instead of macOS Finder: a directory becomes the root, a file opens
         /// its parent with the file selected (all `paths` are marked). This is
@@ -12495,7 +11089,6 @@ mod daemon_ui {
 
         fn route_list_move(&self, delta: i64) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Notes) => self.notes_surface(|s| s.list_move(delta)).is_some(),
                 Some(SlotView::Files) => self
                     .files_surface(|b| b.list.move_selection(delta))
                     .is_some(),
@@ -12506,9 +11099,6 @@ mod daemon_ui {
 
         fn route_list_move_wrap(&self, delta: i64) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Notes) => {
-                    self.notes_surface(|s| s.list_move_wrap(delta)).is_some()
-                }
                 Some(SlotView::Files) => {
                     let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
                     if n == 0 {
@@ -12526,7 +11116,6 @@ mod daemon_ui {
 
         fn route_list_page(&self, page: popup::PageMove) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Notes) => self.notes_surface(|s| s.list_page(page)).is_some(),
                 Some(SlotView::Files) => {
                     let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
                     if n == 0 {
@@ -12549,11 +11138,10 @@ mod daemon_ui {
             }
         }
 
-        /// `acceptSelection` — notes: open the tab; files: enter a dir / open
+        /// `acceptSelection` — files: enter a dir / open
         /// a file (a directory re-roots the browser and swaps the view tree).
         fn route_list_accept(&self) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Notes) => self.notes_surface(|s| s.list_accept()).is_some(),
                 Some(SlotView::Files) => self.files_accept_selected(),
                 Some(v) if v.is_jira() => {
                     self.jira_event(crate::views::jira_view::JiraEvent::OpenDetail);
@@ -12565,7 +11153,6 @@ mod daemon_ui {
 
         fn route_list_toggle(&self) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Notes) => self.notes_surface(|s| s.list_toggle_selection()).is_some(),
                 Some(SlotView::Files) => {
                     let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
                     if n == 0 {
@@ -12700,12 +11287,11 @@ mod daemon_ui {
             }
         }
 
-        // -- notes rail / tabs / find / commit / open-path ---------------------
+        // -- sidebar rail -----------------------------------------------------
 
         /// Ctrl+B B / the ToggleSidebarRail key: flip the CURRENT view's
         /// left-pane rail. Every `SidebarView`-backed pane supports the
-        /// collapse (its own toggle button persists through the same key);
-        /// the old port only wired notes here.
+        /// collapse (its own toggle button persists through the same key).
         fn route_rail_toggle(&self) -> bool {
             let Some(v) = self.ivars().controller.current() else {
                 return false;
@@ -12727,9 +11313,6 @@ mod daemon_ui {
         /// sidebar flipped itself; the owner re-lays-out).
         fn apply_rail(&self, v: SlotView, on: bool) {
             match v {
-                SlotView::Notes => {
-                    self.notes_surface(|s| s.set_rail(on));
-                }
                 SlotView::Files => {
                     self.files_surface(|b| {
                         if let Some(view) = &b.view {
@@ -12759,55 +11342,6 @@ mod daemon_ui {
             }
         }
 
-
-        fn route_cycle_tabs(&self, dir: i32) -> bool {
-            self.notes_surface(|s| s.list_move_wrap(dir as i64)).is_some()
-        }
-
-        fn route_find_toggle(&self) -> bool {
-            self.notes_surface(|s| s.toggle_find()).is_some()
-        }
-
-        fn route_find_step(&self, dir: i32) -> bool {
-            let shown = self
-                .notes_surface(|s| s.find_shown())
-                .unwrap_or(false);
-            if !shown {
-                return false;
-            }
-            self.notes_surface(|s| s.find_step(dir as i64));
-            true
-        }
-
-        fn notes_find_close(&self) {
-            let _ = self.notes_surface(|s| s.close_find());
-        }
-
-        fn route_commit(&self) -> bool {
-            self.notes_surface(|s| s.commit()).unwrap_or(false)
-        }
-
-        /// Cmd+O — `onOpenPathPrompt`: a path sheet on the host window.
-        fn route_open_path_prompt(&self) -> bool {
-            if self.ivars().controller.current() != Some(SlotView::Notes) {
-                return false;
-            }
-            let Some(mtm) = MainThreadMarker::new() else {
-                return false;
-            };
-            let controller = self.ivars().controller.clone();
-            let state = self.ivars().state.borrow();
-            let Some(st) = state.as_ref() else {
-                return false;
-            };
-            present_path_sheet(mtm, &st.window, Box::new(move |value| {
-                if let Some(path) = value {
-                    controller.set_pending_note_external(path);
-                    controller.log("open file at path");
-                }
-            }));
-            true
-        }
 
         /// File-browser modified keys (`FilePopup` subset).
         fn route_file_browser(&self, action: popup::FileBrowserAction) -> bool {
@@ -12846,27 +11380,15 @@ mod daemon_ui {
             }
         }
 
-        /// The per-drain notes/files sync: external opens, `views.*` selection
-        /// extras.
+        /// The per-drain files/jira sync: `views.*` selection extras.
         fn sync_member_states(&self) {
-            if let Some(path) = self.ivars().controller.take_pending_note_external() {
-                let _ = self.notes_surface(|s| s.open_external_path(&path));
-            }
-            let mut notes_state = None;
             let mut files_state = None;
             let mut jira_state = None;
             let mut conf_w = None;
             let mut compare_w = None;
-            let mut responder = String::new();
             {
                 let state = self.ivars().state.borrow();
                 if let Some(st) = state.as_ref() {
-                    if let Some(fr) = st.window.firstResponder() {
-                        responder = fr.class().name().to_string_lossy().into_owned();
-                    }
-                    if let Some(s) = st.notes.as_ref() {
-                        notes_state = Some(s.selection_state());
-                    }
                     if let Some(b) = st.files.as_ref() {
                         files_state = Some(b.test_state());
                     }
@@ -12882,23 +11404,6 @@ mod daemon_ui {
                     conf_w = st.confluence.as_ref().map(|cs| cs.view.sidebar_width());
                     compare_w = st.compare.as_ref().map(|cs| cs.sidebar_width());
                 }
-            }
-            if let Some(mut v) = notes_state {
-                if let Some(o) = v.as_object_mut() {
-                    o.insert("responder".into(), json!(responder));
-                    let (vim_focus, sidebar_w) = {
-                        let state = self.ivars().state.borrow();
-                        let s = state.as_ref().and_then(|st| st.notes.as_ref());
-                        (s.map(|s| s.vim_has_focus()).unwrap_or(false), s.map(|s| s.sidebar_width()))
-                    };
-                    o.insert("vimFocus".into(), json!(vim_focus));
-                    if let Some(w) = sidebar_w {
-                        o.insert("sidebarWidth".into(), json!(w));
-                    }
-                }
-                self.ivars()
-                    .controller
-                    .set_view_state(SlotView::Notes, v);
             }
             if let Some(v) = files_state {
                 self.ivars()
@@ -12977,9 +11482,6 @@ mod daemon_ui {
         /// Apply a pane width to the live view (`do:sidebar-width:*`).
         fn apply_sidebar_width(&self, view: SlotView, width: f64) {
             match view {
-                SlotView::Notes => {
-                    self.notes_surface(|s| s.set_sidebar_width(width));
-                }
                 SlotView::Jira => {
                     let state = self.ivars().state.borrow();
                     if let Some((_, v)) = state.as_ref().and_then(|st| st.jira.as_ref()) {
@@ -13055,66 +11557,7 @@ mod daemon_ui {
                     }
                     let bounds = st.content.bounds();
                     if !st.views.contains_key(&v) {
-                        let view = if v == SlotView::Notes {
-                            match crate::views::notes::NotesSurface::build(mtm) {
-                                Some(surface) => {
-                                    let view = surface.content_view();
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.sidebar_view().set_on_event(Box::new(move |ev| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_sidebar_event(ev);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.tree_view().set_on_event(Box::new(move |ev| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_tree_event(ev);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.prose_switch().set_on_event(Box::new(move |ev| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_prose_switch_event(ev);
-                                        }
-                                    }));
-                                    let mut surface = surface;
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_prose_sink(std::rc::Rc::new(move |m| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_prose_msg(m);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_editor_menu(std::rc::Rc::new(move |idx| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_editor_menu(idx);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_editor_paste_image(std::rc::Rc::new(move |img| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_paste_image(img);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_editor_open_image(std::rc::Rc::new(move |path| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_open_image(path);
-                                        }
-                                    }));
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_vim_image_open(std::rc::Rc::new(move |path| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.notes_open_image(path);
-                                        }
-                                    }));
-                                    self.wire_sidebar_divider(SlotView::Notes, &surface.divider());
-                                    st.notes = Some(surface);
-                                    view
-                                }
-                                None => placeholder(mtm, v),
-                            }
-                        } else if v == SlotView::Files {
+                        let view = if v == SlotView::Files {
                             match self.build_files(mtm) {
                                 Some((browser, view)) => {
                                     if let (Some(fv), Some(z)) = (
@@ -13170,20 +11613,6 @@ mod daemon_ui {
                     let content = st.views.get(&v).cloned().unwrap();
                     st.content.addSubview(&content);
                     st.current = Some(v);
-                }
-                // Drain a queued `open:<path>` even when notes is already
-                // current, then focus the active editor (vim pane or text).
-                if v == SlotView::Notes {
-                    if let Some(surface) = st.notes.as_mut() {
-                        // A cached surface keeps the tree it read when it was
-                        // built: re-read the pinned roots and folders so `.md`
-                        // files created on disk show up on every round trip.
-                        surface.rescan_tree();
-                        if let Some(path) = controller.take_pending_note_open() {
-                            surface.open_note(&path);
-                        }
-                        surface.focus_editor();
-                    }
                 }
                 st.chrome.set_header_title(Some(v.title().to_string()));
                 st.chrome.set_nav_on(Some(v.nav_id() as i32));
@@ -13250,9 +11679,6 @@ mod daemon_ui {
             let controller = self.ivars().controller.clone();
             self.ivars().focus_watch.borrow_mut().reset();
             if let Some(st) = self.ivars().state.borrow().as_ref() {
-                if let Some(surface) = st.notes.as_ref() {
-                    surface.vim_flush();
-                }
                 st.window.orderOut(None);
             }
             if let Some(v) = controller.current() {
@@ -13393,7 +11819,6 @@ mod daemon_ui {
                 content,
                 views: HashMap::new(),
                 current: None,
-                notes: None,
                 files: None,
                 jira: None,
                 confluence: None,
@@ -13416,14 +11841,11 @@ mod daemon_ui {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ThemeScope {
         Window,
-        Notepad,
-        Terminal,
     }
 
     /// The `commands.toml` section that holds a view's colors (`cmd.name`).
     fn theme_section(v: SlotView) -> &'static str {
         match v {
-            SlotView::Notes => "notes",
             SlotView::Files => "files",
             SlotView::Confluence => "confluence",
             SlotView::Ai => "ai",
@@ -13446,7 +11868,7 @@ mod daemon_ui {
         format!("{assets}/{name}")
     }
 
-    /// The header nav icon per view (`notesNavIcon`, `filesNavIcon`,
+    /// The header nav icon per view (`filesNavIcon`,
     /// `jiraNavIcon`, `confluenceNavIcon`, `compareNavIcon`, `aiNavIcon`):
     /// the configured image file, else Swift's glyph fallback.
     fn nav_icon_image(
@@ -13462,7 +11884,6 @@ mod daemon_ui {
         match v {
             SlotView::Files => named_image("NSFolder")
                 .unwrap_or_else(|| glyph_icon("folder.fill", "F", jira_accent, 32.0)),
-            SlotView::Notes => glyph_icon("note.text", "N", srgb(0.98, 0.82, 0.35), 32.0),
             SlotView::Confluence => glyph_icon("book.pages", "C", jira_accent, 32.0),
             SlotView::Compare | SlotView::CompareText => {
                 glyph_icon("arrow.left.arrow.right", "⇆", srgb(0.53, 0.75, 0.95), 32.0)
@@ -13650,7 +12071,7 @@ mod daemon_ui {
     }
 
     /// Row move. Tab / Shift+Tab (`wrap = true`) cycles at the ends like
-    /// Notes/Files; arrow keys clamp — the audit's "Tab dead at the last
+    /// Files; arrow keys clamp — the audit's "Tab dead at the last
     /// row" was this clamping for both paths.
     fn jira_move(l: &mut crate::views::jira_view::JiraList, d: i64, wrap: bool) {
         let n = l.rows.len() as i64;
@@ -13824,96 +12245,6 @@ mod daemon_ui {
         }
     }
 
-    /// `presentPathSheet`: a small sheet window with a single-line field and
-    /// OK/Cancel; `on_result` runs on the main thread with the typed path.
-    fn present_path_sheet(
-        mtm: MainThreadMarker,
-        parent: &objc2_app_kit::NSWindow,
-        on_result: Box<dyn FnMut(Option<String>)>,
-    ) {
-        use objc2::MainThreadOnly;
-        use objc2_app_kit::{NSButton, NSFont, NSTextField, NSView, NSWindow, NSWindowStyleMask};
-        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-
-        let sheet: Retained<NSWindow> = unsafe {
-            let w: Retained<NSWindow> = msg_send![
-                NSWindow::alloc(mtm),
-                initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 128.0)),
-                styleMask: NSWindowStyleMask::Titled,
-                backing: objc2_app_kit::NSBackingStoreType::Buffered,
-                defer: false
-            ];
-            w
-        };
-        sheet.setTitle(&NSString::from_str("Open file at path"));
-        let content = NSView::initWithFrame(
-            NSView::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 128.0)),
-        );
-        let label = NSTextField::labelWithString(
-            &NSString::from_str("Absolute path (or ~/…) to open as a note:"),
-            mtm,
-        );
-        label.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        label.setFrame(NSRect::new(
-            NSPoint::new(16.0, 98.0),
-            NSSize::new(428.0, 18.0),
-        ));
-        let field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        field.setFrame(NSRect::new(
-            NSPoint::new(16.0, 62.0),
-            NSSize::new(428.0, 24.0),
-        ));
-        let ok = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Open"),
-                None,
-                None,
-                mtm,
-            )
-        };
-        ok.setFrame(NSRect::new(
-            NSPoint::new(460.0 - 16.0 - 88.0, 18.0),
-            NSSize::new(88.0, 30.0),
-        ));
-        let cancel = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Cancel"),
-                None,
-                None,
-                mtm,
-            )
-        };
-        cancel.setFrame(NSRect::new(
-            NSPoint::new(460.0 - 16.0 - 88.0 - 96.0, 18.0),
-            NSSize::new(88.0, 30.0),
-        ));
-        content.addSubview(&label);
-        content.addSubview(&field);
-        content.addSubview(&ok);
-        content.addSubview(&cancel);
-        sheet.setContentView(Some(&content));
-        sheet.setInitialFirstResponder(Some(&field));
-
-        let handler: Retained<PathSheetHandler> = unsafe {
-            let h = PathSheetHandler::alloc(mtm).set_ivars(PathSheetHandlerIvars {
-                sheet: sheet.clone(),
-                field: field.clone(),
-                on_result: RefCell::new(Some(on_result)),
-            });
-            msg_send![super(h), init]
-        };
-        unsafe {
-            ok.setTarget(Some(as_any(&*handler)));
-            ok.setAction(Some(sel!(ok:)));
-            cancel.setTarget(Some(as_any(&*handler)));
-            cancel.setAction(Some(sel!(cancel:)));
-        }
-        PATH_SHEET_HANDLERS.with(|v| v.borrow_mut().push(handler));
-        parent.beginSheet_completionHandler(&sheet, None);
-    }
-
 
     fn placeholder(mtm: MainThreadMarker, v: SlotView) -> Retained<NSView> {
         let colors = PopupColors::default();
@@ -13989,7 +12320,7 @@ mod tests {
         // Only the compare views, and only the diff-jump chords: arrows (and
         // modified forms the model does not claim) stay with the focused rail.
         assert!(!compare_before_rail(Some(SlotView::Jira), &key(45, true, false)));
-        assert!(!compare_before_rail(Some(SlotView::Notes), &key(35, true, false)));
+        assert!(!compare_before_rail(Some(SlotView::Files), &key(35, true, false)));
         assert!(!compare_before_rail(None, &key(45, true, false)));
         assert!(!compare_before_rail(Some(SlotView::Compare), &key(125, false, false)));
         assert!(!compare_before_rail(Some(SlotView::Compare), &key(45, false, false)));
@@ -14066,7 +12397,7 @@ mod tests {
     #[test]
     fn state_shape_defaults() {
         let c = controller();
-        c.set_member(SlotView::Notes, false, false, None);
+        c.set_member(SlotView::Files, false, false, None);
         let s = c.state_json();
         assert_eq!(s["view"], json!(""));
         assert_eq!(s["visible"], json!(false));
@@ -14080,11 +12411,9 @@ mod tests {
             Some(std::process::id() as u64)
         );
         assert!(s["pane"].is_object());
-        assert!(s["views"]["notes"].is_object());
-        assert_eq!(s["views"]["notes"]["shown"], json!(false));
-        assert_eq!(s["views"]["notes"]["terminal"], json!(false));
-        assert_eq!(s["views"]["notes"]["browser"], json!(false));
-        assert_eq!(s["views"]["notes"]["drawerInset"], json!(0));
+        assert!(s["views"]["files"].is_object());
+        assert_eq!(s["views"]["files"]["shown"], json!(false));
+        assert!(s["views"].get("notes").is_none(), "the notes view is gone");
         assert_eq!(s["viewSwitcher"]["shown"], json!(false));
         assert!(s["viewSwitcher"]["rows"].is_array());
         assert_eq!(s["paths"]["shown"], json!(false));
@@ -14135,11 +12464,11 @@ mod tests {
     #[test]
     fn open_updates_view_and_member_shown() {
         let c = controller();
-        c.open(SlotView::Notes);
+        c.open(SlotView::Ai);
         let s = c.state_json();
-        assert_eq!(s["view"], json!("notes"));
+        assert_eq!(s["view"], json!("ai"));
         assert_eq!(s["visible"], json!(true));
-        assert_eq!(s["views"]["notes"]["shown"], json!(true));
+        assert_eq!(s["views"]["ai"]["shown"], json!(true));
     }
 
     #[test]
@@ -14159,7 +12488,7 @@ mod tests {
         assert_eq!(c.do_action("cycle"), None);
         assert_eq!(c.current(), Some(SlotView::Files));
         assert_eq!(c.do_action("cycle"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.current(), Some(SlotView::Files), "no header views: cycle stays on Files");
         assert_eq!(c.do_action("hide"), None);
         assert_eq!(c.current(), None);
         assert_eq!(c.do_action("home"), None);
@@ -14169,21 +12498,21 @@ mod tests {
     #[test]
     fn cycle_walks_the_header_views_both_ways() {
         use SlotView::*;
-        let views = [Notes, Files, Jira, Confluence, Compare, Ai];
+        let views = [Files, Jira, Confluence, Compare, Ai];
         assert_eq!(cycle_target(&views, Some(Files), 1), Some(Jira));
-        assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Notes), "wraps forward");
-        assert_eq!(cycle_target(&views, Some(Notes), -1), Some(Ai), "wraps back");
+        assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Files), "wraps forward");
+        assert_eq!(cycle_target(&views, Some(Files), -1), Some(Ai), "wraps back");
         assert_eq!(cycle_target(&views, Some(Detail), 1), Some(Confluence), "a Jira sub view is Jira");
         assert_eq!(cycle_target(&views, Some(CompareText), -1), Some(Confluence));
-        assert_eq!(cycle_target(&views, None, 1), Some(Notes));
-        assert_eq!(cycle_target(&[], Some(Notes), 1), None);
+        assert_eq!(cycle_target(&views, None, 1), Some(Files));
+        assert_eq!(cycle_target(&[], Some(Files), 1), None);
 
         let mut c = controller();
         c.registry_mut().set_nav(vec![
-            (Notes, "Notes".into(), None),
             (Files, "Files".into(), None),
             (Jira, "Jira".into(), None),
             (Compare, "Compare".into(), None),
+            (Ai, "AI".into(), None),
         ]);
         c.open(Files);
         let mut seen = vec![];
@@ -14191,34 +12520,31 @@ mod tests {
             assert_eq!(c.do_action("cycle"), None);
             seen.push(c.current().unwrap());
         }
-        assert_eq!(seen, [Jira, Compare, Notes, Files]);
+        assert_eq!(seen, [Jira, Compare, Ai, Files]);
         assert_eq!(c.do_action("cycle-back"), None);
-        assert_eq!(c.current(), Some(Notes));
+        assert_eq!(c.current(), Some(Ai));
         assert_eq!(c.do_action("cycle-back"), None);
         assert_eq!(c.current(), Some(Compare));
     }
 
     #[test]
-    fn cycle_and_cycle_back_are_a_two_view_toggle() {
-        // With no header views registered, cycling falls back to Swift's
-        // `SharedWindow.cycle(_:)` toggle (`current == .files ? navNotes : navFiles`).
+    fn cycle_and_cycle_back_fall_back_to_files() {
+        // With no header views registered, both cycle verbs land on Files.
         let c = controller();
+        c.open(SlotView::Ai);
         assert_eq!(c.do_action("cycle-back"), None);
         assert_eq!(c.current(), Some(SlotView::Files));
-        assert_eq!(c.do_action("cycle-back"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
-        // Same sequence for the forward verb: Files <-> Notes.
+        c.open(SlotView::Ai);
         assert_eq!(c.do_action("cycle"), None);
         assert_eq!(c.current(), Some(SlotView::Files));
-        assert_eq!(c.do_action("cycle"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
     }
 
     #[test]
     fn dispatch_open_view_and_error() {
         let c = controller();
-        assert_eq!(c.do_action("open:notes"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.do_action("open:ai"), None);
+        assert_eq!(c.current(), Some(SlotView::Ai));
+        assert_eq!(c.do_action("open:notes").unwrap()["error"], json!("unknown view"));
         let err = c.do_action("open:bogus").unwrap();
         assert_eq!(err["error"], json!("unknown view"));
     }
@@ -14240,7 +12566,7 @@ mod tests {
         // A typo must be visible: unknown `do:` verbs answer `{"error": …}`
         // instead of the state that a success returns (F4).
         let c = controller();
-        for action in ["bogus-xyz", "file:/etc/hosts", "notes:bogus", "select:0"] {
+        for action in ["bogus-xyz", "file:/etc/hosts", "notes:state", "select:0"] {
             let err = c.do_action(action).unwrap_or_else(|| panic!("{action} must error"));
             assert_eq!(err["error"], json!(format!("unknown action {action}")));
         }
@@ -14267,20 +12593,20 @@ mod tests {
         assert_eq!(c.state_json()["headerStyle"], json!("aurora"));
         assert_eq!(c.do_action("header-style:bogus").unwrap()["error"], json!("unknown header style"));
 
-        assert_eq!(c.do_action("esc-hides:notes:on"), None);
-        assert_eq!(c.state_json()["escHides"]["notes"], json!(true));
-        assert_eq!(c.do_action("esc-hides:notes:off"), None);
-        assert_eq!(c.state_json()["escHides"]["notes"], json!(false));
+        assert_eq!(c.do_action("esc-hides:ai:on"), None);
+        assert_eq!(c.state_json()["escHides"]["ai"], json!(true));
+        assert_eq!(c.do_action("esc-hides:ai:off"), None);
+        assert_eq!(c.state_json()["escHides"]["ai"], json!(false));
     }
 
     #[test]
     fn esc_hide_count_reads_sections_and_app_default() {
         let c = controller();
-        assert_eq!(c.esc_hide_count(SlotView::Notes), 0, "app default esc-close");
-        c.set_esc_hides(SlotView::Notes, true);
-        assert_eq!(c.esc_hide_count(SlotView::Notes), 1);
-        c.set_esc_hides(SlotView::Notes, false);
-        assert_eq!(c.esc_hide_count(SlotView::Notes), 0);
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 0, "app default esc-close");
+        c.set_esc_hides(SlotView::Ai, true);
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 1);
+        c.set_esc_hides(SlotView::Ai, false);
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 0);
     }
 
     #[test]
@@ -14310,29 +12636,6 @@ mod tests {
         let err = c.do_action("tool-close:").unwrap();
         assert_eq!(err["error"], json!("not a tool panel: "));
         assert_eq!(c.do_action("tool-close:health"), None);
-    }
-
-    #[test]
-    fn drawer_toggles_update_state_and_queue() {
-        let c = controller();
-        let q = install_gui(&c);
-        assert_eq!(c.do_action("toggle-terminal"), None);
-        assert_eq!(c.state_json()["views"]["notes"]["terminal"], json!(true));
-        assert_eq!(c.state_json()["views"]["notes"]["drawerInset"], json!(200));
-        assert_eq!(c.do_action("toggle-browser"), None);
-        assert_eq!(c.state_json()["views"]["notes"]["browser"], json!(true));
-        assert_eq!(c.do_action("toggle-terminal"), None);
-        assert_eq!(c.state_json()["views"]["notes"]["terminal"], json!(false));
-        assert_eq!(c.state_json()["views"]["notes"]["drawerInset"], json!(0));
-        let cmds = q.lock().unwrap().clone();
-        assert_eq!(
-            cmds,
-            vec![
-                UiCommand::ToggleDrawer(DrawerSide::Terminal),
-                UiCommand::ToggleDrawer(DrawerSide::Browser),
-                UiCommand::ToggleDrawer(DrawerSide::Terminal),
-            ]
-        );
     }
 
     #[test]
@@ -14438,7 +12741,7 @@ mod tests {
         // `pane:*` needs a shown view (Swift guards `slot.current`).
         let err = c.do_action("pane:focus:editor").unwrap();
         assert_eq!(err["error"], json!("no view shown"));
-        c.open(SlotView::Notes);
+        c.open(SlotView::Ai);
         c.set_panes(vec![
             PaneSpec { id: "sidebar".into(), rect: RectI::new(0.0, 0.0, 200.0, 600.0) },
             PaneSpec { id: "editor".into(), rect: RectI::new(200.0, 0.0, 700.0, 600.0) },
@@ -14455,11 +12758,11 @@ mod tests {
     fn palette_commands_are_listed() {
         let mut c = controller();
         c.registry_mut()
-            .add_palette(PaletteCommand::new("notes", "Notes", "views"));
+            .add_palette(PaletteCommand::new("ai", "AI", "views"));
         c.registry_mut()
             .add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
         let s = c.state_json();
-        assert_eq!(s["paletteCommands"], json!(["Notes"]));
+        assert_eq!(s["paletteCommands"], json!(["AI"]));
     }
 
     #[test]
@@ -14467,7 +12770,7 @@ mod tests {
         let mut c = controller();
         for (id, title) in [
             ("paths", "Find Recent Files"),
-            ("notes", "Notes"),
+            ("jira", "Jira"),
             ("filefast", "Create File"),
             ("prettyprint", "Pretty Print"),
             ("text-table", "Text to Table"),
@@ -14534,7 +12837,7 @@ mod tests {
         let conf = dir.join("commands.toml");
         std::fs::write(
             &conf,
-            "[app]\nesc-close = 2\n\n[notes]\ntype = note\nesc-close = 1\n",
+            "[app]\nesc-close = 2\n\n[files]\nesc-close = 1\n",
         )
         .unwrap();
 
@@ -14548,7 +12851,7 @@ mod tests {
         let text = std::fs::read_to_string(&conf).unwrap();
         let sections = parse_esc_close(&text);
         assert_eq!(sections.get("app"), Some(&2));
-        assert_eq!(sections.get("notes"), Some(&1));
+        assert_eq!(sections.get("files"), Some(&1));
         assert_eq!(count_sections(&text), 2);
 
         let _ = c;
@@ -14577,7 +12880,7 @@ mod tests {
         // A valid file applies its `[app]` values.
         std::fs::write(
             &conf,
-            "[app]\nheader-style = aurora\nesc-close = 2\n\n[notes]\nesc-close = 1\n",
+            "[app]\nheader-style = aurora\nesc-close = 2\n\n[files]\nesc-close = 1\n",
         )
         .unwrap();
         let ok = c.reload_config();
@@ -14623,7 +12926,7 @@ mod tests {
 
         // A valid file that drops a key: the deleted key falls back to its
         // default instead of keeping the stale value (restart parity).
-        std::fs::write(&conf, "[app]\nesc-close = 2\n\n[notes]\nesc-close = 1\n").unwrap();
+        std::fs::write(&conf, "[app]\nesc-close = 2\n\n[files]\nesc-close = 1\n").unwrap();
         let ok = c.reload_config();
         assert_eq!(ok["ok"], json!(true), "{ok}");
         assert_eq!(c.state_json()["headerStyle"], json!("flat"));
@@ -14645,12 +12948,12 @@ mod tests {
     #[test]
     fn toggle_command_maps_modes() {
         let c = controller();
-        c.toggle_command("notes");
-        assert_eq!(c.current(), Some(SlotView::Notes));
-        c.toggle_command("notes");
+        c.toggle_command("ai");
+        assert_eq!(c.current(), Some(SlotView::Ai));
+        c.toggle_command("ai");
         assert_eq!(c.current(), None);
         c.toggle_command("window");
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.current(), Some(SlotView::Ai));
         c.toggle_command("jira");
         assert_eq!(c.current(), Some(SlotView::Jira));
     }
@@ -14660,12 +12963,12 @@ mod tests {
         // `SharedWindow.hideOrFocus`: a shown view the user is not in comes
         // forward instead of hiding.
         let c = controller();
-        c.open(SlotView::Notes);
+        c.open(SlotView::Ai);
         let mut inner = c.inner.lock().unwrap();
         inner.toggle(false);
-        assert_eq!(inner.current, Some(SlotView::Notes));
-        inner.hotkey(SlotView::Notes, false);
-        assert_eq!(inner.current, Some(SlotView::Notes));
+        assert_eq!(inner.current, Some(SlotView::Ai));
+        inner.hotkey(SlotView::Ai, false);
+        assert_eq!(inner.current, Some(SlotView::Ai));
         inner.toggle(true);
         assert_eq!(inner.current, None);
     }
@@ -14695,20 +12998,20 @@ mod tests {
     #[test]
     fn live_focus_overrides_present_time_mirrors() {
         let c = controller();
-        c.open(SlotView::Notes);
-        c.set_member(SlotView::Notes, true, true, None);
-        c.set_member_wid(SlotView::Notes, 7);
+        c.open(SlotView::Ai);
+        c.set_member(SlotView::Ai, true, true, None);
+        c.set_member_wid(SlotView::Ai, 7);
         c.set_member(SlotView::Files, false, true, None);
         let mut inner = c.inner.lock().unwrap();
         // another app is frontmost: nothing of ours is key
         inner.apply_live_focus(&LiveFocus { active: false, frontmost: 1, ..Default::default() });
         assert!(!inner.active);
         assert_eq!(inner.frontmost_pid, 1);
-        assert!(!inner.members[&SlotView::Notes].key);
+        assert!(!inner.members[&SlotView::Ai].key);
         assert!(!inner.members[&SlotView::Files].key);
         // the host window is key: only the current view reports key
         inner.apply_live_focus(&LiveFocus { active: true, key_wid: 7, ..Default::default() });
-        assert!(inner.members[&SlotView::Notes].key);
+        assert!(inner.members[&SlotView::Ai].key);
         assert!(!inner.members[&SlotView::Files].key);
     }
 
@@ -14722,8 +13025,8 @@ mod tests {
             cache_cleared: true,
         };
         c.apply_hotkey_prep(&prep);
-        c.launch_with_prep("notes", Some(prep));
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        c.launch_with_prep("ai", Some(prep));
+        assert_eq!(c.current(), Some(SlotView::Ai));
     }
 
     #[test]
@@ -14861,11 +13164,11 @@ mod tests {
         let c = controller();
         let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
         c.install_ui(q.clone());
-        c.open(SlotView::Notes);
+        c.open(SlotView::Ai);
         c.hide("test");
         assert_eq!(
             q.lock().unwrap().as_slice(),
-            &[UiCommand::Present(SlotView::Notes), UiCommand::Hide]
+            &[UiCommand::Present(SlotView::Ai), UiCommand::Hide]
         );
     }
 
@@ -14900,8 +13203,8 @@ enabled = true
         let ids: Vec<i64> = c.registry().nav_icons().iter().map(|n| n.id).collect();
         assert_eq!(
             ids,
-            vec![60, 64, 61, 65, 67, 66],
-            "notes first, then files / jira / confluence / compare / ai (Swift navIcons)"
+            vec![64, 61, 65, 67, 66],
+            "files / jira / confluence / compare / ai (Swift navIcons)"
         );
 
         let titles: Vec<String> =
@@ -14922,14 +13225,13 @@ enabled = true
         assert!(c.compare_model().is_some(), "compare handle held");
         assert!(c.screenshot_controller().is_some(), "screenshot handle held");
 
-        assert_eq!(c.do_action("notes:state"), Some(json!({ "available": true })));
         assert_eq!(c.do_action("compare:start"), None, "handled: falls through to state");
         assert_eq!(c.do_action("screenshot:close"), None, "handled: falls through to state");
 
         let mut off = controller();
         off.register_views_from_text("");
         let ids: Vec<i64> = off.registry().nav_icons().iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec![60, 64, 61], "confluence / compare / ai stay hidden");
+        assert_eq!(ids, vec![64, 61], "confluence / compare / ai stay hidden");
         assert!(off.compare_model().is_none());
         let titles: Vec<String> =
             off.registry().palette_commands().iter().map(|p| p.title.clone()).collect();
@@ -15111,7 +13413,7 @@ enabled = true
         // writes the owner's real NSUserDefaults (`sidebarRail.<view>`),
         // which tests stay out of (see settings.rs's ignored round-trip).
         let c = controller();
-        for v in ["notes", "files", "jira", "confluence", "ai", "compare"] {
+        for v in ["files", "jira", "confluence", "ai", "compare"] {
             let r = c.do_action(&format!("rail:{v}")).unwrap();
             assert_eq!(r["view"], json!(v));
             assert!(r["rail"].is_boolean(), "read on '{v}': {r}");
@@ -15153,7 +13455,7 @@ enabled = true
         let v = c.do_action("inspector-width:jira:10").unwrap();
         assert_eq!(v["inspectorWidth"], json!(180.0));
         // Only Jira has a right pane; non-numbers error.
-        assert!(c.do_action("inspector-width:notes").unwrap()["error"].is_string());
+        assert!(c.do_action("inspector-width:files").unwrap()["error"].is_string());
         assert!(c.do_action("inspector-width:jira:abc").unwrap()["error"].is_string());
         // `jira-inspector:show|hide|toggle` pushes the state change (no
         // direct reply); a bad verb is an error.
@@ -15178,7 +13480,7 @@ enabled = true
 [app]
 esc-close = 2
 
-[notes]
+[jira]
 enabled = true
 
 [files]
@@ -15193,7 +13495,7 @@ enabled = true
 [paths]
 enabled = true
 ";
-        assert_eq!(count_commands(text), 3, "notes + filefast + paths");
+        assert_eq!(count_commands(text), 3, "jira + filefast + paths");
         assert_eq!(count_commands("custom = echo hi\n"), 1, "top-level command");
         assert_eq!(count_commands(""), 0);
     }
@@ -15214,11 +13516,6 @@ label = \"Create File\"
 [paths]
 enabled = true
 label = \"Find Recent Files\"
-
-[notes]
-enabled = true
-in-palette = true
-label = \"Notes\"
 
 [jira]
 enabled = true
@@ -15263,7 +13560,6 @@ label = \"Compare\"
                 "Find Recent Files",
                 "Create File",
                 "Pretty Print",
-                "Notes",
                 "Jira",
                 "Health Checks",
                 "Confluence",
@@ -15274,7 +13570,7 @@ label = \"Compare\"
         );
         // The dedicated `listed()` blocks are the only place a view could be
         // added twice — assert each one shows up exactly once.
-        for title in ["Notes", "Jira", "Confluence", "AI", "Compare"] {
+        for title in ["Jira", "Confluence", "AI", "Compare"] {
             assert_eq!(
                 titles.iter().filter(|t| *t == title).count(),
                 1,
@@ -15287,7 +13583,7 @@ label = \"Compare\"
             c.registry().nav_icons().iter().map(|n| n.tip.as_str()).collect();
         assert_eq!(
             nav_tips,
-            vec!["Notes", "Files", "Jira", "Confluence", "Compare", "AI"]
+            vec!["Files", "Jira", "Confluence", "Compare", "AI"]
         );
     }
 
@@ -15297,11 +13593,6 @@ label = \"Compare\"
         // pane/switch list, which reads `nav_icons().tip`) together with the
         // palette — the three surfaces share one source of truth.
         let fixture = "\
-[notes]
-enabled = true
-in-palette = true
-label = \"Scratchpad\"
-
 [confluence]
 enabled = true
 label = \"Wiki\"
@@ -15317,13 +13608,13 @@ label = \"Assistant\"
             c.registry().nav_icons().iter().map(|n| n.tip.as_str()).collect();
         assert_eq!(
             nav_tips,
-            vec!["Scratchpad", "Files", "Jira", "Wiki", "Assistant"],
+            vec!["Files", "Jira", "Wiki", "Assistant"],
             "nav tips must take the config labels"
         );
 
         let titles: Vec<String> =
             c.registry().palette_commands().iter().map(|p| p.title.clone()).collect();
-        for label in ["Scratchpad", "Wiki", "Assistant"] {
+        for label in ["Wiki", "Assistant"] {
             assert!(
                 titles.iter().any(|t| t == label),
                 "palette must show the overridden label {label}: {titles:?}"
@@ -15340,11 +13631,7 @@ label = \"Assistant\"
             "paths:show",
             "tool:jira",
             "switcher",
-            "toggle-terminal",
-            "toggle-browser",
             "term",
-            "notes-find",
-            "notes-grep",
             "jira-jump",
             "reset-size",
         ] {
@@ -15359,8 +13646,6 @@ label = \"Assistant\"
         }
         let s = c.state_json();
         assert_eq!(s["paths"]["shown"], json!(false));
-        assert_eq!(s["views"]["notes"]["terminal"], json!(false));
-        assert_eq!(s["views"]["notes"]["browser"], json!(false));
         assert_eq!(s["terminalPanel"]["shown"], json!(false));
         assert_eq!(s["viewSwitcher"]["shown"], json!(false));
         assert!(s["tools"].as_object().map_or(true, |o| o.is_empty()));
@@ -15369,21 +13654,21 @@ label = \"Assistant\"
     #[test]
     fn back_returns_to_previous_view() {
         let c = controller();
-        assert_eq!(c.do_action("open:notes"), None);
+        assert_eq!(c.do_action("open:ai"), None);
         assert_eq!(c.do_action("open:files"), None);
         assert_eq!(c.current(), Some(SlotView::Files));
         assert_eq!(c.do_action("back"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.current(), Some(SlotView::Ai));
     }
 
     #[test]
     fn back_twice_walks_the_history_stack() {
         let c = controller();
-        for v in ["open:jira", "open:notes", "open:files"] {
+        for v in ["open:jira", "open:ai", "open:files"] {
             assert_eq!(c.do_action(v), None);
         }
         assert_eq!(c.do_action("back"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.current(), Some(SlotView::Ai));
         assert_eq!(c.do_action("back"), None);
         assert_eq!(c.current(), Some(SlotView::Jira));
     }
@@ -15413,8 +13698,8 @@ label = \"Assistant\"
         assert_eq!(c.state_json()["visible"], json!(true));
 
         // `show:<view>` opens the named view; unknown views error.
-        assert_eq!(c.do_action("show:notes"), None);
-        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.do_action("show:ai"), None);
+        assert_eq!(c.current(), Some(SlotView::Ai));
         let err = c.do_action("show:bogus").unwrap();
         assert_eq!(err["error"], json!("unknown view"));
     }

@@ -466,7 +466,7 @@ def main(argv=None) -> int:
     e.add_argument("--keys-only", action="store_true")
     e.set_defaults(fn=cmd_export)
     pa = sub.add_parser("parity", help="VS Code parity: standard keys a view's panes are missing")
-    pa.add_argument("--view", help="one view (notes, files, jira, confluence, compare, compare-folders, ai)")
+    pa.add_argument("--view", help="one view (files, jira, confluence, compare, compare-folders, ai)")
     pa.add_argument("--all", action="store_true", help="also the expectations that are met or waived")
     pa.add_argument("--json", action="store_true")
     pa.set_defaults(fn=cmd_parity)

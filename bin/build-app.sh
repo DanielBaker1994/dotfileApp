@@ -173,9 +173,6 @@ bundle_resources() {
     for f in $RESOURCE_FILES; do cp -p "$ROOT/$f" "$res/$f" || return 1; done
     awk '
         /^\[/ { sec = $0 }
-        sec == "[notes]" && /^paths[ \t]*=/ {
-            print "paths = \"~/notes, ~/.config/kitchen-sink/commands.toml\""; next }
-        sec == "[notes]" && /^pdf-css[ \t]*=/ { print "pdf-css = \"\""; next }   # the dotfiles style
         /^config[ \t]*=.*fake\.json/ { next }   # bin/fake-confluence.sh start
         /^vim-bin[ \t]*=/ { print "vim-bin = \"nvim\""; next }
         # Jira needs a site + token first: off until "Enable Jira" in the menu

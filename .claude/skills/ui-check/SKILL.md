@@ -1,6 +1,6 @@
 ---
 name: ui-check
-description: Verify a kitchen-sink UI change in seconds by querying the running daemon's state over its socket (views, frames, drawers, focus, tabs) instead of running the slow UI suite. Use after ./ws build when a change affects the shared window, views, drawers, or focus.
+description: Verify a kitchen-sink UI change in seconds by querying the running daemon's state over its socket (views, frames, focus, tabs) instead of running the slow UI suite. Use after ./ws build when a change affects the shared window, views, or focus.
 ---
 
 # ui-check — verify UI behavior through the daemon socket
@@ -13,12 +13,11 @@ live focus read on main) and `do_host_action` + the views' registry hooks:
 - `state` → one JSON line:
   `view` (visible shared-window view, "" = hidden), `visible`, `active`,
   `keyWindow`, `windows` (visible NSWindows), `palette` (switcher shown),
-  `views.<notes|files|jira|detail|releases|config|output|confluence|ai>` →
-  `shown`, `key`, `frame` [x,y,w,h], and for the popup views also
-  `drawerInset`, `terminal` / `browser` (drawer OPEN), `findBar`,
+  `views.<files|jira|detail|releases|config|output|confluence|ai>` →
+  `shown`, `key`, `frame` [x,y,w,h], and for files/jira also `findBar`,
   `accessory`, `pane`, `tabs`, `selectedTab`, `responder` (class name).
 - `do:ACTION` → runs it, answers the state afterwards. ACTION = `cycle`,
-  `cycle-back`, `hide`, `back`, `home`, `toggle`, `toggle-terminal`,
+  `cycle-back`, `hide`, `back`, `home`, `toggle`, `term`,
   `reset-size`, `open:VIEW`, `header-style:STYLE` (live only),
   `esc-hides:VIEW:on|off` (writes the view's `esc-close`),
   `paths:show|hide|return|select:N` (the /paths shelf popup; state `paths`
@@ -33,11 +32,11 @@ live focus read on main) and `do_host_action` + the views' registry hooks:
 2. Query:
    ```bash
    S="$TMPDIR/ws-notes.sock"
-   echo state | nc -U -w3 "$S" | jq '{view, visible, notes: .views.notes | {frame, drawerInset, terminal, browser, pane}}'
-   echo do:toggle-terminal | nc -U -w3 "$S" | jq '.views.notes | {terminal, frame, drawerInset}'
+   echo state | nc -U -w3 "$S" | jq '{view, visible, files: .views.files | {frame, pane}}'
+   echo do:open:files | nc -U -w3 "$S" | jq '.views.files | {shown, frame}'
    ```
 3. Assert the specific thing the change should affect. Put things back
-   afterwards (toggle drawers back, re-open the view the user was on) —
+   afterwards (re-open the view the user was on) —
    this is the user's live app.
 4. If state you need is missing, add it to `state_with_registry` / the
    view's `test_state` (and a `do:` verb in `do_host_action`) rather than

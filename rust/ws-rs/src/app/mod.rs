@@ -9,6 +9,7 @@ pub mod host;
 pub mod live_panes;
 pub mod logging;
 pub mod menu;
+pub mod pathfmt;
 pub mod paths;
 pub mod process_run;
 pub mod python_helper;

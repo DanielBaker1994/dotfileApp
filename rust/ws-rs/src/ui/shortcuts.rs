@@ -98,7 +98,6 @@ pub fn shared_groups(entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
 pub fn groups_for(view: &str, entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
     let mut out: Vec<ShortcutGroup> = Vec::new();
     let own: &[(&str, &str)] = match view {
-        "notes" => &[("Notes", "notes")],
         "files" => &[("Files", "files")],
         "jira" => &[("Jira", "jira")],
         "confluence" => &[("Confluence", "confluence")],
@@ -411,14 +410,14 @@ mod tests {
 x = 1
 [shortcuts]
 "all: Cmd+\\" = "collapse the sidebar"
-"notes: Cmd+S" = "save the note"
+"files: Cmd+C" = "copy the file"
 # a comment
 "sidebar: Return" = "open the row"
 "compare: Cmd+0" = "Home"
 "compare-folders: F5" = "scan again"
 "all: Ctrl+B W" = "prefix: view switcher — \"where\""
 [prettyprint]
-"notes: nope" = "not in shortcuts"
+"files: nope" = "not in shortcuts"
 "#;
 
     #[test]
@@ -432,9 +431,9 @@ x = 1
     #[test]
     fn groups_view_first_then_shared() {
         let e = parse_entries(CONF);
-        let g = groups_for("notes", &e);
+        let g = groups_for("files", &e);
         let titles: Vec<&str> = g.iter().map(|g| g.0.as_str()).collect();
-        assert_eq!(titles, ["Notes", "Sidebars", "Everywhere"]);
+        assert_eq!(titles, ["Files", "Sidebars", "Everywhere"]);
         let c = groups_for("compare", &e);
         assert_eq!(c[0].0, "Text Compare");
         assert_eq!(c[1].0, "Folder Compare");
@@ -495,7 +494,8 @@ x = 1
             return;
         }
         let e = parse_entries(&text);
-        for v in ["all", "notes", "files", "jira", "compare", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
+        for v in ["all", "files", "jira", "compare", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
+            assert!(!e.iter().any(|x| x.view == "notes"), "the notes view is gone");
             assert!(e.iter().any(|x| x.view == v), "no [shortcuts] rows for {v}");
         }
         // A shared `all:` row must not be copied into a view (guards against

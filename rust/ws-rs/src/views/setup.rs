@@ -547,7 +547,7 @@ pub fn run_preflight(asset_dir: &str, mode: &str, app: Option<&str>) -> Option<P
 
 /// The fallback intro/status text (`updateIntro`), used until the host wires
 /// the `[setup]` strings in.
-pub const DEFAULT_INTRO: &str = "What this Mac needs. Notes, files, Jira, Confluence and AI work on their own; the Hyper hotkeys and window borders are an optional extra step.";
+pub const DEFAULT_INTRO: &str = "What this Mac needs. Files, Jira, Confluence and AI work on their own; the Hyper hotkeys and window borders are an optional extra step.";
 pub const DEFAULT_TITLE: &str = "kitchen-sink — Setup & Health Check";
 pub const DEFAULT_WIDTH: f64 = 640.0;
 pub const DEFAULT_HEIGHT: f64 = 620.0;

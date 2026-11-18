@@ -1,7 +1,5 @@
 //! `FilePopup.swift` — the floating image / text preview window ("Open Full
-//! Size") shared by the notes editor's image attachments, the reading view's
-//! image double-click, the vim pane's inline images and the screenshot
-//! recents menu.
+//! Size") used by the screenshot recents menu and the file previews.
 //!
 //! Routing is [`FilePopup::route`]: an existing image file shows in the
 //! zoomable window, a short text file shows as selectable monospaced text,
@@ -267,7 +265,7 @@ mod appkit {
     /// `FilePopup.showText(_:path:over:)`.
     fn show_text(text: &str, over: Option<&NSWindow>, path: &str) {
         let Some(mtm) = MainThreadMarker::new() else { return };
-        let colors = crate::ui::theme::section_colors("notes");
+        let colors = crate::ui::theme::section_colors("files");
         let room = room_for(over);
         let tv = NSTextView::initWithFrame(
             NSTextView::alloc(mtm),
@@ -630,7 +628,7 @@ mod appkit {
                     crate::ui::sheet::form_sheet(
                         host,
                         "Rename",
-                        &crate::views::notes::tilde_path(&p, &home),
+                        &crate::app::pathfmt::tilde_path(&p, &home),
                         vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
                         "Rename",
                         move |answer| {

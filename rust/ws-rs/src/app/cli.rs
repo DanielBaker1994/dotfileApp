@@ -264,7 +264,7 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
                 return Outcome::Exit(0);
             }
             exec_launcher(paths, mode);
-            open_command = Some(if mode == "window" { "notes".to_string() } else { mode.to_string() });
+            open_command = Some(if mode == "window" { "files".to_string() } else { mode.to_string() });
         }
         _ => {}
     }

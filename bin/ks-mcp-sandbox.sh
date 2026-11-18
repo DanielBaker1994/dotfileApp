@@ -9,7 +9,7 @@
 #
 #   export KS_SOCKET="$(bin/ks-mcp-sandbox.sh sock)"
 #   printf 'state\n'          | nc -U -w3 "$KS_SOCKET" | jq .
-#   echo 'do:open:notes'      | nc -U -w3 "$KS_SOCKET" | jq .views.notes.shown
+#   echo 'do:open:files'      | nc -U -w3 "$KS_SOCKET" | jq .views.files.shown
 #
 # `start --gui` launches the real windowed app instead (isolated the same way,
 # via `open -n -g` so LaunchServices applies the bundle's TCC grants) so
@@ -36,11 +36,8 @@ PIDFILE="$SANDBOX/pid"
 # newer than the live app's last `./ws build`.
 APP="${KS_MCP_SANDBOX_APP:-$ROOT/kitchen-sink.app}"
 AERO_MARK="$SANDBOX/aerospace-disabled"
-# The app's HOME is this short alias of $SANDBOX/home. nvim listens on
-# $HOME/.cache/kitchen-sink/nvim-notes-<pid>.sock (notes_vim.rs socket_path),
-# and under the repo-relative sandbox HOME that path is ~105 bytes, past the
-# 103-byte AF_UNIX limit: nvim RPC then fails every time and the notes editor
-# misbehaves in ways the real app doesn't (2026-10-20 hammer, G1).
+# The app's HOME is this short alias of $SANDBOX/home, so unix-socket paths
+# under it stay well inside the 103-byte AF_UNIX limit.
 HOME_ALIAS="/tmp/ksb-$(printf '%s' "$SANDBOX" | shasum | cut -c1-8)"
 # Preferences live in NSUserDefaults keyed by bundle id, not under HOME: a GUI
 # sandbox (same bundle id) would read and write the LIVE app's settings.
@@ -123,10 +120,6 @@ cmd_start() {
     if [ "${#SOCK}" -ge 104 ]; then
         die "sandbox socket path is ${#SOCK} bytes (must be < 104): $SOCK"
     fi
-    local nvim_sock="$HOME_ALIAS/.cache/kitchen-sink/nvim-notes-99999.sock"
-    if [ "${#nvim_sock}" -ge 104 ]; then
-        die "nvim socket path would be ${#nvim_sock} bytes (must be < 104): $nvim_sock"
-    fi
 
     local pid=""
     if pid=$(find_pid) && is_ours "$pid" && socket_answers; then
@@ -150,7 +143,7 @@ cmd_start() {
     # binary from silently launching a windowed daemon (still isolated).
     local mode="headless"
     if [ "$gui" = 1 ]; then
-        mode="show"   # palette only; a bare start opens + activates the notes window
+        mode="show"   # palette only; a bare start opens + activates the shared window
     elif ! grep -aq "headless daemon" "$BIN"; then
         mode="show"
         echo "warning: $BIN has no headless mode — launching arg 'show' instead (GUI daemon, hidden window)" >&2

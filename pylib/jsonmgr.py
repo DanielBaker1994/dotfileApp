@@ -43,8 +43,6 @@ _HOMES = {
     "pylib/paneshot": "pylib/paneshot.json",
     "pylib/ansi": "pylib/ansi.json",
     "pylib/shelf": "pylib/shelf.json",
-    "pylib/prose_pdf": "pylib/prose_pdf.json",
-    "pylib/doc_templates": "pylib/doc_templates.json",
     "pylib/ai_format": "pylib/ai_format.json",
     "pylib/compare_text": "pylib/compare_text.json",
     "jira/defaults": "jira/defaults.json",

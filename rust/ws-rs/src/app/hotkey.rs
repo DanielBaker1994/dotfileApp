@@ -9,8 +9,6 @@ use std::time::Instant;
 /// `hotkeyPrep` before the main thread sees them.
 pub const HOTKEY_MODES: &[&str] = &[
     "window",
-    "notes",
-    "voice",
     "jira",
     "files",
     "confluence",
@@ -321,8 +319,6 @@ mod tests {
             HOTKEY_MODES,
             &[
                 "window",
-                "notes",
-                "voice",
                 "jira",
                 "files",
                 "confluence",

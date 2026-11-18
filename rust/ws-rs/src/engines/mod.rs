@@ -6,7 +6,6 @@ pub mod ansi_render;
 pub mod config_text;
 pub mod file_ops;
 pub mod list_filter;
-pub mod nvim_rpc;
 pub mod pane_shot;
 pub mod path_shelf;
 pub mod recent_files;

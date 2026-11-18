@@ -292,7 +292,7 @@ _MAP = re.compile(r"^\s*([nvxsoilct]?)(?:nore)?map!?\s+(?:<(?:silent|buffer|expr
 
 def vim(cat: Catalog) -> list:
     init = paths.vim_init()
-    text = _read(init)
+    text = _read(init) if init else None
     cat.sources["vim"] = init if text is not None else ""
     if text is None:
         return []
@@ -314,10 +314,10 @@ def vim(cat: Catalog) -> list:
             continue
         i = int(m.get("lnum") or 0) - 1
         mode = VIM_MODES.get(m["mode"], m["mode"])
-        rows.append(KeyRow(layer="vim", view=f"notes vim ({mode})", chords=[c], chord_text=m["lhs"],
+        rows.append(KeyRow(layer="vim", view=f"nvim ({mode})", chords=[c], chord_text=m["lhs"],
                            action=m.get("desc") or f"→ {m['rhs']}", source_file=init, line=i + 1,
                            doc=comment_above(lines, i) if i >= 0 else "",
-                           readonly_reason="the notes vim pane's init file",
+                           readonly_reason="your nvim init file",
                            id=f"vim:{m['mode']}:{m['lhs']}"))
     return rows
 

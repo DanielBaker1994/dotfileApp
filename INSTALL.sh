@@ -89,7 +89,7 @@ printf "${CYAN}
 │            kitchen-sink — one-command install          │
 └──────────────────────────────────────────────────────────────┘
 ${RESET}"
-printf "${DIM}This script installs a macOS app that gives you a notes window, a\nvoice-to-text window (dictate → text), a Jira issue browser, and a\nswitcher popup — plus AeroSpace and window borders.${RESET}\n"
+printf "${DIM}This script installs a macOS app that gives you a file browser, a Jira\nissue browser, Confluence / AI / compare views, and a switcher popup —\nplus AeroSpace and window borders.${RESET}\n"
 
 STEP="checking your Mac"
 step "0/6 checking your Mac"
@@ -193,6 +193,5 @@ printf "     list in ~/.config/jira/config.json (one job → one JSON file → o
 printf "     Jira window tab, written to ~/.cache/kitchen-sink/jira_json/).\n"
 printf "  4. Use it:\n"
 printf "       Hyper+S            switcher popup (search '/' for commands)\n"
-printf "       menu bar wrench    notes / jira / voice / health checks\n"
-printf "       voice window       red button = dictate, pause/resume, stop → text\n"
+printf "       menu bar wrench    jira / health checks\n"
 printf "\nUninstall anytime with: ./UNINSTALL.sh\n"

@@ -6,8 +6,8 @@ handling must honor these.
 ## 1. Obvious edit shortcuts always work in every text input
 
 Copy / Paste / Cut / Select All / Undo must work in **every** editable text
-field: the notes editor, the search/filter bars, the embedded terminal, and
-**every sheet prompt** (New Note, Open Existing…).
+field: the search/filter bars, the embedded terminal, tool panels, and
+**every sheet prompt** (Rename…, path prompts).
 
 - `Cmd+C` / `Cmd+V` / `Cmd+X` / `Cmd+A` / `Cmd+Z` — native macOS.
 - `Ctrl+V` (and `Ctrl+C`) — must paste/copy too, because the embedded
@@ -23,8 +23,9 @@ field: the notes editor, the search/filter bars, the embedded terminal, and
 ## 2. Right-click menus must offer obvious actions
 
 File browsers and the embedded terminal must have right-click menus with the
-actions users expect: copy the file, copy the absolute path, open the file in
-the notes app, and reveal it in the app's own Files view (`Reveal in Files`).
+actions users expect: copy the file, copy the absolute path, and reveal it in
+the app's own Files view (`Reveal in Files`). (The notes app was removed;
+markdown editing lives in nvim — `~/.dotfiles/nvim`.)
 
 ## 3. Config over code
 

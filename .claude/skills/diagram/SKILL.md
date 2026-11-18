@@ -1,12 +1,12 @@
 ---
 name: diagram
-description: Draw flowcharts, architecture, sequence and ER diagrams in markdown notes as ```dot (Graphviz) or ```d2 fences that render themed in the prose view and PDF. Use when asked to diagram, chart or visualize a flow, system, process or schema in a note or document. Prefer this over Mermaid.
+description: Draw flowcharts, architecture, sequence and ER diagrams in markdown notes as ```dot (Graphviz) or ```d2 fences that render themed in the nvim Prose preview and PDF. Use when asked to diagram, chart or visualize a flow, system, process or schema in a note or document. Prefer this over Mermaid.
 ---
 
 # diagram — text diagrams that render themed
 
-`diagrams.lua` (dotfiles `markdown_generator/`, wired by `[notes] pdf-filter` and
-`EXTERNAL_BUILD_AND_OPEN_PDF`) turns ```dot / ```graphviz / ```d2 fences into
+`diagrams.lua` (dotfiles `markdown_generator/`, wired by nvim's `:Prose`
+(`~/.dotfiles/nvim/lua/user/prose.lua`) and `EXTERNAL_BUILD_AND_OPEN_PDF`) turns ```dot / ```graphviz / ```d2 fences into
 inline SVG, coloured from the document's style marker. **Never write colors,
 fonts or sizes** — the style marker does that, and a hand-set color breaks theming.
 

@@ -18,22 +18,19 @@ use super::theme::c;
 use super::widgets;
 
 /// The actions a row's right-click menu offers (UX rule 2: copy the file, copy
-/// the absolute path, open the file in Notes, reveal it in the app's own Files
-/// view). Shared by the Files and Paths panes through [`row_context_menu`].
+/// the absolute path, reveal it in the app's own Files view). Shared by the Files and Paths panes through [`row_context_menu`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RowAction {
     CopyFile,
     CopyPath,
-    OpenInNotes,
     RevealInFiles,
 }
 
 impl RowAction {
     /// Every action, in the order the shared menu draws them.
-    pub(super) const ALL: [RowAction; 4] = [
+    pub(super) const ALL: [RowAction; 3] = [
         RowAction::CopyFile,
         RowAction::CopyPath,
-        RowAction::OpenInNotes,
         RowAction::RevealInFiles,
     ];
 
@@ -56,25 +53,20 @@ impl RowAction {
                     "Copy Absolute Paths"
                 }
             }
-            RowAction::OpenInNotes => "Open in Notes",
             RowAction::RevealInFiles => "Reveal in Files",
         }
     }
 
-    /// Whether AppKit offers this action for a row: "Open in Notes" is hidden
-    /// for directories (`files_row_menu`'s `is_dir` gate); the rest always show.
-    pub(super) fn enabled(self, is_dir: bool) -> bool {
-        match self {
-            RowAction::OpenInNotes => !is_dir,
-            _ => true,
-        }
+    /// Whether AppKit offers this action for a row (every one does today).
+    pub(super) fn enabled(self, _is_dir: bool) -> bool {
+        true
     }
 }
 
 /// Draw the shared rule-2 row menu into `ui` and return the action the user
 /// chose, if any. Mirrors the items the AppKit `files_row_menu` (Files) and
-/// paths `RowMenu` build: copy the file, copy the absolute path, open in Notes
-/// (files only), reveal in the app's Files view.
+/// paths `RowMenu` build: copy the file, copy the absolute path, reveal in the
+/// app's Files view.
 pub(super) fn row_context_menu(ui: &mut egui::Ui, path: &str) -> Option<RowAction> {
     let is_dir = std::path::Path::new(path).is_dir();
     let mut chosen = None;
@@ -92,16 +84,13 @@ pub(super) fn row_context_menu(ui: &mut egui::Ui, path: &str) -> Option<RowActio
 
 /// Run a chosen [`RowAction`] through the existing seams only. "Copy File" has
 /// no file-clipboard seam off macOS, so it copies the path text like "Copy
-/// Absolute Path"; "Open in Notes" has no cross-platform seam (the AppKit
-/// `daemon_ui::open_in_notes` method is unreachable from here), so it is a
-/// no-op; "Reveal in Files" uses the uniform `reveal_in_files` entry point
+/// Absolute Path"; "Reveal in Files" uses the uniform `reveal_in_files` entry point
 /// (a no-op off macOS by design).
 pub(super) fn apply_row_action(action: RowAction, path: &str) {
     match action {
         RowAction::CopyFile | RowAction::CopyPath => {
             let _ = crate::platform::clipboard::set_text(path);
         }
-        RowAction::OpenInNotes => {}
         RowAction::RevealInFiles => {
             crate::app::host::reveal_in_files(&[path.to_string()]);
         }
@@ -389,21 +378,16 @@ mod tests {
         assert_eq!(RowAction::CopyFile.label(2), "Copy Files");
         assert_eq!(RowAction::CopyPath.label(1), "Copy Absolute Path");
         assert_eq!(RowAction::CopyPath.label(3), "Copy Absolute Paths");
-        // Neither label depends on the selection count.
-        assert_eq!(RowAction::OpenInNotes.label(1), "Open in Notes");
-        assert_eq!(RowAction::OpenInNotes.label(9), "Open in Notes");
+        // The reveal label does not depend on the selection count.
         assert_eq!(RowAction::RevealInFiles.label(1), "Reveal in Files");
+        assert_eq!(RowAction::RevealInFiles.label(9), "Reveal in Files");
     }
 
     #[test]
-    fn only_open_in_notes_is_hidden_for_directories() {
+    fn every_action_is_offered_for_files_and_directories() {
         for action in RowAction::ALL {
             assert!(action.enabled(false), "{action:?} is offered for a file");
-            assert_eq!(
-                action.enabled(true),
-                action != RowAction::OpenInNotes,
-                "{action:?} directory visibility",
-            );
+            assert!(action.enabled(true), "{action:?} is offered for a directory");
         }
     }
 }

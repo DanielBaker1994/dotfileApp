@@ -13,7 +13,6 @@
 #   [[waive]]   view, concept, reason
 
 [views]
-notes = ["window", "sidebar", "editor", "terminal"]
 files = ["window", "sidebar", "input", "list", "filelist", "preview"]
 jira = ["window", "sidebar", "input", "list", "preview"]
 confluence = ["window", "sidebar", "input", "list", "preview"]
@@ -234,21 +233,6 @@ vscode = "Cmd+K Cmd+← / →"
 keys = ["Tab | Ctrl+H | Ctrl+L"]
 
 # ------------------------------------------------------------------ waivers
-[[waive]]
-view = "notes"
-concept = "go to line"
-reason = "the editor is nvim: :N or NG"
-
-[[waive]]
-view = "notes"
-concept = "next / previous match"
-reason = "the editor is nvim: n / N after Cmd+F (/)"
-
-[[waive]]
-view = "notes"
-concept = "undo / redo"
-reason = "the editor is nvim: u / Ctrl+R (Cmd+Z is routed to vim)"
-
 [[waive]]
 view = "ai"
 concept = "save"

@@ -20,8 +20,6 @@ use objc2_web_kit::WKWebView;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RowsSource {
     Sidebar,
-    /// The notes rail's pinned-folder tree.
-    Tree,
     Files,
     Jira,
     Confluence,
@@ -117,15 +115,10 @@ impl DaemonUi {
         Some((w, panes, idx))
     }
 
-    /// `ownsVim`: nvim (SwiftTerm), the prose page and the terminal drawer
-    /// keep every key.
-    fn vim_owned(&self, pane: &LivePane, fr: &objc2_app_kit::NSResponder) -> bool {
+    /// `ownsVim`: a terminal (SwiftTerm) keeps every key.
+    fn vim_owned(&self, _pane: &LivePane, fr: &objc2_app_kit::NSResponder) -> bool {
         let class = as_any(fr).class().name().to_string_lossy().into_owned();
-        if class.contains("TerminalView") {
-            return true;
-        }
-        let notes = self.ivars().controller.current() == Some(SlotView::Notes);
-        notes && (pane.id == "editor" || pane.id == "terminal")
+        class.contains("TerminalView")
     }
 
     /// `pane.vim?() ?? VimTarget.find(in: pane.view)`.
@@ -136,7 +129,6 @@ impl DaemonUi {
                 let bar = as_any(&*pane.area).downcast_ref::<crate::ui::sidebar::SidebarView>()?;
                 Some(Live::Rows(RowsSource::Sidebar, Some(bar.retain())))
             }
-            "tree" if current == Some(SlotView::Notes) => Some(Live::Rows(RowsSource::Tree, None)),
             "files-list" => Some(Live::Rows(RowsSource::Files, None)),
             "list" if current.is_some_and(|v| v.is_jira()) => Some(Live::Rows(RowsSource::Jira, None)),
             "results" => Some(Live::Rows(RowsSource::Confluence, None)),
@@ -149,7 +141,6 @@ impl DaemonUi {
     fn vim_rows(&self, src: RowsSource, bar: Option<&crate::ui::sidebar::SidebarView>) -> Option<VimRows> {
         let (texts, cursor, page) = match src {
             RowsSource::Sidebar => bar?.vim_rows(),
-            RowsSource::Tree => self.notes_surface(|s| s.tree_view().vim_rows())?,
             RowsSource::Files => self.files_surface(|b| {
                 let t: Vec<String> = b.visible_rows().iter().map(|e| e.name.clone()).collect();
                 (t, b.selection(), 20)
@@ -170,9 +161,6 @@ impl DaemonUi {
                 if let Some(b) = bar {
                     b.vim_move(row);
                 }
-            }
-            RowsSource::Tree => {
-                self.notes_surface(|s| s.tree_view().vim_move(row));
             }
             RowsSource::Files => {
                 self.files_surface(|b| b.list.selection = row);
@@ -499,11 +487,6 @@ impl DaemonUi {
                 let b = bar.as_ref()?;
                 (Retained::into_super(Retained::into_super(b.clone())), b.vim_shown_rects())
             }
-            RowsSource::Tree => {
-                let t = self.notes_surface(|s| s.tree_view())?;
-                let rects = t.vim_shown_rects();
-                (Retained::into_super(Retained::into_super(t)), rects)
-            }
             RowsSource::Files => {
                 let view = self
                     .ivars()
@@ -597,19 +580,19 @@ impl DaemonUi {
         }
     }
 
-    /// The `<leader>sf` item finder UI, built lazily (like `note_find`).
-    fn pane_find_ui(&self) -> Rc<crate::views::note_find::PaneFindUi> {
+    /// The `<leader>sf` item finder UI, built lazily.
+    fn pane_find_ui(&self) -> Rc<crate::views::pane_find::PaneFindUi> {
         if let Some(u) = self.ivars().pane_find.borrow().clone() {
             return u;
         }
-        use crate::views::note_find::{NoteFindConfig, PaneFindUi};
+        use crate::views::pane_find::{PaneFindConfig, PaneFindUi};
         let mtm = MainThreadMarker::new().expect("main thread");
         let text = crate::app::config::read_config_text().unwrap_or_default();
-        let sec = crate::app::host::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
+        let sec = crate::app::host::parse_sections(&text).get("pane-find").cloned().unwrap_or_default();
         let u = PaneFindUi::new(
             mtm,
             "",
-            NoteFindConfig::from_section(&sec),
+            PaneFindConfig::from_section(&sec),
         );
         *self.ivars().pane_find.borrow_mut() = Some(u.clone());
         u
@@ -667,9 +650,6 @@ impl DaemonUi {
                 if let Some(b) = bar {
                     b.activate_row(row);
                 }
-            }
-            RowsSource::Tree => {
-                self.notes_surface(|s| s.tree_view().activate_row(row));
             }
             RowsSource::Files => self.files_event(FilesEvent::Click {
                 row,

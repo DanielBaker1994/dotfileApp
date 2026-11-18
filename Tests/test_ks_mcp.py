@@ -36,10 +36,10 @@ RAW_VERBS = ["screenshot", "screenshot-permission", "compare", "pane-shot", "win
 
 # Canned daemon state: enough shape to prove the JSON survived the round trip.
 STATE = {
-    "view": "notes",
+    "view": "files",
     "visible": True,
     "views": {
-        "notes": {"shown": True, "key": True, "terminal": False, "frame": [10, 20, 800, 600]}
+        "files": {"shown": True, "key": True, "frame": [10, 20, 800, 600]}
     },
 }
 
@@ -292,10 +292,11 @@ class Handshake(McpTestCase):
 
         do_desc = tools["ks_do"]["description"]
         self.assertIn("Valid actions", do_desc)
-        for action in ("open:<view>", "toggle-terminal", "cycle", "home",
+        for action in ("open:<view>", "term", "cycle", "home",
                        "pane:h|j|k|l", "screenshot:<sub>"):
             self.assertIn(action, do_desc, action)
-        self.assertIn("notes", do_desc)  # the open:<view> list names the views
+        self.assertIn("`files`", do_desc)  # the open:<view> list names the views
+        self.assertNotIn("notes", do_desc)  # the notes view is gone
 
         raw_desc = tools["ks_raw"]["description"]
         self.assertIn("WARNING", raw_desc)

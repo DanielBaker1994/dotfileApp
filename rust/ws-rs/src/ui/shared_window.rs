@@ -29,7 +29,6 @@ use std::cell::RefCell;
 // Nav ids + the Esc-close view set (mirrors `SharedWindow.nav*` / `escViews`).
 // ---------------------------------------------------------------------------
 
-pub const NAV_NOTES: i64 = nav::NOTES;
 pub const NAV_JIRA: i64 = nav::JIRA;
 pub const NAV_HOME: i64 = nav::HOME;
 pub const NAV_BACK: i64 = nav::BACK;
@@ -41,9 +40,8 @@ pub const NAV_COMPARE: i64 = nav::COMPARE;
 /// `PopupChrome.workspaceBase` — workspace-switch header buttons start here.
 pub const WORKSPACE_BASE: i64 = 1000;
 
-pub const ESC_VIEWS: [SlotView; 6] = [
+pub const ESC_VIEWS: [SlotView; 5] = [
     SlotView::Files,
-    SlotView::Notes,
     SlotView::Ai,
     SlotView::Jira,
     SlotView::Confluence,
@@ -57,7 +55,6 @@ pub fn is_esc_view(v: SlotView) -> bool {
 /// `SharedWindow.navOn(_:)` — the lit nav id, `None` for detail / output.
 pub fn nav_on(v: SlotView) -> Option<i64> {
     match v {
-        SlotView::Notes => Some(NAV_NOTES),
         SlotView::Files => Some(NAV_FILES),
         SlotView::Confluence => Some(NAV_CONFLUENCE),
         SlotView::Ai => Some(NAV_AI),
@@ -247,7 +244,7 @@ impl<H: SharedWindowHost> SharedWindow<H> {
         SharedWindow {
             host,
             current: None,
-            last: SlotView::Notes,
+            last: SlotView::Files,
             last_jira: SlotView::Jira,
             previous_nav: None,
             stack: Vec::new(),
@@ -487,11 +484,7 @@ impl<H: SharedWindowHost> SharedWindow<H> {
 
     /// `cycle(_:)` — logs the direction, then nav-clicks the fixed next id.
     pub fn cycle(&mut self, dir: i32) {
-        let next = if self.current == Some(SlotView::Files) {
-            NAV_NOTES
-        } else {
-            NAV_FILES
-        };
+        let next = NAV_FILES;
         self.host.log(&format!(
             "cycle: current={} dir={} next={}",
             self.current.map(|v| v.raw()).unwrap_or("nil"),
@@ -504,11 +497,6 @@ impl<H: SharedWindowHost> SharedWindow<H> {
     /// `navClicked(_:)`.
     pub fn nav_clicked(&mut self, id: i64) {
         match id {
-            NAV_NOTES => {
-                if self.current != Some(SlotView::Notes) {
-                    self.open(SlotView::Notes);
-                }
-            }
             NAV_FILES => {
                 if self.current != Some(SlotView::Files) {
                     self.host.show_files();
@@ -1038,19 +1026,19 @@ mod tests {
     #[test]
     fn open_presents_and_tracks() {
         let mut w = window();
-        w.open(SlotView::Notes);
-        assert_eq!(w.current(), Some(SlotView::Notes));
-        assert_eq!(w.last(), SlotView::Notes);
+        w.open(SlotView::Ai);
+        assert_eq!(w.current(), Some(SlotView::Ai));
+        assert_eq!(w.last(), SlotView::Ai);
         assert!(w.is_visible());
         assert!(w.is_host_shown());
-        assert_eq!(w.guest(), Some(SlotView::Notes));
-        assert!(w.host().shown.borrow().contains(&SlotView::Notes));
+        assert_eq!(w.guest(), Some(SlotView::Ai));
+        assert!(w.host().shown.borrow().contains(&SlotView::Ai));
     }
 
     #[test]
     fn toggle_hides_when_shown() {
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.toggle(None);
         assert_eq!(w.current(), None);
         assert!(!w.is_visible());
@@ -1060,36 +1048,36 @@ mod tests {
     #[test]
     fn toggle_reopens_last() {
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.hide("", true);
         assert!(!w.is_visible());
         w.toggle(None);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        assert_eq!(w.current(), Some(SlotView::Ai));
         assert!(w.is_visible());
     }
 
     #[test]
     fn hotkey_same_view_hides_or_focuses() {
         let mut w = window();
-        w.open(SlotView::Notes);
-        w.hotkey(SlotView::Notes, Some(true));
+        w.open(SlotView::Ai);
+        w.hotkey(SlotView::Ai, Some(true));
         assert_eq!(w.current(), None);
 
-        w.open(SlotView::Notes);
-        w.hotkey(SlotView::Notes, Some(false));
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        w.open(SlotView::Ai);
+        w.hotkey(SlotView::Ai, Some(false));
+        assert_eq!(w.current(), Some(SlotView::Ai));
         assert!(w.is_visible());
     }
 
     #[test]
     fn present_sets_previous_nav_and_parks_outgoing() {
         let mut w = window();
-        w.present(SlotView::Notes, None);
+        w.present(SlotView::Ai, None);
         assert_eq!(w.previous_nav(), None);
         w.present(SlotView::Files, None);
-        assert_eq!(w.previous_nav(), Some(NAV_NOTES));
+        assert_eq!(w.previous_nav(), Some(NAV_AI));
         assert_eq!(w.current(), Some(SlotView::Files));
-        assert!(!w.host().shown.borrow().contains(&SlotView::Notes));
+        assert!(!w.host().shown.borrow().contains(&SlotView::Ai));
         assert!(w.host().shown.borrow().contains(&SlotView::Files));
     }
 
@@ -1124,41 +1112,42 @@ mod tests {
 
     #[test]
     fn back_esc_at_top_hides_only_when_configured() {
-        let mut w = SharedWindow::new(MockHost::default().with_esc(SlotView::Notes, 1));
-        w.open(SlotView::Notes);
+        let mut w = SharedWindow::new(MockHost::default().with_esc(SlotView::Ai, 1));
+        w.open(SlotView::Ai);
         w.back(true);
         assert_eq!(w.current(), None);
 
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.back(true);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        assert_eq!(w.current(), Some(SlotView::Ai));
     }
 
     #[test]
     fn back_without_esc_hides_at_first_view() {
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.back(false);
         assert_eq!(w.current(), None);
         assert_eq!(w.host().restored.borrow().len(), 1);
     }
 
     #[test]
-    fn cycle_from_notes_shows_files() {
+    fn cycle_from_another_view_shows_files() {
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.cycle(1);
         assert_eq!(w.host().show_files_calls.get(), 1);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        assert_eq!(w.current(), Some(SlotView::Ai));
     }
 
     #[test]
-    fn cycle_from_files_opens_notes() {
+    fn cycle_from_files_stays_on_files() {
         let mut w = window();
         w.open(SlotView::Files);
         w.cycle(1);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        assert_eq!(w.host().show_files_calls.get(), 0);
+        assert_eq!(w.current(), Some(SlotView::Files));
     }
 
     #[test]
@@ -1173,7 +1162,7 @@ mod tests {
     #[test]
     fn empty_host_hides_without_restoring_focus() {
         let mut w = SharedWindow::new(MockHost::default().with_saved("42", 555));
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.on_host_empty();
         assert_eq!(w.current(), None);
         assert!(!w.is_visible());
@@ -1183,7 +1172,7 @@ mod tests {
     #[test]
     fn hide_restores_focus_to_saved_target() {
         let mut w = SharedWindow::new(MockHost::default().with_saved("42", 555));
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         w.hide("x", true);
         let restored = w.host().restored.borrow();
         assert_eq!(restored.len(), 1);
@@ -1194,7 +1183,6 @@ mod tests {
     fn esc_views_membership() {
         for v in [
             SlotView::Files,
-            SlotView::Notes,
             SlotView::Ai,
             SlotView::Jira,
             SlotView::Confluence,
@@ -1216,9 +1204,9 @@ mod tests {
     #[test]
     fn test_state_shape() {
         let mut w = window();
-        w.open(SlotView::Notes);
+        w.open(SlotView::Ai);
         let s = w.test_state();
-        assert_eq!(s["view"], json!("notes"));
+        assert_eq!(s["view"], json!("ai"));
         assert_eq!(s["visible"], json!(true));
         assert!(s["windows"].is_array());
         assert_eq!(s["windows"][0]["kind"], json!("shared"));
@@ -1285,11 +1273,11 @@ mod tests {
     #[test]
     fn nav_clicked_routes() {
         let mut w = window();
-        w.nav_clicked(NAV_NOTES);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        w.nav_clicked(NAV_CONFLUENCE);
+        assert_eq!(w.current(), Some(SlotView::Confluence));
         w.push(SlotView::Ai);
         assert_eq!(w.current(), Some(SlotView::Ai));
         w.nav_clicked(NAV_BACK);
-        assert_eq!(w.current(), Some(SlotView::Notes));
+        assert_eq!(w.current(), Some(SlotView::Confluence));
     }
 }

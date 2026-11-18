@@ -11,7 +11,7 @@
     "app": "kitchen-sink",
     "herdr": "herdr (terminal)",
     "ghostty": "Ghostty",
-    "vim": "Notes vim pane"
+    "vim": "nvim ([settings-hub] vim-init)"
   },
   "layer_names": {
     "app": "app",

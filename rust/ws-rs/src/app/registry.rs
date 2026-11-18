@@ -9,7 +9,6 @@ use serde_json::Value;
 
 /// Header nav-button ids (mirrors `SharedWindow.navNotes` … in `SharedWindow.swift`).
 pub mod nav {
-    pub const NOTES: i64 = 60;
     pub const JIRA: i64 = 61;
     pub const HOME: i64 = 62;
     pub const BACK: i64 = 63;
@@ -17,7 +16,7 @@ pub mod nav {
     pub const CONFLUENCE: i64 = 65;
     pub const AI: i64 = 66;
     pub const COMPARE: i64 = 67;
-    pub const ALL: [i64; 8] = [NOTES, JIRA, HOME, BACK, FILES, CONFLUENCE, AI, COMPARE];
+    pub const ALL: [i64; 7] = [JIRA, HOME, BACK, FILES, CONFLUENCE, AI, COMPARE];
 
     pub fn is_nav_id(id: i64) -> bool {
         ALL.contains(&id)
@@ -27,7 +26,6 @@ pub mod nav {
 /// Mirrors `enum SlotView: String` in `SharedWindow.swift`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SlotView {
-    Notes,
     Files,
     Jira,
     Detail,
@@ -43,7 +41,6 @@ pub enum SlotView {
 impl SlotView {
     pub fn raw(self) -> &'static str {
         match self {
-            SlotView::Notes => "notes",
             SlotView::Files => "files",
             SlotView::Jira => "jira",
             SlotView::Detail => "detail",
@@ -59,7 +56,6 @@ impl SlotView {
 
     pub fn from_raw(s: &str) -> Option<SlotView> {
         Some(match s {
-            "notes" => SlotView::Notes,
             "files" => SlotView::Files,
             "jira" => SlotView::Jira,
             "detail" => SlotView::Detail,
@@ -95,20 +91,18 @@ impl SlotView {
     /// The header nav-button id this view lights up (mirrors `SharedWindow.navID`).
     pub fn nav_id(self) -> i64 {
         match self {
-            SlotView::Notes => nav::NOTES,
             SlotView::Files => nav::FILES,
             SlotView::Confluence => nav::CONFLUENCE,
             SlotView::Ai => nav::AI,
             SlotView::Compare | SlotView::CompareText => nav::COMPARE,
             v if v.is_jira() => nav::JIRA,
-            _ => nav::NOTES,
+            _ => nav::FILES,
         }
     }
 
     /// The `[app]` icon setting key, if any (mirrors `parseAppConfig`).
     pub fn icon_key(self) -> Option<&'static str> {
         Some(match self {
-            SlotView::Notes => "notes-icon",
             SlotView::Files => "files-icon",
             SlotView::Jira => "jira-icon",
             SlotView::Confluence => "confluence-icon",
@@ -119,7 +113,6 @@ impl SlotView {
 
     pub fn title(self) -> &'static str {
         match self {
-            SlotView::Notes => "Notes",
             SlotView::Files => "Files",
             SlotView::Confluence => "Confluence",
             SlotView::Ai => "AI",
@@ -281,7 +274,6 @@ mod tests {
 
     #[test]
     fn nav_ids_match_swift() {
-        assert_eq!(SlotView::Notes.nav_id(), 60);
         assert_eq!(SlotView::Jira.nav_id(), 61);
         assert_eq!(SlotView::Files.nav_id(), 64);
         assert_eq!(SlotView::Confluence.nav_id(), 65);
@@ -292,7 +284,7 @@ mod tests {
         assert_eq!(SlotView::Releases.nav_id(), 61);
         assert_eq!(SlotView::Config.nav_id(), 61);
         assert!(nav::is_nav_id(62) && nav::is_nav_id(63));
-        assert!(!nav::is_nav_id(59));
+        assert!(!nav::is_nav_id(59) && !nav::is_nav_id(60));
     }
 
     #[test]
@@ -300,7 +292,7 @@ mod tests {
         for v in [SlotView::Jira, SlotView::Detail, SlotView::Releases, SlotView::Config] {
             assert!(v.is_jira());
         }
-        assert!(!SlotView::Notes.is_jira());
+        assert!(!SlotView::Files.is_jira());
         assert!(SlotView::Compare.is_compare() && SlotView::CompareText.is_compare());
         for v in [
             SlotView::Detail,
@@ -311,14 +303,13 @@ mod tests {
         ] {
             assert!(v.is_sub(), "{v:?} should be sub");
         }
-        assert!(!SlotView::Notes.is_sub());
+        assert!(!SlotView::Files.is_sub());
         assert!(!SlotView::Compare.is_sub());
     }
 
     #[test]
     fn raw_round_trips() {
         for v in [
-            SlotView::Notes,
             SlotView::Files,
             SlotView::Jira,
             SlotView::Detail,
@@ -333,11 +324,11 @@ mod tests {
             assert_eq!(SlotView::from_raw(v.raw()), Some(v));
         }
         assert_eq!(SlotView::from_raw("nope"), None);
+        assert_eq!(SlotView::from_raw("notes"), None, "the notes view is gone");
     }
 
     #[test]
     fn icon_keys_match_settings() {
-        assert_eq!(SlotView::Notes.icon_key(), Some("notes-icon"));
         assert_eq!(SlotView::Files.icon_key(), Some("files-icon"));
         assert_eq!(SlotView::Jira.icon_key(), Some("jira-icon"));
         assert_eq!(SlotView::Confluence.icon_key(), Some("confluence-icon"));
@@ -350,14 +341,14 @@ mod tests {
         let mut r = Registry::new();
         r.set_nav(vec![
             (SlotView::Files, "Files".into(), None),
-            (SlotView::Notes, "Notes".into(), Some("notes_icon.png".into())),
+            (SlotView::Ai, "AI".into(), Some("ai.png".into())),
             (SlotView::Jira, "Jira".into(), None),
         ]);
         assert_eq!(r.nav_icons().len(), 3);
         assert_eq!(r.nav_on_id_for(SlotView::Detail), Some(61));
-        assert_eq!(r.nav_on_id_for(SlotView::Notes), Some(60));
+        assert_eq!(r.nav_on_id_for(SlotView::Ai), Some(66));
 
-        r.add_palette(PaletteCommand::new("notes", "Notes", "views"));
+        r.add_palette(PaletteCommand::new("ai", "AI", "views"));
         r.add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
         assert_eq!(r.palette_commands().len(), 1);
     }

@@ -18,7 +18,6 @@ _MODULES = {
     "confluence_glue": "confluence_glue",
     "confluence_pages": "confluence_pages",
     "config_text": "config_text",
-    "doc_templates": "doc_templates",
     "file_ops": "fileops",
     "ignore_rules": "ignore",
     "jira_boards": "jira_boards",
@@ -31,7 +30,6 @@ _MODULES = {
     "jira_setup": "jira_setup",
     "jsonmgr": "jsonmgr",
     "paneshot": "paneshot",
-    "prose_pdf": "prose_pdf",
     "setup_checks": "setup_checks",
     "shelf": "shelf",
     "shot_model": "shot_model",
@@ -589,56 +587,6 @@ def _ignore_ignored(params: dict) -> dict:
     if rules is None:
         return {"ignored": False}
     return {"ignored": rules.ignored(params.get("path") or "", bool(params.get("isDir")))}
-
-
-@method("doc_templates.names")
-def _names(params: dict) -> dict:
-    return {"names": doc_templates.names(params.get("configured"), params.get("css"))}
-
-
-@method("doc_templates.current")
-def _current(params: dict) -> dict:
-    return {"template": doc_templates.current(params.get("text") or "")}
-
-
-@method("doc_templates.apply")
-def _apply(params: dict) -> dict:
-    return {"text": doc_templates.apply(params.get("text") or "", params.get("template"))}
-
-
-@method("doc_templates.menu")
-def _menu(params: dict) -> dict:
-    text = params.get("text") or ""
-    return {"current": doc_templates.current(text),
-            "names": doc_templates.names(params.get("configured"), params.get("css") or None)}
-
-
-@method("doc_templates.edit")
-def _edit(params: dict) -> dict:
-    return doc_templates.edit(params.get("text") or "", params.get("template"))
-
-
-@method("prose.screen_html")
-def _screen_html(params: dict) -> dict:
-    return {"html": prose_pdf.screen_html(params.get("note") or "", params.get("config"))}
-
-
-@method("prose.css_content")
-def _css_content(params: dict) -> dict:
-    return {"css": prose_pdf.css_content(prose_pdf.config(params.get("config")))}
-
-
-@method("prose.pdf_export")
-def _pdf_export(params: dict) -> dict:
-    return prose_pdf.export(params.get("note") or "", params.get("config"))
-
-
-@method("prose.pandoc_args")
-def _pandoc_args(params: dict) -> dict:
-    c = prose_pdf.config(params.get("config"))
-    return {"args": prose_pdf.pandoc_args(params.get("note") or "", params.get("css") or "",
-                                          params.get("html") or "", c,
-                                          bool(params.get("sourcepos")))}
 
 
 @method("config.line")

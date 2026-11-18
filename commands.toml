@@ -21,7 +21,6 @@ app-icon = "app_icon.png"
 jira-icon = "jira_icon.png"
 confluence-icon = "confluence_icon.png"
 ai-icon = ""
-notes-icon = "notes_icon.png"
 files-icon = ""
 
 notes-socket = "ws-notes.sock"
@@ -109,7 +108,7 @@ script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_
 aliases = "quickfiles, quick files"
 
 
-[notes-find]
+[pane-find]
 rows = 12
 width = 640
 
@@ -195,53 +194,6 @@ padding = 16
 save-path = ""
 filename-pattern = "%F_%H-%M-%S pane"
 toast = "Screenshot of {pane} copied ({n} lines)"
-
-[notes]
-enabled = true
-in-palette = true
-label = "Notes"
-type = "note"
-name = "notes"
-pdf-css = "~/.dotfiles/markdown_generator/friendly_document_styling.css"
-
-copy-buttons = true
-
-title = ""
-
-new-doc-template = "markdown_doc_executive"
-voice = true
-
-terminal = true
-terminal-height = 240
-
-terminal-dir = "/tmp/"
-
-resize = true
-
-vim-mode = true
-vim-bin = "/opt/homebrew/bin/nvim"
-image-rows = 10
-
-start-drawer = "none"
-font-size = 22
-sidebar-width = 248.8
-sidebar-min-width = 140
-sidebar-max-width = 480
-
-paths = "~/notes"
-width = 768
-height = 585
-max-height = 730
-font = "Hack Nerd Font Mono"
-background-color = 303446
-header-color = 232634
-browser-background = "292C3C"
-terminal-background = 232634
-text-color = "C6D0F5"
-dim-color = "A5ADCE"
-highlight-color = "51576D"
-accent-color = "CA9EE6"
-palette = "8CAAEE, A6D189, E5C890, E78284, 81C8BE"
 
 [files]
 enabled = true
@@ -441,10 +393,10 @@ kitchen-sink = "*:app"
 "all: Cmd+W" = "hide the window"
 "all: Ctrl+B L" = "prefix (in this window only): back to the previous view"
 "all: Ctrl+B W" = "prefix: view switcher — the app's views (type / for every command); type to filter, Ctrl+N/P move, Return opens"
-"all: Ctrl+B T" = "prefix: toggle the terminal popup (in the notes window: the editor ⇄ prose reading page)"
+"all: Ctrl+B T" = "prefix: toggle the terminal popup"
 "all: Ctrl+B B" = "prefix: sidebar ⇄ icon rail (same as Cmd+\\)"
 "all: Ctrl+B Ctrl+B" = "a real Ctrl+B for the focused pane (vim page up, the shell)"
-"all: Ctrl+H / J / K / L" = "move to the pane on that side: sidebar, editor, list, preview, terminal (nvim: its own splits first); a thin silver ring shows which pane has the keys"
+"all: Ctrl+H / J / K / L" = "move to the pane on that side: sidebar, list, preview, terminal; a thin silver ring shows which pane has the keys"
 "all: Ctrl+B Ctrl+H" = "the real Ctrl+H for the pane (same for J / K / L: a shell's Ctrl+L clear, a field's Ctrl+H)"
 "sidebar: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the rows (Ctrl+H from the content puts the keys here)"
 "sidebar: Return" = "open the row and go back to the content"
@@ -452,10 +404,10 @@ kitchen-sink = "*:app"
 "sidebar: Home / End / PgUp / PgDn" = "jump in the rows"
 "sidebar: a letter" = "the next row starting with it"
 "sidebar: Esc" = "back to the content"
-"sidebar: Delete" = "close the tab (notes, compare sessions)"
+"sidebar: Delete" = "close the tab (compare sessions)"
 "preview: ↑ ↓ / PgUp / PgDn / Space" = "scroll the page (Shift+Space = back up)"
 "preview: Cmd+A / Cmd+C" = "select all / copy"
-"all: Ctrl+W" = "any text field (popups, search bars, sheets, editors): delete the word before the cursor (the vim pane / terminal keep their own Ctrl+W)"
+"all: Ctrl+W" = "any text field (popups, search bars, sheets, editors): delete the word before the cursor (the terminal keeps its own Ctrl+W)"
 "all: j / k" = "normal mode (a sidebar, list, preview, Compare side — the NORMAL chip): down / up"
 "all: gg / G" = "normal mode: first / last row (a page: top / bottom)"
 "all: Ctrl+D / Ctrl+U" = "normal mode: half a screen down / up"
@@ -464,28 +416,13 @@ kitchen-sink = "*:app"
 "all: i / a" = "normal mode: insert — the pane's text input (a list's filter box, Compare's section editor)"
 "all: Esc (in an input)" = "back to normal mode (the filter stays); Esc again = the view's usual Esc"
 "all: Cmd+\\" = "collapse the sidebar to an icon rail / show it again"
-"all: Cmd+Plus / Cmd+Minus" = "zoom the text (font size; the reading view zooms its page, Cmd+0 resets)"
+"all: Cmd+Plus / Cmd+Minus" = "zoom the text (font size)"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "grow / shrink the window"
-"all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt); in the notes vim pane Ctrl+Shift+J / K add a cursor below / above (multi-cursor)"
+"all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
 "all: Cmd+/" = "this list"
 "palette: ↑ ↓ / Ctrl+N / Ctrl+P / Tab" = "move through the list"
 "palette: Return" = "run the command / go to the workspace"
 "palette: Esc" = "clear the filter, else close"
-"notes: Cmd+Shift+P" = "reading view ⇄ editor"
-"notes: Cmd+Shift+O" = "the reading view in its own window"
-"notes: reading view + pop-out: j / k, gg / G, Ctrl+D / Ctrl+U" = "scroll the page like vim: line down / up, top / bottom, half a page down / up (the same keys in the in-place reading view and the pop-out window)"
-"notes: Space i (nvim)" = "insert picker: search snippets, callouts, badges, tables (type 3x4 for a table)"
-"notes: Cmd+S" = "save the note"
-"notes: Cmd+F" = "search the note"
-"notes: Cmd+N" = "new empty note at once (Untitled-1.md, Untitled-2.md… in the notes folder; no prompt)"
-"notes: Ctrl+N" = "new document from the template (doc-1.md, doc-2.md…; not in vim insert mode / file browser / shell)"
-"notes: Cmd+O" = "open a file by path as a tab"
-"notes: Space s g" = "vim pane: ripgrep the open notes, Return jumps to the line"
-"notes: Space s f" = "vim pane: find among the open notes (popup), Return switches to it"
-"notes: Cmd+P" = "reading view: export the note as a PDF (its path is copied)"
-"notes: Cmd+C / Cmd+V / Ctrl+V" = "copy / paste (editor + terminal)"
-"notes: Cmd+= / Cmd+- (or pinch)" = "bigger / smaller text: editor + terminal font, or the reading view's zoom (Cmd+0 resets the reading view)"
-"notes: right-click ▸ Rename / F2 / click the open file's name again" = "rename the note or folder in place in the sidebar or tree (Return renames, Esc cancels); tabs, the editor and [notes] paths follow"
 "files: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"
 "files: Return" = "open (folders: go in)"
 "files: ← / →" = "parent folder / open"

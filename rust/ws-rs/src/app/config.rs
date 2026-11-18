@@ -258,7 +258,6 @@ pub struct AppSettings {
     pub confluence_icon_name: String,
     pub ai_icon_name: String,
     pub app_icon_name: String,
-    pub notes_icon_name: String,
     pub files_icon_name: String,
     pub notes_socket_name: String,
     pub focus_file_name: String,
@@ -327,7 +326,6 @@ impl Default for AppSettings {
             confluence_icon_name: "confluence_icon.png".to_string(),
             ai_icon_name: String::new(),
             app_icon_name: "app_icon.png".to_string(),
-            notes_icon_name: "notes_icon.png".to_string(),
             files_icon_name: String::new(),
             notes_socket_name: "ws-notes.sock".to_string(),
             focus_file_name: "kitchen-sink-focus".to_string(),
@@ -461,11 +459,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     }
     if let Some(v) = strv("ai-icon") {
         settings.ai_icon_name = v;
-    }
-    if let Some(v) = strv("notes-icon") {
-        if !v.is_empty() {
-            settings.notes_icon_name = v;
-        }
     }
     if let Some(v) = strv("app-icon") {
         if !v.is_empty() {
@@ -644,7 +637,6 @@ pub fn apply_app_config_from_disk(settings: &mut AppSettings) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandKind {
     Shell,
-    Note,
     List,
     Output,
     Files,
@@ -762,12 +754,6 @@ pub struct CommandSpec {
     pub terminal_height: f64,
     pub inspector_width: f64,
     pub sidebar_width: f64,
-    pub prose_font: Option<String>,
-    pub prose_font_size: f64,
-    pub prose_width: f64,
-    pub new_note_name: String,
-    pub new_doc_name: String,
-    pub new_doc_template: String,
     pub terminal_dir: Option<String>,
     pub terminal_background: Option<Rgba>,
     pub text_color: Option<Rgba>,
@@ -852,12 +838,6 @@ impl Default for CommandSpec {
             terminal_height: 240.0,
             inspector_width: 340.0,
             sidebar_width: 210.0,
-            prose_font: None,
-            prose_font_size: 0.0,
-            prose_width: 0.0,
-            new_note_name: "Untitled".to_string(),
-            new_doc_name: "doc".to_string(),
-            new_doc_template: "markdown_doc_catppuccin_latte".to_string(),
             terminal_dir: None,
             terminal_background: None,
             text_color: None,
@@ -894,26 +874,11 @@ impl CommandSpec {
         }
     }
 
-    /// `notesFolder` — the first path expanded; its parent when not a directory.
-    pub fn notes_folder(&self) -> Option<String> {
-        self.paths.first().map(|p| {
-            let e = expand_tilde(p);
-            if Path::new(&e).is_dir() {
-                e
-            } else {
-                Path::new(&e)
-                    .parent()
-                    .map(|x| x.to_string_lossy().into_owned())
-                    .unwrap_or(e)
-            }
-        })
-    }
 }
 
 /// `makeCommand(_:_:)`.
 pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
     let kind = match vars.get("type").map(String::as_str) {
-        Some("note") => CommandKind::Note,
         Some("list") => CommandKind::List,
         Some("output") => CommandKind::Output,
         Some("files") => CommandKind::Files,
@@ -1006,26 +971,6 @@ pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
     }
     if vars.contains_key("inspector-width") {
         s.inspector_width = num(vars.get("inspector-width").map(String::as_str));
-    }
-    s.prose_font = vars
-        .get("prose-font")
-        .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
-    s.prose_font_size = num(vars.get("prose-font-size").map(String::as_str));
-    s.prose_width = num(vars.get("prose-width").map(String::as_str));
-    if let Some(n) = vars.get("new-note-name").map(|v| v.trim().to_string()) {
-        if !n.is_empty() {
-            s.new_note_name = n;
-        }
-    }
-    if let Some(n) = vars.get("new-doc-name").map(|v| v.trim().to_string()) {
-        if !n.is_empty() {
-            s.new_doc_name = n;
-        }
-    }
-    if let Some(n) = vars.get("new-doc-template").map(|v| v.trim().to_string()) {
-        if !n.is_empty() {
-            s.new_doc_template = n;
-        }
     }
     s.terminal_dir = vars.get("terminal-dir").cloned();
     s.terminal_background = vars.get("terminal-background").and_then(|v| hex_color(v));
@@ -1130,8 +1075,6 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("inspector-width", 0.0, 800.0),
     ("inspector-min-width", 0.0, 800.0),
     ("inspector-max-width", 0.0, 800.0),
-    ("prose-font-size", 8.0, 48.0),
-    ("prose-width", 300.0, 2000.0),
     ("font-size", 6.0, 96.0),
     ("terminal-font-size", 6.0, 96.0),
     ("max-rows", 0.0, 10_000.0),
@@ -1178,7 +1121,7 @@ pub fn config_number_range(key: &str) -> Option<(f64, f64)> {
 
 pub fn config_enum_keys(key: &str) -> Option<Vec<&'static str>> {
     Some(match key {
-        "type" => vec!["shell", "note", "list", "output", "files"],
+        "type" => vec!["shell", "list", "output", "files"],
         "start-drawer" => vec!["browser", "terminal", "none"],
         "sort" => vec!["name", "modified", "created", "size", "kind"],
         "sort-order" => vec!["asc", "desc", "ascending", "descending"],
@@ -1773,7 +1716,6 @@ mod tests {
         assert_eq!(s.confluence_icon_name, "confluence_icon.png");
         assert_eq!(s.ai_icon_name, "");
         assert_eq!(s.app_icon_name, "app_icon.png");
-        assert_eq!(s.notes_icon_name, "notes_icon.png");
         assert_eq!(s.files_icon_name, "");
         assert_eq!(s.notes_socket_name, "ws-notes.sock");
         assert_eq!(s.focus_file_name, "kitchen-sink-focus");
@@ -1804,7 +1746,6 @@ mod tests {
             ("shell-args", "--login  -i"),
             ("aerospace-cli", "/opt/homebrew/bin/aerospace, aerospace"),
             ("app-dirs", "/Applications, ~/Apps"),
-            ("notes-icon", "n.png"),
             ("ai-icon", "ai.png"),
             ("switcher-width", "200"),   // clamped up to 240
             ("shared-width", "300"),     // below 400 -> ignored
@@ -1827,7 +1768,6 @@ mod tests {
         assert_eq!(s.shell_args, vec!["--login", "-i"]);
         assert_eq!(s.aerospace_cli.len(), 2);
         assert_eq!(s.app_dirs[1], expand_tilde("~/Apps"));
-        assert_eq!(s.notes_icon_name, "n.png");
         assert_eq!(s.ai_icon_name, "ai.png");
         assert_eq!(s.switcher_width, 240.0);
         assert_eq!(s.shared_width, 1100.0);
@@ -1903,7 +1843,6 @@ mod tests {
             ("sidebar-width", "300"),
             ("font-size", "14"),
             ("header-color", "#abcdef"),
-            ("new-note-name", "  Untitled 2 "),
         ]);
         let s = make_command("mylist", &v);
         assert_eq!(s.name, "mylist");
@@ -1931,7 +1870,6 @@ mod tests {
         assert_eq!(s.sidebar_width, 300.0);
         assert_eq!(s.font_size, 14.0);
         assert_eq!(s.header_color, hex_color("#abcdef"));
-        assert_eq!(s.new_note_name, "Untitled 2");
         assert_eq!(s.save_dir, "/tmp/");
 
         // Defaults: no `type` -> shell; resize false, drag/sticky true.
@@ -1940,8 +1878,6 @@ mod tests {
         assert!(!d.resize && d.drag && d.sticky);
         assert!(d.in_palette);
         assert!(d.recent && d.voice_live);
-        assert_eq!(d.new_doc_name, "doc");
-        assert_eq!(d.new_doc_template, "markdown_doc_catppuccin_latte");
     }
 
     #[test]

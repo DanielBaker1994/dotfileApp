@@ -20,7 +20,6 @@ use super::confluence::ConfluencePane;
 use super::files::FilesPane;
 use super::jira::JiraPane;
 use super::keys::key_input;
-use super::notes::NotesPane;
 use super::paths::PathsPane;
 use super::switcher::SwitcherOverlay;
 use super::terminal::TerminalView;
@@ -35,8 +34,7 @@ const TOAST_TTL: Duration = Duration::from_millis(2500);
 const TOAST_FADE: Duration = Duration::from_millis(500);
 
 /// The views the sidebar lists (header nav order, minus the unported sub-views).
-const SIDEBAR_VIEWS: [SlotView; 6] = [
-    SlotView::Notes,
+const SIDEBAR_VIEWS: [SlotView; 5] = [
     SlotView::Files,
     SlotView::Jira,
     SlotView::Confluence,
@@ -186,7 +184,6 @@ impl KsApp {
             return;
         }
         let pane: Box<dyn Pane> = match self.current {
-            SlotView::Notes => Box::new(NotesPane::build()),
             SlotView::Files => Box::new(FilesPane::build()),
             SlotView::Jira => Box::new(JiraPane::build()),
             SlotView::Confluence => Box::new(ConfluencePane::build()),
@@ -479,7 +476,6 @@ impl KsApp {
             UiCommand::HidePalette => "HidePalette",
             UiCommand::ShowSwitcher => "ShowSwitcher",
             UiCommand::HideSwitcher => "HideSwitcher",
-            UiCommand::ToggleDrawer(_) => "ToggleDrawer",
             UiCommand::Paths(_) => "Paths",
             UiCommand::TerminalPanel => "TerminalPanel",
             UiCommand::Tool(_) => "Tool",
@@ -488,7 +484,6 @@ impl KsApp {
             UiCommand::Toast(..) => "Toast",
             UiCommand::PaneMove(_) => "PaneMove",
             UiCommand::PaneFocus(_) => "PaneFocus",
-            UiCommand::NoteFind(_) => "NoteFind",
             UiCommand::JiraJump => "JiraJump",
             UiCommand::JiraEnable(..) => "JiraEnable",
             UiCommand::JiraSetup(_) => "JiraSetup",
@@ -609,11 +604,7 @@ impl KsApp {
         match ch {
             'l' => {
                 use crate::app::registry::nav;
-                let id = self.controller.previous_nav().unwrap_or(if self.current == SlotView::Files {
-                    nav::NOTES
-                } else {
-                    nav::FILES
-                });
+                let id = self.controller.previous_nav().unwrap_or(nav::FILES);
                 self.controller.nav_clicked(id);
             }
             'w' => {

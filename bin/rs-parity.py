@@ -32,16 +32,13 @@ SCALAR_KEYS = [
 ]
 
 # Dotted state paths compared once both daemons have them. These are the
-# contract keys the UI suites assert. `views.notes.frame` / `wid` are excluded
-# (placement differs), and so is `views.notes.browser` (the Swift daemon has
-# no `do:toggle-browser` action; the Rust port implements it).
+# contract keys the UI suites assert. `views.*.frame` / `wid` are excluded
+# (placement differs).
 NESTED_KEYS = [
     "palette",
     "viewSwitcher.shown",
     "terminalPanel.shown",
     "paths.shown",
-    "views.notes.terminal",
-    "views.notes.shown",
     "views.files.shown",
     "views.jira.shown",
 ]
@@ -102,7 +99,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--swift-sock", default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "ws-notes.sock"))
     ap.add_argument("--rust-sock", default=os.environ.get("WS_RUST_SOCK"))
-    ap.add_argument("--actions", default="state,do:open:notes,do:open:files,do:hide,do:cycle")
+    ap.add_argument("--actions", default="state,do:open:files,do:hide,do:cycle")
     ap.add_argument("--settle", type=float, default=0.0,
                     help="seconds to sleep after each action before reading state "
                          "(the Swift shared window presents asynchronously)")

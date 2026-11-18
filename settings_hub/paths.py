@@ -107,14 +107,14 @@ def ghostty_conf() -> str:
 
 
 def vim_init() -> str:
-    own = hub("vim-init") or section("notes").get("vim-init", "")
-    if own:
-        return expand(own)
-    return os.path.join(ROOT, "vim", "init.lua")
+    """The nvim init file whose keymaps the hub lists: opt-in through
+    `[settings-hub] vim-init` (the app no longer ships an nvim pane)."""
+    own = hub("vim-init")
+    return expand(own) if own else ""
 
 
 def vim_bin() -> str:
-    return expand(hub("vim-bin") or section("notes").get("vim-bin", "") or hub_default("vim-bin"))
+    return expand(hub("vim-bin") or hub_default("vim-bin"))
 
 
 def app_binary() -> str:

@@ -22,7 +22,6 @@ pub mod preview_ring;
 pub mod sheet;
 pub mod shared_window;
 pub mod shortcuts;
-pub mod prose_switch;
 #[cfg(target_os = "macos")]
 pub mod quiet_web;
 #[cfg(target_os = "macos")]
@@ -33,6 +32,5 @@ pub mod syntax_text;
 pub mod theme;
 pub mod action_picker;
 pub mod toast;
-pub mod tree_view;
 #[cfg(target_os = "macos")]
 pub mod view_base;

@@ -44,25 +44,6 @@
 				<string>public.file-url</string>
 			</array>
 		</dict>
-		<dict>
-			<key>NSMenuItem</key>
-			<dict>
-				<key>default</key>
-				<string>Open in Notes</string>
-			</dict>
-			<key>NSMessage</key>
-			<string>openInNotes</string>
-			<key>NSRequiredContext</key>
-			<dict/>
-			<key>NSSendFileTypes</key>
-			<array>
-				<string>public.item</string>
-			</array>
-			<key>NSSendTypes</key>
-			<array>
-				<string>public.file-url</string>
-			</array>
-		</dict>
 	</array>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Transcribe voice notes to text using Apple speech recognition.</string>

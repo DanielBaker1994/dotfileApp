@@ -28,8 +28,8 @@ sys.path.insert(0, os.path.join(ROOT, "pylib"))
 import jsonmgr  # noqa: E402
 
 JSONMGR_PY = os.path.join(ROOT, "pylib", "jsonmgr.py")
-SHIPPED_DIRS = ("pylib", "jira", "confluence", "notify", "settings_hub", "vim")
-ALLOWED_UNREGISTERED = ("jira/team.example.json", "vim/snippets/markdown.json")
+SHIPPED_DIRS = ("pylib", "jira", "confluence", "notify", "settings_hub")
+ALLOWED_UNREGISTERED = ("jira/team.example.json",)
 # the preseeded shipped homes, before any test registers a throwaway name
 PRESEEDED = dict(jsonmgr._HOMES)
 

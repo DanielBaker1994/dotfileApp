@@ -1588,7 +1588,7 @@ impl ToolPanel {
                     crate::ui::theme::Rgba::new(1.0, 0.23, 0.19, 0.9),
                     22.0,
                 )),
-                _ => crate::ui::style::image_file(&format!("{assets}/notes_icon.png")),
+                _ => crate::ui::style::image_file(&format!("{assets}/app_icon.png")),
             };
             let (meta, buttons): (&str, Vec<(String, i32)>) = match self.kind {
                 ToolKind::PrettyPrint => (

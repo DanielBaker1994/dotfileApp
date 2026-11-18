@@ -17,13 +17,12 @@ mod theme;
 mod widgets;
 
 // Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`
-// (files/notes/jira/confluence/ai/compare) or as floating tool windows in
+// (files/jira/confluence/ai/compare) or as floating tool windows in
 // `app.rs` (paths in the Paths window, tools in the Tools window).
 mod ai;
 mod compare;
 mod confluence;
 mod jira;
-mod notes;
 mod paths;
 mod switcher;
 #[allow(dead_code)] // `SetupPane` is not wired into a SlotView yet; `ToolsPane` is (app.rs).

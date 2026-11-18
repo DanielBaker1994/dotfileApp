@@ -1,6 +1,6 @@
 # kitchen-sink
 
-A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
+A macOS app: AeroSpace switcher popup + files / Jira / Confluence / AI / compare views,
 with a borders focused-window outline. Native AppKit app written in Rust
 (objc2; `rust/`), no runtime dependencies beyond what the installer brings.
 
@@ -29,7 +29,7 @@ doubt, the code is truth.
 Open `kitchen-sink-<version>.dmg`, drag the app to **Applications**,
 open it. The first run shows **Setup & Health Check**: what this Mac has and
 what is missing (no Apple on-device model → the AI view is off, everything
-else works). Notes, files, Jira, Confluence and AI work straight away; the
+else works). Files, Jira, Confluence and AI work straight away; the
 Hyper hotkeys and window borders (AeroSpace, borders — Homebrew) are one optional button in that window. Your settings live in
 `~/.config/kitchen-sink` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
@@ -77,8 +77,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | --- | --- |
 | Switcher popup | Hyper+S — workspaces (app icons per workspace), a command grid, and a status row (unread · CPU · RAM · battery · clock); type to narrow all of it |
 | Every shortcut + setting (search, edit, rebind, clash report) | Hyper+/ — `bin/ws-settings` (`--help`: keys, settings, set, undo, bind, conflicts, export md, doctor) |
-| Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
-| Voice notes | red record button → dictation → text, pause/resume, live draft |
+| Jira / Health windows | menu-bar **wrench** icon |
 | Window borders | borders (brew service) |
 | Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.toml [jira] columns` |
 | AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook/Webex); right pane = Diff / Markdown / Outlook / Webex preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
@@ -105,7 +104,7 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
 
 - `rust/ws-rs` — the app (`kitchen-sink` binary): `app/` host, socket, CLI
   client, config, Python helper client; `ui/` popup framework + shared
-  window; `views/` notes, files, jira, confluence, AI, compare, screenshot, …;
+  window; `views/` files, jira, confluence, AI, compare, screenshot, …;
   `engines/` pure logic; `panes/` pane focus + vim keys
 - `rust/swiftterm-shim` — the one Swift piece: a tiny `NSView` wrapper around
   the pinned SwiftTerm library for the embedded terminal
@@ -143,7 +142,7 @@ what works, the window-manager-key → CLI-mode mapping, and the known gaps.
 bin/ks-mcp-sandbox.sh start          # live-safe cargo build + start
 export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)
 printf 'state\n'      | nc -U -w3 "$KS_SOCKET" | jq .
-echo 'do:open:notes'  | nc -U -w3 "$KS_SOCKET" | jq .views.notes.shown
+echo 'do:open:files'  | nc -U -w3 "$KS_SOCKET" | jq .views.files.shown
 bin/ks-mcp-sandbox.sh stop
 ```
 

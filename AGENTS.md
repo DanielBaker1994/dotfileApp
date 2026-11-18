@@ -10,7 +10,7 @@ a pointer here; its old deep-detail text is in git history.
 kitchen-sink is a single-instance macOS app — **Rust + AppKit via objc2**
 (`rust/`, cargo workspace) — that runs as a hotkey-driven daemon: AeroSpace / CLI
 launches talk to it over a Unix socket (`$TMPDIR/ws-notes.sock`, lock file beside
-it), and one **shared window** hosts the views — notes, files, jira, confluence,
+it), and one **shared window** hosts the views — files, jira, confluence,
 AI, compare — plus tool panels (screenshot, paths, terminal, prettyprint,
 filefast, health checks, view switcher / command palette). It is a *regular* app
 (`NSApplicationActivationPolicy::Regular`: menu bar + status item). Python
@@ -31,7 +31,10 @@ The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
    editor; sheets route paste to their field editor and set
    `initialFirstResponder`).
 2. **Right-click menus** in file browsers / the terminal offer: copy file,
-   copy absolute path, open in notes, reveal in the app's own Files view.
+   copy absolute path, reveal in the app's own Files view. (The notes app
+   was removed Nov 2026; markdown editing, snippets, the Prose preview and the
+   document-style picker now live in nvim: `~/.dotfiles/nvim/lua/user/prose.lua`
+   and `snippet_picker.lua`. The socket keeps its old name `ws-notes.sock`.)
 3. **Config over code.** User-facing strings, sizes, and paths live in
    `commands.toml`; prefer a config change over a hard-coded one.
 4. **Git only in this repo** (`/Users/danielbaker/.config/kitchen-sink`).
@@ -88,13 +91,13 @@ Don't export `MACOSX_DEPLOYMENT_TARGET=26.7` (corrupt proc-macro dylibs).
 
 **Tests.** `./ws test SUITE` → `bin/run-tests.sh SUITE`. `all` (the default)
 runs the Python suites with no case of their own (`test_jira_poll.py`,
-`test_confluence.py`, `test_notifications.py`, `test_snippet_render.py`) plus
+`test_confluence.py`, `test_notifications.py`) plus
 the whole cargo workspace; module cases map to `cargo test -p ws-rs <module>`
-(`nvim`, `filter`, `paths`, `screenshot`, `ansi`, `prose`, `panes`,
+(`filter`, `paths`, `screenshot`, `ansi`, `prose` (= `engines::ai_format`), `panes`,
 `vim-keys`, `recent`, `helper-client`, `compare` = Python + `views::compare`),
 the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
 `WS_PYTHON`), `settings`, `jira-*`, `confluence-*`, `shot-model`,
-`prose-pdf`, `snippets`, …). Direct: `cd rust && cargo test` (~660 tests) or
+…). Direct: `cd rust && cargo test` (~820 tests) or
 `python3 Tests/test_x.py`.
 
 UI test suites (`ui`, `vim`, `focus`) were **deleted by owner decision** — they
@@ -109,8 +112,8 @@ Fast UI verification (the `ui-check` skill, `.claude/skills/ui-check/SKILL.md`):
 ```bash
 ./ws build                                   # build + relaunch
 S="$TMPDIR/ws-notes.sock"
-echo state              | nc -U -w3 "$S" | jq '{view, visible, views: .views.notes}'
-echo do:toggle-terminal | nc -U -w3 "$S" | jq '.views.notes | {terminal, frame, drawerInset}'
+echo state         | nc -U -w3 "$S" | jq '{view, visible, views: .views.files}'
+echo do:open:files | nc -U -w3 "$S" | jq '.views.files | {shown, frame}'
 ```
 
 Assert only what the change affects, then put the user's live app back the
@@ -135,7 +138,7 @@ Build/test gotchas:
   launch path to `logs/YYYY_MM_DD/launch.log`; `WS_LOG_DIR` overrides the log
   directory (tests / the MCP sandbox); `WS_JSON_ROOT` / `WS_JSON_TRACE=1`
   redirect the JSON manager; `WS_RS_ASSET_DIR=<checkout>` points a non-repo,
-  non-dist bundle (no Resources payload) at a checkout's `pylib/`/`vim/`;
+  non-dist bundle (no Resources payload) at a checkout's `pylib/`;
   `WS_HELPERS_BIN` overrides where `notify_poll.py` finds the AX helpers.
 
 ## MCP server / headless control
@@ -161,11 +164,11 @@ An agent can drive and verify the app over the socket — no computer control:
   (LaunchServices, so the bundle's TCC grants apply). **It runs `aerospace enable off` for the
   duration** (the `on-window-detected` rule moves/tiles the shared window and breaks capture and
   geometry checks); `stop` runs `aerospace enable on` (marker file `.build/mcp-sandbox/aerospace-disabled`).
-  If a run dies uncleanly, run `stop` or `aerospace enable on`. Proven path: `do:open:notes` returns
+  If a run dies uncleanly, run `stop` or `aerospace enable on`. Proven path: `do:open:files` returns
   real state (windows, `views.*.shown`), and `pane-shot` (raw socket or `ks_raw`) writes a real PNG
   of a live window (path under `/private/tmp`; Read it to see the pane).
   **The GUI sandbox pops UI onto the owner's screen:** `open -g` does not stop the app activating
-  itself; a bare start opens+activates the notes window, `show` presents the palette (`run_daemon`
+  itself; a bare start opens+activates the shared window, `show` presents the palette (`run_daemon`
   in `main.rs`). Script uses `show` (less intrusive). A true quiet launch needs a code change (a
   skip-launch-UI env); a first attempt made `state` stop answering, so it was reverted. Raw-exec
   of the binary (not `open`) never answers the socket — always launch via `open`. Use `pane-shot` for captures;
@@ -220,18 +223,18 @@ with `--docker`, and on Linux `./ws build` runs it.
 
 - Works: `kitchen-sink headless` (the full socket API, no AppKit) and the egui panes —
   files, switcher/palette, paths, jira, confluence, ai (`egui_commonmark`), compare,
-  the notes editor and tools/setup — plus row context menus.
+  and tools/setup — plus row context menus.
 - Wave 6 landed: the egui terminal panel (`frontend_egui/terminal.rs`, driven by
   `alacritty_terminal` 0.26 directly, not `egui_term`), the `platform::capture` seam
   (`xcap` 0.4.1; no egui overlay or capture UI yet), and OCR via the `tesseract` CLI
   when it is on `PATH`.
 - Window manager: there is no AeroSpace on Linux. Bind your WM's keys to the existing
-  CLI — `kitchen-sink notes|files|jira|confluence|ai|compare|window` (and `term`,
+  CLI — `kitchen-sink files|jira|confluence|ai|compare|window` (and `term`,
   `show`) — which forwards the launch message to the running daemon over
   `$TMPDIR/ws-notes.sock`; `hotkey_prep` is a no-op off macOS.
 - Unsupported / known gaps: QuickLook and the tray/global menu (not started); no Linux
   screenshot capture/annotation UI yet (only the `platform::capture` seam); `status.py` still
-  reads macOS power/mem APIs; "open in notes" is a no-op off macOS; `ToolsPane` cannot
+  reads macOS power/mem APIs; `ToolsPane` cannot
   pre-select a tool tab. See `PLAN-cross-platform.md` §8.
 
 ## Repo layout / code map
@@ -247,7 +250,7 @@ gitignored.
 
 - `ws-rs` — the app binary `kitchen-sink` (~65k lines; objc2 0.6, block2,
   dispatch2, serde, libc; **no tokio** — std threads + a main-thread drain timer).
-  - `main.rs` — one-shots (`help`, `config-schema`, `config-check`, `prose`),
+  - `main.rs` — one-shots (`help`, `config-schema`, `config-check`),
     `AppInstall::ensure_home`, the CLI client pass, then the daemon
     (`run_daemon`: socket server, NSApplication, status item, daemon UI).
   - `app/` — `cli.rs` (the client side: forward to a running daemon, print
@@ -261,12 +264,12 @@ gitignored.
     `hotkey.rs` (AeroSpace prep), `menu.rs`, `python_helper.rs`, `process_run.rs`.
   - `ui/` — `popup.rs` (popup framework + `route_key`), `shared_window.rs`,
     `card.rs`, `chrome.rs`, `theme.rs`.
-  - `views/` — `notes.rs` (+ `notes_vim.rs` nvim pane), `files.rs`, `jira.rs`,
+  - `views/` — `files.rs`, `jira.rs`, `pane_find.rs` (jira-jump + `/` pane finder),
     `confluence.rs`, `ai.rs`, `compare.rs`, `screenshot.rs`, `paths.rs`,
     `switcher.rs` (palette + view switcher), `terminal.rs`, `tools.rs`,
     `inspector.rs`, `setup.rs` (`AppInstall` + setup UI).
   - `engines/` — pure logic (ai_format, ansi_render, config_text, file_ops,
-    list_filter, nvim_rpc, pane_shot, path_shelf, recent_files,
+    list_filter, pane_shot, path_shelf, recent_files,
     screenshot_annotations/text, switcher_status, text_edit_keys).
   - `panes/` — pane_nav, pane_geometry, vim_keys, vim_search.
 - `ws-helpers` — `dock_badges` + `webex_unread` AX helpers (run by
@@ -282,8 +285,8 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 
 - `pylib/` — engines + codecs: `helper/` (the JSON-lines worker), `jsonmgr.py`,
   `config_text.py` (the commands.toml codec), `compare_*`, `file_ops`,
-  `ai_format`, `ansi`, `shot_model`, `paneshot`, `shelf`, `prose_pdf`,
-  `doc_templates`, `status`, `ignore_rules`, `jira_*` / `confluence_*` glue,
+  `ai_format`, `ansi`, `shot_model`, `paneshot`, `shelf`,
+  `status`, `ignore_rules`, `jira_*` / `confluence_*` glue,
   plus the shipped JSON homes. `text_table/` is standalone (no helper protocol):
   `python3 -m text_table IN OUT --format outlook --fallback-out FB --meta M` —
   OCR/pasted text → table (parse = delimiter detection, formats = registry).
@@ -299,10 +302,10 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 
 `bin/` (build/test/install tooling; `lib.sh` for `ws_*` helpers;
 `preflight.sh`, `grant-permissions.sh`, `setup-home.sh`, `symlinks.sh` at
-root); `Tests/` (Python tests + `helper_fixtures/`, `snippet_render/`,
+root); `Tests/` (Python tests + `helper_fixtures/`,
 `test_install.sh`); `config/` (aerospace + borders rc, per-file symlinks from
 `~/.config/<name>`, plus `paths.ignore`); `rules/` (AI rule markdown),
-`templates/`, `samples/`, `vim/` (nvim config + snippets for the notes pane),
+`templates/`, `samples/`,
 `patches/` (SwiftTerm patch only), `.claude/skills/` (repo skills incl.
 `ui-check`; `.agents/` is gitignored).
 
@@ -331,7 +334,7 @@ controller's `UiQueue` and `MainQueue`).
 
 ### Shared-window model
 
-One host window, many views: `SlotView` (`notes, files, jira, detail, releases,
+One host window, many views: `SlotView` (`files, jira, detail, releases,
 config, output, confluence, ai, compare, compareText`). `ControllerInner`
 (`app/host.rs`) is the state machine — `open/push/back/home/present/hide/
 cycle/toggle/hotkey`; `toggle`/`hotkey` hide only when the user is in the
@@ -339,7 +342,7 @@ window (key + active + frontmost), else bring it forward (`hideOrFocus`).
 `present` pushes `UiCommand::Present(v)`; the daemon UI swaps the view's
 content (built lazily by `content_for`) into the host window, activates and
 makes it key. Views are hard-coded in `SlotView`; `commands.toml` declares
-commands/windows (`[notes]`, `[files]`, … with `enabled = true`).
+commands/windows (`[files]`, `[jira]`, … with `enabled = true`).
 
 ### Socket contract (the daemon API)
 
@@ -357,18 +360,17 @@ JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `paneShot`, `paths`, `tools.<name>`, `palette`, `paletteCommands`,
 `viewSwitcher`, `terminalPanel`, `activations`, `pid`. Useful `do:` actions:
 `cycle`, `cycle-back`, `hide`, `back`, `home`, `toggle`, `open:<view>`,
-`toggle-terminal`, `term`, `switcher`, `reset-size`, `pane:h|j|k|l`,
+`term`, `switcher`, `reset-size`, `pane:h|j|k|l`,
 `pane:focus:<id>`, `key:<spec>`, `header-style:<style>`,
 `esc-hides:<view>:on|off`, `tool:<name>` / `tool-close:<name>`, `screenshot:*`,
-`go:view:<view>|note:<path>|folder:<compare session id>` (present a `links` row),
 `compare:*`, `paths:*`, `sidebar-width:<view>[:px]`,
 `inspector-width:jira[:px]`, `jira-inspector:show|hide|toggle` (the Jira ticket
 panel), `rail:<view>[:on|off|toggle]` (the sidebar rail — Ctrl+B B on the
-socket; notes, files, jira, confluence, ai, compare). Replies > 8 KB are fine
+socket; files, jira, confluence, ai, compare). Replies > 8 KB are fine
 (accepted sockets are blocking).
 
-**Hotkey fast path.** Messages in `hotkey::HOTKEY_MODES` (`window`, `notes`,
-`voice`, `jira`, `files`, `confluence`, `ai`, `compare`) run `hotkey_prep`
+**Hotkey fast path.** Messages in `hotkey::HOTKEY_MODES` (`window`, `jira`,
+`files`, `confluence`, `ai`, `compare`) run `hotkey_prep`
 (AeroSpace IPC: focused window → focus file, focused workspace/screen, move
 stray windows) before the toggle. Tool-panel hotkeys (Hyper+X screenshot) are
 not in that list. `[screenshot] text-column-gap` (× line height; 0 = off) makes
@@ -396,7 +398,7 @@ switcher, tool panels — Esc streak per `escCloseCount`/`esc-close` (0 =
 never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
 Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher
 (`views/switcher.rs`), T =
-terminal/prose, B = sidebar rail (every `SidebarView` pane: notes, files,
+terminal, B = sidebar rail (every `SidebarView` pane: files,
 jira, confluence, ai, compare; persisted per view as `sidebarRail.<view>`).
 `PaneNav` moves the focus ring between panes;
 `VimKeys` gives the focused pane normal/insert/search modes. Tool panels are
@@ -431,8 +433,8 @@ minus .json>")`; user/runtime data keeps its own I/O.
 ### Config (commands.toml)
 
 Flat `[section]` tables, one `key = value` per line: `[app]`, `[theme]`,
-`[themes]`, per-view sections (`[notes]`, `[files]`, `[jira]`, `[confluence]`,
-`[ai]`, `[compare]`, `[screenshot]`, `[pane-shot]`, `[paths]`, `[notes-find]`,
+`[themes]`, per-view sections (`[files]`, `[jira]`, `[confluence]`,
+`[ai]`, `[compare]`, `[screenshot]`, `[pane-shot]`, `[paths]`, `[pane-find]`,
 `[filefast]`), `[icons]`, `[shortcuts]`, `[terminal]`, `[prettyprint]`,
 `[health-checks]`, `[setup]`, `[settings-hub]`, … Reads go through the Python
 line codec (or the pure scans in `host.rs`, which unquote values like the
@@ -493,7 +495,6 @@ exported for Python readers).
 
 ## Known gaps (see `HANDOFF-rust-port-next.md`)
 
-- Notes vim pane: `:q` relaunch doesn't restart nvim (the vim suite is parked).
 - Hide-on-focus-loss: the setting is reported, but the Swift focus bridge
   (`ws-aerospace-focus` watcher) is not ported.
 - AeroSpace re-show differs from Swift ("no jump back" in the focus suite).
@@ -501,7 +502,5 @@ exported for Python readers).
   sidebar, files, Jira and Confluence lists; text (`NSTextView` temporary
   background) and web (`CSS.highlights`) targets are still unported.
 - `Cmd+K` action picker, `Cmd+/` shortcuts sheet, pane-shot preview window,
-  compare `summary` label. (`do:notes-find` / `do:notes-grep` / `do:jira-jump`
-  windows are ported: `views/note_find.rs`; the notes vim pane's `leader+sf` /
-  `leader+sg` route raw `notes-find` / `notes-grep`; `<leader>sf` on the
-  non-nvim panes opens `PaneFindUi`.)
+  compare `summary` label. (`do:jira-jump` and the `<leader>sf` pane finder
+  are ported: `views/pane_find.rs`.)

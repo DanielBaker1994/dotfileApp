@@ -6,7 +6,7 @@ TESTS="$ROOT/Tests"
 
 # The app's unit tests live in the Rust workspace (rust/): `rust_test FILTER`
 # runs the ws-rs tests whose path matches FILTER (a module, e.g.
-# engines::nvim_rpc); no filter runs the whole workspace.
+# engines::list_filter); no filter runs the whole workspace.
 rust_test() {
     echo "Running cargo test ${1:-(workspace)}..."
     command -v cargo >/dev/null 2>&1 || { echo "cargo not found — install Rust" >&2; return 1; }
@@ -38,9 +38,6 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_ai_format.py"
         ;;
-    nvim)
-        rust_test engines::nvim_rpc
-        ;;
     filter)
         rust_test engines::list_filter
         ;;
@@ -71,14 +68,6 @@ case "${1:-all}" in
         ;;
     prose)
         rust_test engines::ai_format
-        ;;
-    prose-pdf)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_prose_pdf.py"
-        ;;
-    snippets)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_snippet_render.py"
         ;;
     panes)
         rust_test panes::pane_geometry
@@ -165,10 +154,6 @@ case "${1:-all}" in
     helper-client)
         rust_test app::python_helper
         ;;
-    doc-templates)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_doc_templates.py"
-        ;;
     mcp)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" -B "$TESTS/test_ks_mcp.py" && "$py" -B "$TESTS/test_mcp_verbs.py"
@@ -200,8 +185,7 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         # the python suites with no `ws test` case of their own (the rest
         # have cases above), then every Rust test in the workspace
-        for t in "$TESTS/test_jira_poll.py" "$TESTS/test_confluence.py" "$TESTS/test_notifications.py" \
-                 "$TESTS/test_snippet_render.py"; do
+        for t in "$TESTS/test_jira_poll.py" "$TESTS/test_confluence.py" "$TESTS/test_notifications.py"; do
             [ -f "$t" ] && echo "Running $(basename "$t" .py)..." && "$py" "$t"
         done
         rust_test

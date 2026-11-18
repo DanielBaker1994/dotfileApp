@@ -93,9 +93,9 @@ case "$MODE" in screenshot)
     exit 0
 esac
 
-case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
+case "$MODE" in window|jira|files|terminal|confluence|ai)
     LOG "== invoke MODE=$MODE focused=[$LINE] =="
-    # notes, files, jira and output windows are all views of ONE shared
+    # files, jira and output windows are all views of ONE shared
     # window: move ours (not the Hyper+S palette, titled like the app) onto
     # the CURRENT workspace — only the ones on another workspace, and no
     # wait: aerospace answers once the move is done. (A warm daemon's
@@ -121,7 +121,7 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
         # attribution and would answer future pings forever)
         pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
-        # cold start: "window" opens the first view, notes —
+        # cold start: "window" opens the first view, files —
         # the CLI client (rust/ws-rs/src/app/cli.rs) maps it
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"

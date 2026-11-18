@@ -51,13 +51,12 @@ READ_ONLY_RAW_VERBS = ("screenshot-permission",)
 #   - the ks_help tool returns it in full.
 DO_ACTIONS = (
     "Valid actions — pass one of these: `open:<view>` or `show[:<view>]` "
-    "(`notes`, `files`, `jira`, `detail`, `releases`, `config`, `output`, "
+    "(`files`, `jira`, `detail`, `releases`, `config`, `output`, "
     "`confluence`, `ai`, `compare`, `compareText`; bare `show` re-presents the "
     "last view, or `jira` if none), `rebuild-card:<view>`, "
-    "`cycle` / `cycle-back` (a two-view Notes <-> Files toggle; cycle-back is "
-    "identical by design), `hide`, `back` (returns to the previous view), `home`, "
-    "`toggle`, `toggle-terminal`, `toggle-browser`, `term`, `switcher`, "
-    "`switcher-hide`, `notes-find`, `notes-grep`, `jira-jump`, "
+    "`cycle` / `cycle-back` (the next / previous header view; Files when none "
+    "are registered), `hide`, `back` (returns to the previous view), `home`, "
+    "`toggle`, `term`, `switcher`, `switcher-hide`, `jira-jump`, "
     "`jira-poll-on`, `jira-poll-off`, `jira-setup`, `reset-size`, "
     "`pane:h|j|k|l`, `pane:focus:<id>`, `key:<spec>` (non-empty; recorded as "
     "state `lastKey`; sends nothing), "
@@ -76,8 +75,7 @@ DO_ACTIONS = (
     "`screenshot:<sub>`, `board:<sub>` (Jira board: `open:<id>`, `list`, "
     "`list-open:<id>`, `list-star:<id>`, `view:<board|sprint|mode>`, "
     "`sprint:<id>`, `mode:<columns|table>`, `pin`). "
-    "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, "
-    "`toggle-terminal`, `toggle-browser`, `term`, `notes-find`, `notes-grep`, "
+    "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, `term`, "
     "`jira-jump`, `reset-size`, `board:*`) are refused in headless mode. Pass "
     "one of these; a typo is not always distinguishable from success."
 )
@@ -110,8 +108,8 @@ STATE_HELP = (
     "- `view` — the active SlotView name (\"\" when none is presented).\n"
     "- `visible` — true while the shared window is up.\n"
     "- `views.<name>.shown` — per-view visibility; also `key` (has key focus), "
-    "`wid`, `frame [x,y,w,h]`; notes/files/jira add `terminal`, `drawerInset`, "
-    "`query`, `rowCount`, `tabs`, `board`, `header`, ….\n"
+    "`wid`, `frame [x,y,w,h]`; files/jira add `query`, `rowCount`, `tabs`, "
+    "`board`, `header`, ….\n"
     "- `windows` — the live window count.\n"
     "- `tools` — open tool panels by name (`paths`, `prettyprint`, `filefast`, …).\n"
     "- `paths` — the paths shelf (`shown`, `rows`).\n"
@@ -126,8 +124,7 @@ STATE_HELP = (
 # The headless caveat, shared by ks_help's state section and its own note.
 HEADLESS_HELP = (
     "Headless mode runs no AppKit: window-only verbs are refused (see "
-    "`needs_window` in host.rs): `paths:show`, `switcher`, `toggle-terminal`, "
-    "`toggle-browser`, `term`, `notes-find`, `notes-grep`, `jira-jump`, "
+    "`needs_window` in host.rs): `paths:show`, `switcher`, `term`, `jira-jump`, "
     "`reset-size`, `tool:<name>`. `screenshot`/`pane-shot`/`window-shot` are "
     "refused too. "
     "`state` still reports `shown: true` for panels that cannot exist without a "
@@ -403,7 +400,7 @@ class Server:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "description": "Action without the `do:` prefix, e.g. `open:notes`, `toggle-terminal`, `cycle`.",
+                                "description": "Action without the `do:` prefix, e.g. `open:files`, `term`, `cycle`.",
                             }
                         },
                         "required": ["action"],

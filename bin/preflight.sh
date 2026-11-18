@@ -158,22 +158,6 @@ if [ "$SHOT_ON" != false ]; then
     esac
 fi
 
-VIM_BIN="$(conf_value notes vim-bin)"; VIM_BIN="${VIM_BIN:-nvim}"; VIM_BIN="${VIM_BIN/#\~/$HOME}"
-if command -v "$VIM_BIN" >/dev/null 2>&1; then
-    add nvim features warn 1 "Neovim (notes editor)" "$(command -v "$VIM_BIN")"
-else
-    add nvim features warn 0 "Neovim (notes editor)" "$VIM_BIN not found" \
-        "Notes fall back to the built-in editor. For the vim pane:  brew install neovim" brew:neovim
-fi
-
-PDF_BIN="$(conf_value notes pdf-engine-bin)"; PDF_BIN="${PDF_BIN:-/opt/homebrew/bin/weasyprint}"; PDF_BIN="${PDF_BIN/#\~/$HOME}"
-if [ -x "$PDF_BIN" ] || command -v "$PDF_BIN" >/dev/null 2>&1; then
-    add weasyprint features warn 1 "WeasyPrint (notes Export PDF)" "$PDF_BIN"
-else
-    add weasyprint features warn 0 "WeasyPrint (notes Export PDF)" "$PDF_BIN not found" \
-        "The reading view's Export PDF (Cmd+P) is off. To turn it on:  brew install weasyprint" brew:weasyprint
-fi
-
 HAVE_BREW=0
 if command -v brew >/dev/null 2>&1; then
     HAVE_BREW=1

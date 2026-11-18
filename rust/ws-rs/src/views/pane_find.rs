@@ -1,7 +1,7 @@
-//! `NoteFindWindow.swift`: the leader+sf picker over the open notes and the
-//! leader+sg ripgrep over them (`do:notes-find` / `do:notes-grep`). The model
-//! is [`NoteFindModel`]; this is the floating list panel around it, built on
-//! [`ListPanel`] like the Ctrl+B W switcher.
+//! Small floating pickers shared by the window: the Jira rail's jump list
+//! (`do:jira-jump`, `SidebarJumpWindow`) and the `/` pane finder the vim keys
+//! open over list panes. Both are [`ListPanel`] cards like the Ctrl+B W
+//! switcher. (Split out of the removed notes find window.)
 
 #![cfg(target_os = "macos")]
 
@@ -10,429 +10,32 @@ use crate::ui::list_panel::ListPanel;
 use crate::ui::popup::{CardFrame, PopupConfig, PopupPanel};
 use crate::ui::style::{self, Weight};
 use crate::ui::theme::PopupColors;
-use crate::views::notes::{parse_rgrep, rg_args, rg_path, sort_grep, NoteFindMode, NoteFindModel};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEvent, NSScreen, NSTextField};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 const ROW_H: f64 = 30.0;
 
-/// `[notes-find]` settings.
+/// `[pane-find]` settings.
 #[derive(Clone, Debug)]
-pub struct NoteFindConfig {
+pub struct PaneFindConfig {
     pub width: f64,
     pub rows: usize,
-    pub grep_max: usize,
-    pub rg_bin: Option<String>,
 }
 
-impl NoteFindConfig {
+impl PaneFindConfig {
     pub fn from_section(s: &HashMap<String, String>) -> Self {
         let num = |k: &str| s.get(k).and_then(|v| v.trim().parse::<f64>().ok());
-        NoteFindConfig {
+        PaneFindConfig {
             width: num("width").unwrap_or(640.0).max(360.0),
             rows: num("rows").map(|v| v as usize).unwrap_or(12).max(5),
-            grep_max: num("grep-max").map(|v| v as usize).unwrap_or(200).max(1),
-            rg_bin: s.get("rg-bin").cloned(),
         }
     }
 }
-
-type OpenFn = Box<dyn Fn(String, Option<i64>)>;
-
-pub struct NoteFindUi {
-    pub panel: Retained<PopupPanel>,
-    list: ListPanel,
-    empty: Retained<NSTextField>,
-    model: RefCell<NoteFindModel>,
-    paths: RefCell<Vec<String>>,
-    cfg: NoteFindConfig,
-    colors: PopupColors,
-    grep_gen: Cell<u64>,
-    on_open: RefCell<Option<OpenFn>>,
-    on_log: RefCell<Option<Box<dyn Fn(String)>>>,
-}
-
-thread_local! {
-    /// The live grep window, for the ripgrep worker's main-thread reply.
-    static GREP_UI: RefCell<Option<Weak<NoteFindUi>>> = const { RefCell::new(None) };
-}
-
-impl NoteFindUi {
-    pub fn new(mtm: MainThreadMarker, mode: NoteFindMode, cfg: NoteFindConfig) -> Rc<NoteFindUi> {
-        let colors = crate::ui::theme::PopupThemeDefaults::colors();
-        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "");
-        let h = list.height(1, cfg.rows);
-        let config = PopupConfig {
-            name: "notes-find".to_string(),
-            frame: CardFrame { x: 0.0, y: 0.0, width: cfg.width, height: h },
-            tool_panel: true,
-            floating: true,
-            ..PopupConfig::default()
-        };
-        let panel = PopupPanel::create(mtm, &config);
-        panel.setOpaque(false);
-        panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
-        panel.setHasShadow(true);
-        panel.setContentView(Some(&list.root));
-        let empty = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        empty.setFont(Some(&style::system_font(12.0, Weight::Regular)));
-        empty.setTextColor(Some(&colors.dim.to_nscolor()));
-        empty.setHidden(true);
-        list.root.addSubview(&empty);
-        let model = NoteFindModel::new(mode, cfg.rows, cfg.grep_max);
-        let ui = Rc::new(NoteFindUi {
-            panel,
-            list,
-            empty,
-            model: RefCell::new(model),
-            paths: RefCell::new(Vec::new()),
-            cfg,
-            colors,
-            grep_gen: Cell::new(0),
-            on_open: RefCell::new(None),
-            on_log: RefCell::new(None),
-        });
-        let weak = Rc::downgrade(&ui);
-        ui.list.set_drawer(Box::new(move |r, i, sel, hover| {
-            if let Some(ui) = weak.upgrade() {
-                ui.draw_row(r, i, sel, hover);
-            }
-        }));
-        let weak = Rc::downgrade(&ui);
-        ui.list.set_on_click(Box::new(move |row, _x, _double| {
-            if let Some(ui) = weak.upgrade() {
-                ui.open(row);
-            }
-        }));
-        let weak = Rc::downgrade(&ui);
-        let weak_cmd = Rc::downgrade(&ui);
-        ui.list.set_on_field(
-            Box::new(move |q: String| {
-                if let Some(ui) = weak.upgrade() {
-                    ui.query_changed(&q);
-                }
-            }),
-            Box::new(move |cmd| {
-                let Some(ui) = weak_cmd.upgrade() else { return false };
-                match cmd {
-                    "cancelOperation:" => {
-                        ui.hide();
-                        true
-                    }
-                    "insertNewline:" => {
-                        ui.open(ui.list.rows.selection());
-                        true
-                    }
-                    "moveDown:" => {
-                        ui.move_selection(1);
-                        true
-                    }
-                    "moveUp:" => {
-                        ui.move_selection(-1);
-                        true
-                    }
-                    _ => false,
-                }
-            }),
-        );
-        if mode == NoteFindMode::Grep {
-            GREP_UI.with(|g| *g.borrow_mut() = Some(Rc::downgrade(&ui)));
-        }
-        ui
-    }
-
-    pub fn mode(&self) -> NoteFindMode {
-        self.model.borrow().mode
-    }
-
-    pub fn set_on_open(&self, f: OpenFn) {
-        *self.on_open.borrow_mut() = Some(f);
-    }
-
-    pub fn set_on_log(&self, f: Box<dyn Fn(String)>) {
-        *self.on_log.borrow_mut() = Some(f);
-    }
-
-    fn log(&self, s: String) {
-        if let Some(f) = self.on_log.borrow().as_ref() {
-            f(s);
-        }
-    }
-
-    pub fn is_shown(&self) -> bool {
-        self.panel.isVisible()
-    }
-
-    pub fn has_key(&self) -> bool {
-        self.panel.isKeyWindow()
-    }
-
-    /// `show()`: place near the top of the mouse's screen, refresh, focus.
-    pub fn show(&self, open_paths: Vec<String>) {
-        *self.paths.borrow_mut() = open_paths.clone();
-        let q = self.list.search.stringValue().to_string().trim().to_string();
-        {
-            let mut m = self.model.borrow_mut();
-            m.query = q.clone();
-            m.set_open_paths(&open_paths);
-            if m.mode == NoteFindMode::Files {
-                self.log(format!("notes-find: {} open notes", m.all.len()));
-            }
-        }
-        if self.mode() == NoteFindMode::Grep {
-            self.query_changed(&q);
-        }
-        self.sync();
-        self.place();
-        self.panel.makeKeyAndOrderFront(None);
-        self.panel.makeFirstResponder(Some(&self.list.search));
-    }
-
-    pub fn hide(&self) {
-        self.panel.orderOut(None);
-    }
-
-    fn place(&self) {
-        place_top_center(&self.panel);
-    }
-
-    fn query_changed(&self, q: &str) {
-        let mode = self.mode();
-        self.model.borrow_mut().set_query(q);
-        match mode {
-            NoteFindMode::Files => self.sync(),
-            NoteFindMode::Grep => self.run_grep(),
-        }
-    }
-
-    /// `runGrep()`: ripgrep the open notes off-main, newest query wins.
-    fn run_grep(&self) {
-        let gen = self.grep_gen.get() + 1;
-        self.grep_gen.set(gen);
-        let q = self.model.borrow().query.trim().to_string();
-        let paths: Vec<String> =
-            self.paths.borrow().iter().filter(|p| std::path::Path::new(p.as_str()).exists()).cloned().collect();
-        if q.chars().count() < 2 || paths.is_empty() {
-            // `set_query` already set the placeholder note + cleared rows.
-            self.sync();
-            return;
-        }
-        let Some(rg) = rg_path(self.cfg.rg_bin.as_deref()) else {
-            {
-                let mut m = self.model.borrow_mut();
-                m.grep_note = "ripgrep (rg) not found — brew install ripgrep".into();
-                m.show_grep(&[], 0);
-            }
-            self.sync();
-            return;
-        };
-        let cap = self.cfg.grep_max;
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            let live = GREP_GEN.load(std::sync::atomic::Ordering::SeqCst);
-            if live > gen {
-                return;
-            }
-            let t0 = std::time::Instant::now();
-            let out = std::process::Command::new(&rg)
-                .args(rg_args(&q, &paths))
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            let mut hits = parse_rgrep(&out, cap);
-            sort_grep(&mut hits, &paths);
-            let ms = t0.elapsed().as_millis();
-            let n = paths.len();
-            crate::platform::run_on_main(move || {
-                let ui = GREP_UI.with(|g| g.borrow().as_ref().and_then(|w| w.upgrade()));
-                let Some(ui) = ui else { return };
-                if ui.grep_gen.get() != gen {
-                    return;
-                }
-                {
-                    let mut m = ui.model.borrow_mut();
-                    m.grep_note = format!("No match for “{q}”");
-                    m.show_grep(&hits, n);
-                }
-                ui.sync();
-                ui.log(format!("notes-grep: '{q}' {} hits, {ms} ms", hits.len()));
-            });
-        });
-        GREP_GEN.store(gen, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Mirror the model into the rows, the empty note and the window height.
-    fn sync(&self) {
-        let (n, sel, note) = {
-            let m = self.model.borrow();
-            (m.shown.len(), m.selection, m.empty_message())
-        };
-        self.list.set_rows(n, sel);
-        // Nothing to list and nothing to say: just the search field.
-        let h = if n == 0 && note.is_empty() {
-            crate::ui::list_panel::SEARCH_H + crate::ui::list_panel::PAD_BOTTOM
-        } else {
-            self.list.height(n, self.cfg.rows)
-        };
-        let f = self.panel.frame();
-        let top = f.origin.y + f.size.height;
-        self.panel.setFrame_display(
-            NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(self.cfg.width, h)),
-            true,
-        );
-        self.empty.setStringValue(&NSString::from_str(&note));
-        self.empty.setHidden(n > 0 || note.is_empty());
-        // The panel root is flipped: the note sits in the first row slot, under
-        // the search field (it was drawn over the typed query).
-        self.empty.setFrame(NSRect::new(
-            NSPoint::new(18.0, crate::ui::list_panel::SEARCH_H + 7.0),
-            NSSize::new(self.cfg.width - 36.0, 16.0),
-        ));
-    }
-
-    pub fn move_selection(&self, d: i64) {
-        let sel = {
-            let mut m = self.model.borrow_mut();
-            m.move_selection(d);
-            m.selection
-        };
-        let n = self.model.borrow().shown.len();
-        self.list.set_rows(n, sel);
-    }
-
-    /// `open(_:)`.
-    pub fn open(&self, i: usize) {
-        let Some((path, line)) = self.model.borrow().open(i) else { return };
-        self.hide();
-        self.log(format!("notes-find: open {path}"));
-        if let Some(f) = self.on_open.borrow().as_ref() {
-            f(path, line);
-        }
-    }
-
-    pub fn selection(&self) -> usize {
-        self.model.borrow().selection
-    }
-
-    /// `copyPath(_:)` — the selected row's path (Cmd+C with no text selected).
-    pub fn selected_path(&self) -> Option<String> {
-        let m = self.model.borrow();
-        m.shown.get(m.selection).map(|h| h.path.clone())
-    }
-
-    /// Whether the search field has a text selection (Cmd+C copies it then).
-    pub fn field_has_selection(&self) -> bool {
-        self.list
-            .search
-            .currentEditor()
-            .map(|e| e.selectedRange().length > 0)
-            .unwrap_or(false)
-    }
-
-    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool, hovered: bool) {
-        use crate::ui::chrome::Rect;
-        let c = &self.colors;
-        let m = self.model.borrow();
-        let Some(h) = m.shown.get(i) else { return };
-        let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
-        style::row_pill(inner, 7.0, selected, selected, hovered, c, style::RowAccent::Rounded(4.0));
-        let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
-        let x = inner.x + 12.0;
-        style::draw_symbol(
-            crate::ui::sidebar::icon_for_name(&h.path),
-            Rect::new(x, inner.y, 16.0, inner.height),
-            c.dim,
-            11.0,
-        );
-        let name_x = x + 24.0;
-        let file = std::path::Path::new(&h.path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (name, trailing) = match m.mode {
-            NoteFindMode::Files => {
-                let dir = std::path::Path::new(&h.rel)
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                let age = crate::views::paths::age(now - h.mtime);
-                (file, if dir.is_empty() { age } else { format!("{dir} · {age}") })
-            }
-            NoteFindMode::Grep => {
-                let line = m.lines.get(i).copied().unwrap_or(0);
-                let text = m.grep_texts.get(i).cloned().unwrap_or_default();
-                (if text.is_empty() { "(blank)".into() } else { text }, format!("{file}:{line}"))
-            }
-        };
-        let tf = style::system_font(10.0, Weight::Regular);
-        let tw = style::draw_text_right(&trailing, band(inner.x, inner.width - 10.0), &tf, c.dim);
-        let font = style::system_font(13.0, Weight::Regular);
-        let avail = inner.max_x() - name_x - tw - 20.0;
-        if m.mode == NoteFindMode::Grep {
-            // Cleaned line, windowed on the match, with the match accented.
-            let (before, hit, after) = grep_snippet(&name, &m.query);
-            let mut x = name_x;
-            for (seg, color) in [(before, c.text), (hit, c.accent), (after, c.text)] {
-                if seg.is_empty() {
-                    continue;
-                }
-                let left = (name_x + avail - x).max(0.0);
-                if left < 6.0 {
-                    break;
-                }
-                x += style::draw_text_left(&seg, band(x, left), &font, color);
-            }
-            return;
-        }
-        style::draw_text_left(&name, band(name_x, avail), &font, c.text);
-    }
-}
-
-/// A grep hit line made readable: markdown noise and runs of whitespace
-/// removed, then windowed so the first match of `query` is visible near the
-/// start. Returns (before, match, after).
-pub fn grep_snippet(line: &str, query: &str) -> (String, String, String) {
-    let mut clean = String::new();
-    for ch in line.replace("**", "").replace('`', "").trim_start_matches(['#', '>', '-', '*', ' ', '\t']).chars() {
-        if ch.is_whitespace() {
-            if !clean.ends_with(' ') {
-                clean.push(' ');
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
-    let clean = clean.trim().to_string();
-    let chars: Vec<char> = clean.chars().collect();
-    let q: Vec<char> = query.trim().to_lowercase().chars().collect();
-    let lower: Vec<char> = clean.to_lowercase().chars().collect();
-    let pos = if q.is_empty() || lower.len() != chars.len() {
-        None
-    } else {
-        (0..=chars.len().saturating_sub(q.len())).find(|&i| lower[i..].starts_with(&q))
-    };
-    let Some(p) = pos else { return (String::new(), clean, String::new()) };
-    let start = p.saturating_sub(18);
-    let before: String = if start > 0 {
-        format!("…{}", chars[start..p].iter().collect::<String>().trim_start())
-    } else {
-        chars[..p].iter().collect()
-    };
-    let hit: String = chars[p..p + q.len()].iter().collect();
-    let after: String = chars[p + q.len()..].iter().collect();
-    (before, hit, after)
-}
-
-static GREP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ------------------------------------------------------------- sidebar jump
 
@@ -484,13 +87,13 @@ pub struct SidebarJumpUi {
     all: RefCell<Vec<JumpItem>>,
     shown: RefCell<Vec<JumpItem>>,
     selection: Cell<usize>,
-    cfg: NoteFindConfig,
+    cfg: PaneFindConfig,
     colors: PopupColors,
     on_jump: RefCell<Option<Box<dyn Fn(usize)>>>,
 }
 
 impl SidebarJumpUi {
-    pub fn new(mtm: MainThreadMarker, cfg: NoteFindConfig) -> Rc<SidebarJumpUi> {
+    pub fn new(mtm: MainThreadMarker, cfg: PaneFindConfig) -> Rc<SidebarJumpUi> {
         let colors = crate::ui::theme::PopupThemeDefaults::colors();
         let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "");
         let config = PopupConfig {
@@ -672,13 +275,13 @@ pub struct PaneFindUi {
     shown: RefCell<Vec<usize>>,
     /// An index into `shown`.
     selection: Cell<usize>,
-    cfg: NoteFindConfig,
+    cfg: PaneFindConfig,
     colors: PopupColors,
     on_pick: RefCell<Option<Box<dyn Fn(usize)>>>,
 }
 
 impl PaneFindUi {
-    pub fn new(mtm: MainThreadMarker, placeholder: &str, cfg: NoteFindConfig) -> Rc<PaneFindUi> {
+    pub fn new(mtm: MainThreadMarker, placeholder: &str, cfg: PaneFindConfig) -> Rc<PaneFindUi> {
         let colors = crate::ui::theme::PopupThemeDefaults::colors();
         let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, placeholder);
         let config = PopupConfig {
@@ -859,20 +462,4 @@ fn place_top_center(panel: &PopupPanel) {
     let x = vis.origin.x + vis.size.width / 2.0 - f.size.width / 2.0;
     let y = (vis.origin.y + vis.size.height - vis.size.height * 0.2 - f.size.height).max(vis.origin.y);
     panel.setFrameOrigin(NSPoint::new(x.round(), y.round()));
-}
-
-#[cfg(test)]
-mod grep_snippet_tests {
-    use super::grep_snippet;
-
-    #[test]
-    fn windows_on_the_match() {
-        let (b, h, a) = grep_snippet("  **Themed** `dot` fences: no colors, fonts or sizes", "DOT");
-        assert_eq!((b.as_str(), h.as_str()), ("Themed ", "dot"));
-        assert!(a.starts_with(" fences"));
-        let long = "x".repeat(60) + " needle tail";
-        let (b, h, _) = grep_snippet(&long, "needle");
-        assert!(b.starts_with('…') && h == "needle");
-        assert_eq!(grep_snippet("no hit here", "zzz").1, "no hit here");
-    }
 }
