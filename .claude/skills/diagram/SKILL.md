@@ -37,5 +37,5 @@ author's own line number: fix that line, don't rewrite the diagram.
 ## Style
 `<div class="doc paper clean"></div>` on line 1 picks the palette (14 styles).
 No marker = neutral colors. Snippets: `markdown_dot_flowchart`, `_dot_architecture`,
-`_d2_flowchart`, `_d2_architecture`, `_d2_sequence`, `_d2_erd` (nvim `<leader>i`, category Diagrams).
+`_d2_flowchart`, `_d2_architecture`, `_d2_sequence`, `_d2_erd` (nvim `<leader>mdi`, category Diagrams).
 Needs `brew install graphviz d2`. Renders are cached in `~/.cache/kitchen-sink/diagrams`.

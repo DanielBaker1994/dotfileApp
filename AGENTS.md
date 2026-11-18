@@ -34,7 +34,7 @@ The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
    copy absolute path, reveal in the app's own Files view. (The notes app
    was removed Nov 2026; markdown editing, snippets and the document-style
    picker now live in nvim (`~/.dotfiles/nvim`: `<leader>mdo` build/open,
-   `<leader>mds` style, `<leader>i` snippets). The socket keeps its old name `ws-notes.sock`.)
+   `<leader>mds` style, `<leader>mdi` snippets). The socket keeps its old name `ws-notes.sock`.)
 3. **Config over code.** User-facing strings, sizes, and paths live in
    `commands.toml`; prefer a config change over a hard-coded one.
 4. **Git only in this repo** (`/Users/danielbaker/.config/kitchen-sink`).

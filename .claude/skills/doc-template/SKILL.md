@@ -21,7 +21,7 @@ description: Start a polished, shareable document from the reusable professional
      blank line + `</div>`; KIND = decision risk breaking deprecated action
      example question rollback perf (the label is drawn by CSS). Badges:
      `<span class="badge ok|warn|bad|info|muted|accent">text</span>`.
-   - Skeletons: snippets `markdown_doc_adr|postmortem|runbook|pr|status` (nvim `<leader>i`).
+   - Skeletons: snippets `markdown_doc_adr|postmortem|runbook|pr|status` (nvim `<leader>mdi`).
 4. Export: in nvim, `<leader>mdo` builds the PDF and opens the document; or
    from a shell:
    ```bash
