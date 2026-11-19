@@ -5,8 +5,8 @@
     python3 Tests/night_run.py --phases find,run           # a subset
 
 Phases (each logs to .build/night/<run>/, failures never stop the next phase):
-  find   parallel, nothing on screen: 4 flow-author workers (new flows from the docs) +
-         3 headless hunters (compare vs difflib, config fuzz, random state walk) +
+  find   parallel, nothing on screen: 3 flow-author workers (new flows from the docs) +
+         2 headless hunters (config fuzz, random state walk) +
          usability: 2 new-user walkthroughs (docs-only task flows + friction) and a keyboard
          consistency audit; these are report-only (USABILITY.md), never triaged or fixed
   run    validate the authored flows, run them in the VM (Tests/run_flows.py, no LLM)
@@ -110,7 +110,6 @@ known bugs (do not re-report them).
 
 AUTHOR_AREAS = {
     "files": "the Files view (views/files.rs): listing, filter (Cmd+L), Return/Backspace navigation, rename (F2/Cmd+R; rename keeps the extension), new folder/file, duplicate (Cmd+D), copy path, hidden toggle, sorting, Cmd+Z undo",
-    "compare": "Compare (views/compare.rs): text compare of two files, folder compare, Cmd+1/2 filters, swap sides, copy across, Home/End/Up/Down, Return on a folder row, start page Cmd+0, identical files, empty files",
     "notes": "Notes with the PLAIN editor (vim-mode=false in the fixture; no nvim in the VM): Cmd+N, typing, Cmd+S save to disk, Cmd+F find bar, tabs in the sidebar, rename, switching notes, unicode, long text, the prose toggle",
     "shell": "the shared window and its surfaces: Ctrl+B W switcher, Ctrl+Tab view cycling, Cmd+0, the palette tools (Pretty Print, Text to Table, Create File, Health Checks, Find Recent Files), paths shelf, terminal/browser drawers, esc-hides, header styles, config reload, Cmd+W",
 }
@@ -146,21 +145,6 @@ pass/fail in the VM, suspected bugs.
 """ + COMMON_RULES
 
 HUNT_BRIEFS = {
-    "h-cmp": """TASK: hunt bugs in kitchen-sink's text/folder COMPARE engine, headless (nothing on screen).
-Start a headless sandbox: export KS_MCP_SANDBOX={root}/.build/hl-cmp; bin/ks-mcp-sandbox.sh start
-(KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock), SBX_HOME=$(bin/ks-mcp-sandbox.sh home)). Write pairs of files
-under $SBX_HOME/cmp/ and load each with: printf 'compare\\t%s\\t%s\\n' A B | nc -U -w5 "$KS_SOCKET", then
-read state (printf 'state\\n' | nc -U -w3 "$KS_SOCKET") .compare.current (sections, important, rows,
-leftLines, rightLines). Compare against Python difflib (SequenceMatcher opcodes: non-equal blocks =
-sections; line counts). At least 40 cases: empty vs empty, empty vs text, identical, CRLF vs LF, no
-trailing newline, unicode/emoji, tabs vs spaces, 5000 lines with one change, all lines changed, one
-huge line (200 KB), binary-ish bytes, same content different mtime; and folder pairs via
-printf 'compare\\t%s/\\t%s/\\n' (same size different content, nested dirs, empty dir, symlink).
-Also watch {root}/.build/hl-cmp/daemon.log for panics after every case.
-OUTPUT: {out}/findings.jsonl (one JSON per mismatch/crash: id, sev S1-S4, title, files (contents or a
-python one-liner that recreates them), expected (difflib), actual (state), repeat k/3) and
-{out}/summary.md. Stop the sandbox at the end: bin/ks-mcp-sandbox.sh stop.
-""",
     "h-cfg": """TASK: hunt crashes/bad handling of broken config in kitchen-sink, headless (nothing on screen).
 Start a headless sandbox: export KS_MCP_SANDBOX={root}/.build/hl-cfg; bin/ks-mcp-sandbox.sh start;
 KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock); the config is $KS_MCP_SANDBOX/home/commands.toml.
@@ -198,8 +182,7 @@ UX_TASKS = {
     "files-notes": "Files and Notes: e.g. find a file by part of its name and open it; rename a file and undo it; "
                    "make a new folder and move into it; start a new note, write two lines, save, find it again later; "
                    "rename a note; search inside a note",
-    "compare-shell": "Compare and the shared window: e.g. compare two text files and jump to the next difference; "
-                     "copy one difference to the other side and undo; compare two folders and open a differing file; "
+    "shell": "The shared window: e.g. "
                      "switch between views without the mouse; find and run a palette tool; close everything with the keyboard",
 }
 
@@ -227,8 +210,7 @@ U3 = annoyance),"task","tried","happened","would_help","evidence":"<file:line or
 UX_KEYS_BRIEF = """TASK: keyboard consistency audit of kitchen-sink, read-only (no app, no VM).
 For these keys: Esc, Return, Tab, Shift+Tab, Cmd+W, Cmd+Z, Cmd+Shift+Z, Cmd+F, Cmd+L, Cmd+N, Cmd+S, Cmd+C,
 Cmd+V, Cmd+A, Cmd+[, Cmd+], Backspace, Space, j/k, Up/Down, F2, Cmd+R, Cmd+0, Cmd+=/Cmd+- — find what each does
-in each surface: notes (plain editor, nvim pane, sidebar), files (list, filter field), compare text, compare
-folder, compare start page, jira, palette, view switcher, paths shelf, terminal/browser drawers, config/
+in each surface: files (list, filter field), jira, palette, view switcher, paths shelf, terminal/browser drawers, config/
 settings. Sources: commands.toml, PRODUCT.md / PRD-*.md, then the handlers (rust/ws-rs/src/app/host.rs
 *_key fns, ui/popup.rs route_key/vim_pane_key, panes/vim_keys.rs, views/*.rs keyDown/handle_key).
 A finding is: the same key does clearly different things in similar contexts (e.g. Esc closes here but
@@ -240,7 +222,7 @@ and {out}/findings.jsonl: {{"id","sev":"U1|U2|U3","key","surfaces","what","would
 
 
 def phase_find() -> None:
-    log(f"phase find: 4 authors + 3 hunters + {len(UX_TASKS) + 1} usability workers in parallel")
+    log(f"phase find: {len(AUTHOR_AREAS)} authors + {len(HUNT_BRIEFS)} hunters + {len(UX_TASKS) + 1} usability workers in parallel")
     jobs = {}
     with cf.ThreadPoolExecutor(max_workers=10) as ex:
         for key, area in UX_TASKS.items():
@@ -264,7 +246,7 @@ def phase_find() -> None:
             except Exception as e:
                 log(f"  worker {jobs[f]} crashed: {e}")
     for f in os.listdir(os.path.join(ROOT, "Tests")):
-        if re.fullmatch(r"app_flows_(files|compare|notes|shell|ux[\w-]+)\.json", f):
+        if re.fullmatch(r"app_flows_(files|notes|shell|ux[\w-]+)\.json", f):
             os.remove(os.path.join(ROOT, "Tests", f))
     dirty = git_dirty()
     if dirty:

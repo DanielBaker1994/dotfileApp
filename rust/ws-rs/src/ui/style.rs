@@ -377,7 +377,7 @@ mod appkit {
     /// Shared segmented-capsule metrics: the intrinsic chip widths for
     /// `labels` at font `f` (text + [`CAPSULE_GEO`].chip_pad) and the snug
     /// track width (chips + gutters + track padding). Every inline strip
-    /// drawer (Confluence, AI, Compare) and `TabPillView` sizes itself from
+    /// drawer (Confluence, AI) and `TabPillView` sizes itself from
     /// this so the geometry cannot drift per file.
     pub fn capsule_metrics(labels: &[impl AsRef<str>], f: &NSFont) -> (Vec<f64>, f64) {
         let geo = CAPSULE_GEO;
@@ -570,7 +570,7 @@ mod appkit {
     }
 
     /// The system color as an `Rgba` placeholder for tints Swift spelled as
-    /// literal sRGB values (`jiraAccent`, `compareTint`, `aiTint`).
+    /// literal sRGB values (`jiraAccent`, `aiTint`).
     pub fn srgb(r: f64, g: f64, b: f64) -> Rgba {
         Rgba::new(r, g, b, 1.0)
     }

@@ -1012,7 +1012,7 @@ pub struct FileMenuActions {
 /// Copy File / Copy Absolute Path / Copy Contents`. "Copy
 /// Contents" (the file's text, like `cat | pbcopy`) rides on Copy Absolute
 /// Path and is skipped for a directory. Surfaces splice their
-/// extra rows (Quick Look, the Copy/Cut/Duplicate block, Compare) around the
+/// extra rows (Quick Look, the Copy/Cut/Duplicate block) around the
 /// core; richer surface variants of a core row keep their own label and
 /// action and pass `None` here.
 pub fn file_context_menu(path: &str, a: FileMenuActions) -> Vec<crate::ui::menu_kit::MenuEntry> {
@@ -1191,7 +1191,7 @@ impl QuickLook {
     }
 
     /// The `quickLook` state field: the paths while the panel is up, else `[]`
-    /// (mirrors `CompareFolderView`'s `quickLookUp ? quickLookPaths : []`).
+    /// (`quickLookUp ? quickLookPaths : []`).
     pub fn state(&self) -> Vec<String> {
         #[cfg(target_os = "macos")]
         if let Some(mtm) = objc2::MainThreadMarker::new() {

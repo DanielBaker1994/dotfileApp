@@ -15,7 +15,6 @@ use crate::views::paths::ReturnAction;
 use crate::views::tools::ToolKind;
 
 use super::ai::AiPane;
-use super::compare::ComparePane;
 use super::confluence::ConfluencePane;
 use super::files::FilesPane;
 use super::jira::JiraPane;
@@ -34,12 +33,11 @@ const TOAST_TTL: Duration = Duration::from_millis(2500);
 const TOAST_FADE: Duration = Duration::from_millis(500);
 
 /// The views the sidebar lists (header nav order, minus the unported sub-views).
-const SIDEBAR_VIEWS: [SlotView; 5] = [
+const SIDEBAR_VIEWS: [SlotView; 4] = [
     SlotView::Files,
     SlotView::Jira,
     SlotView::Confluence,
     SlotView::Ai,
-    SlotView::Compare,
 ];
 
 /// One content pane. Each view (`SlotView`) renders through one of these; the
@@ -71,7 +69,7 @@ pub(super) trait Pane {
 }
 
 /// A stand-in for views with no egui port yet (the sub-views: Detail, Releases,
-/// Config, Output, CompareText). Renders the same "not ported" label the stub
+/// Config, Output). Renders the same "not ported" label the stub
 /// panes do.
 struct Placeholder {
     view: SlotView,
@@ -188,13 +186,11 @@ impl KsApp {
             SlotView::Jira => Box::new(JiraPane::build()),
             SlotView::Confluence => Box::new(ConfluencePane::build()),
             SlotView::Ai => Box::new(AiPane::build()),
-            SlotView::Compare => Box::new(ComparePane::build()),
             // Sub-views without an egui port yet.
             SlotView::Detail
             | SlotView::Releases
             | SlotView::Config
-            | SlotView::Output
-            | SlotView::CompareText => Box::new(Placeholder::new(self.current)),
+            | SlotView::Output => Box::new(Placeholder::new(self.current)),
         };
         // No rail seed here: each pane's `build()` reads
         // `sidebarRail.<view>` itself, like the AppKit `set_collapse_key`.

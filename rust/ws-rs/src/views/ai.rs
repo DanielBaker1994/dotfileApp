@@ -535,10 +535,9 @@ fn last_error_line(err: &str, code: i32) -> String {
 // ---------------------------------------------------------------------------
 // Char diff (`CharDiff.changes(CharDiff.diff(_:_:))`)
 //
-// `AIWindow.finish` calls the Python `compare.char_diff` helper synchronously
-// on the completion path (the known blocking-helper-call debt). The
-// streaming poll must not block, so the same token-LCS grouping is ported
-// inline from `pylib/compare_text.py` (and `CompareText.swift`'s `CharDiff`).
+// The token-LCS grouping, inline so the streaming poll never blocks on a
+// helper call (originally ported from `CompareText.swift`'s `CharDiff`; the
+// Compare view and its Python twin are gone, this is now the only copy).
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

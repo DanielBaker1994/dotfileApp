@@ -340,7 +340,7 @@ pub mod appkit {
         if let InputCmd::Activate = cmd {
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
-            // Keep whichever window is key (compare, a panel …); fall back to the
+            // Keep whichever window is key (a panel …); fall back to the
             // shared window only when none is.
             if app.keyWindow().is_none() {
                 if let Some(w) = shared {

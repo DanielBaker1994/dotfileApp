@@ -32,7 +32,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KS_MCP = os.path.join(ROOT, "bin", "ks-mcp.py")
 
 LATEST_PROTOCOL = "2025-11-25"
-RAW_VERBS = ["screenshot", "screenshot-permission", "compare", "pane-shot", "window-shot"]
+RAW_VERBS = ["screenshot", "screenshot-permission", "pane-shot", "window-shot"]
 
 # Canned daemon state: enough shape to prove the JSON survived the round trip.
 STATE = {
@@ -516,7 +516,7 @@ class ReadOnly(McpTestCase):
 
     def test_mutating_raw_verbs_are_blocked(self):
         self._ro()
-        for i, verb in enumerate(("screenshot", "pane-shot", "window-shot", "compare")):
+        for i, verb in enumerate(("screenshot", "pane-shot", "window-shot")):
             r = self.call_tool(10 + i, "ks_raw", {"verb": verb})
             self.assertEqual(r["error"]["code"], -32602, verb)
             self.assertIn("disabled", r["error"]["message"], verb)

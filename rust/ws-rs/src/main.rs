@@ -324,7 +324,7 @@ fn config_check(argv: &[String]) -> i32 {
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
-    println!("usage: kitchen-sink [headless|window|files|jira|confluence|ai|compare|terminal|ping|");
+    println!("usage: kitchen-sink [headless|window|files|jira|confluence|ai|terminal|ping|");
     println!("                     config-check SECTION KEY VALUE | config-check --file PATH | config-schema]");
 }
 

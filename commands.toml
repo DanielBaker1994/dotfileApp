@@ -324,65 +324,6 @@ highlight-color = "2B3B51"
 accent-color = "719CD6"
 palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
-[compare]
-enabled = true
-in-palette = true
-label = "Compare"
-sidebar-min-width = 140
-sidebar-max-width = 480
-esc-close = 0
-context-lines = 3
-tab-width = 4
-ignore-leading-ws = true
-ignore-trailing-ws = true
-ignore-embedded-ws = false
-ignore-case = false
-ignore-line-endings = true
-ignore-blank-lines = false
-gutter-arrows = hover
-max-lines = 200000
-max-bytes = 52428800
-recent = 30
-content = auto
-time-tolerance = 2
-exclude = ".git, node_modules, .DS_Store, .build"
-use-gitignore = true
-ignore-file = "~/.config/kitchen-sink/config/compare.ignore"
-same-label = "Identical"
-same-text-label = "Same text — files differ in {}"
-binary-label = "Binary files {}"
-too-large-label = "Too large for Text Compare ([compare] max-lines / max-bytes): {}"
-empty-label = "Both sides are empty — paste text (⌘V), drop files, or open them (⌘O)"
-folder-label = "Folder Compare needs a folder on both sides: {}"
-unsaved-label = "Save changes to {}?"
-unsaved-info-label = "Your edits are lost if you don't save them."
-save-button-label = "Save"
-discard-button-label = "Don't Save"
-cancel-button-label = "Cancel"
-changed-label = "{} changed on disk — and you have edits here"
-reload-button-label = "Reload"
-keep-button-label = "Keep Mine"
-sync-button-label = "Sync…"
-same-by-date-label = "{} by date/size only"
-same-by-date-hint-label = "dim = : same size + time, bytes not read ([compare] content = always reads them)"
-shortcuts-title-label = "Compare Shortcuts"
-clash-one-label = "1 item already exists on the {} side"
-clash-label = "{} items already exist on the other side"
-clash-info-label = "Replace puts the old ones in the Trash (⌘Z brings them back)."
-replace-button-label = "Replace"
-keep-both-button-label = "Keep Both"
-skip-button-label = "Skip Existing"
-sync-info-label = "Replaced and removed items go to the Trash; ⌘Z undoes the whole run."
-sync-run-button-label = "Synchronize"
-background-color = "192330"
-header-color = "0F141C"
-text-color = "CDCECF"
-dim-color = "AEAFB0"
-highlight-color = "2B3B51"
-accent-color = "719CD6"
-palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
-sidebar-width = 245
-
 [icons]
 kitchen-sink = "*:app"
 
@@ -404,16 +345,15 @@ kitchen-sink = "*:app"
 "sidebar: Home / End / PgUp / PgDn" = "jump in the rows"
 "sidebar: a letter" = "the next row starting with it"
 "sidebar: Esc" = "back to the content"
-"sidebar: Delete" = "close the tab (compare sessions)"
 "preview: ↑ ↓ / PgUp / PgDn / Space" = "scroll the page (Shift+Space = back up)"
 "preview: Cmd+A / Cmd+C" = "select all / copy"
 "all: Ctrl+W" = "any text field (popups, search bars, sheets, editors): delete the word before the cursor (the terminal keeps its own Ctrl+W)"
-"all: j / k" = "normal mode (a sidebar, list, preview, Compare side — the NORMAL chip): down / up"
+"all: j / k" = "normal mode (a sidebar, list, preview — the NORMAL chip): down / up"
 "all: gg / G" = "normal mode: first / last row (a page: top / bottom)"
 "all: Ctrl+D / Ctrl+U" = "normal mode: half a screen down / up"
 "all: / or ?" = "normal mode: search the focused pane forward / backward as you type (ignore case); Return keeps the match, Esc goes back, ↑↓ / Ctrl+N/P step"
 "all: n / N" = "normal mode: next / previous match of the last search"
-"all: i / a" = "normal mode: insert — the pane's text input (a list's filter box, Compare's section editor)"
+"all: i / a" = "normal mode: insert — the pane's text input (a list's filter box)"
 "all: Esc (in an input)" = "back to normal mode (the filter stays); Esc again = the view's usual Esc"
 "all: Cmd+\\" = "collapse the sidebar to an icon rail / show it again"
 "all: Cmd+Plus / Cmd+Minus" = "zoom the text (font size)"
@@ -462,47 +402,6 @@ kitchen-sink = "*:app"
 "ai: Cmd+L" = "focus your text"
 "ai: Cmd+Z / Cmd+Shift+Z" = "undo / redo in your text"
 "ai: Esc" = "stop a running request; idle: hide (only when Esc Hides Window is on)"
-"compare: Cmd+0" = "Home: recent comparisons, open files or folders"
-"compare: Cmd+N" = "new text compare: two empty sides, click one and paste"
-"compare: Ctrl+N / Ctrl+P" = "next / previous difference"
-"compare: Opt+→ / Opt+←" = "copy the section (or selected rows) to the right / left (Ctrl+R = right too)"
-"compare: Ctrl+Opt+R / Ctrl+Opt+L" = "copy the current line to the right / left"
-"compare: Return / typing / double-click" = "edit the section on the focused side (Esc / click away = done)"
-"compare: Tab / ← →" = "focus the other side"
-"compare: ↑ ↓ / PgUp PgDn / Home End" = "move the cursor (Shift = select rows)"
-"compare: Cmd+↑ / Cmd+↓" = "first / last row"
-"compare: Cmd+A / Cmd+C" = "select every row / copy the rows"
-"compare: Cmd+Z / Cmd+Shift+Z" = "undo / redo (edits, copies)"
-"compare: Cmd+S / Cmd+Opt+S" = "save the focused side / both"
-"compare: Cmd+O" = "open a file into the focused side"
-"compare: Cmd+L" = "type a path for the focused side"
-"compare: Cmd+V" = "paste the clipboard into the focused side (a file is opened; text replaces the side, Cmd+Z undoes)"
-"compare: Cmd+1 / 2 / 3 / 4" = "show all / differences / same / context"
-"compare: Cmd+F / Cmd+G / Cmd+Shift+G" = "find / next / previous"
-"compare: Ctrl+G" = "go to line"
-"compare: Cmd+Opt+X" = "swap sides"
-"compare: F5" = "reload + compare again"
-"compare-folders: ↑ ↓ / → ← / Return" = "move / expand + collapse (Shift = all below) / open a file pair in Text Compare (Esc = back)"
-"compare-folders: Home / End / PgUp / PgDn" = "jump in the tree"
-"compare-folders: Ctrl+N / Ctrl+P" = "next / previous differing file"
-"compare-folders: Opt+→ / Opt+←" = "copy the selection to the right / left (Ctrl+Opt = move; Ctrl+R = right too)"
-"compare-folders: Cmd+1 … 6" = "all / differences / same / orphans / left newer / right newer"
-"compare-folders: Cmd+F" = "filter names (*.swift, !*.o)"
-"compare-folders: Cmd+Delete / F2 / Cmd+Shift+N" = "trash / rename / new folder on the focused side (Cmd+Z undoes)"
-"compare-folders: Cmd+R" = "rename (same as F2)"
-"compare-folders: Cmd+C / Cmd+A" = "copy the selected paths / select every row"
-"compare-folders: Cmd+Shift+." = "show / hide hidden files"
-"compare-folders: Tab / Cmd+Opt+X / F5" = "focus the other side / swap sides / scan again"
-"compare-folders: Space / Cmd+Y" = "Quick Look the selection (Space / Esc closes it)"
-"compare-folders: Cmd+Down / Cmd+Up" = "into the folder pair (Set as Base Folder) / both sides up one level"
-"compare-folders: Cmd+[ / Cmd+]" = "back / forward through the base folders"
-"compare-folders: drag a row across" = "copy to the other side (Cmd = move); files from Finder land in the folder under the drop"
-"compare-folders: Sync… button / Cmd+K" = "Update Right / Left / Both, Mirror to Right / Left — after a preview; Cmd+Z undoes the whole run"
-"compare-folders: Cmd+Z" = "undo this session's last copy / move / trash / rename / sync (the file browser keeps its own)"
-"compare: right-click a line ▸ Align With" = "pick a line, then one on the other side: they share a row (Clear All Alignments undoes)"
-"compare: right-click ▸ Convert Side" = "trim trailing whitespace / line endings → LF · CRLF · CR (Cmd+Z undoes)"
-"compare: Cmd+K" = "every action by name"
-"compare: Esc" = "close find / path / editor, stop a compare, back; idle: hide (only when Esc Hides Window is on)"
 "confluence: Return" = "search; in the results: open in the browser"
 "confluence: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the results"
 "confluence: Cmd+Return" = "open in the browser"

@@ -13,7 +13,6 @@ pub const HOTKEY_MODES: &[&str] = &[
     "files",
     "confluence",
     "ai",
-    "compare",
 ];
 
 pub fn is_hotkey_mode(name: &str) -> bool {
@@ -323,11 +322,10 @@ mod tests {
                 "files",
                 "confluence",
                 "ai",
-                "compare"
             ]
         );
         assert!(is_hotkey_mode("window"));
-        assert!(is_hotkey_mode("compare"));
+        assert!(!is_hotkey_mode("compare"), "the compare view is gone");
         assert!(!is_hotkey_mode("terminal"));
         assert!(!is_hotkey_mode("screenshot"));
     }

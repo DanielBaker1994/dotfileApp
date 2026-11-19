@@ -89,7 +89,7 @@ printf "${CYAN}
 │            kitchen-sink — one-command install          │
 └──────────────────────────────────────────────────────────────┘
 ${RESET}"
-printf "${DIM}This script installs a macOS app that gives you a file browser, a Jira\nissue browser, Confluence / AI / compare views, and a switcher popup —\nplus AeroSpace and window borders.${RESET}\n"
+printf "${DIM}This script installs a macOS app that gives you a file browser, a Jira\nissue browser, Confluence / AI views, and a switcher popup —\nplus AeroSpace and window borders.${RESET}\n"
 
 STEP="checking your Mac"
 step "0/6 checking your Mac"

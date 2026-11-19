@@ -11,11 +11,13 @@ kitchen-sink is a single-instance macOS app — **Rust + AppKit via objc2**
 (`rust/`, cargo workspace) — that runs as a hotkey-driven daemon: AeroSpace / CLI
 launches talk to it over a Unix socket (`$TMPDIR/ws-notes.sock`, lock file beside
 it), and one **shared window** hosts the views — files, jira, confluence,
-AI, compare — plus tool panels (screenshot, paths, terminal, prettyprint,
+AI — plus tool panels (screenshot, paths, terminal, prettyprint,
 filefast, health checks, view switcher / command palette). It is a *regular* app
 (`NSApplicationActivationPolicy::Regular`: menu bar + status item). Python
 (`pylib/` plus `jira/`, `confluence/`, `notify/`, `settings_hub/`) is the "cold
 path": the app talks to it over a persistent JSON-lines helper protocol.
+The Compare view (text + folder diff) was removed in Nov 2026 by owner
+decision; don't bring it back.
 
 History: the app was Swift until the Phase-4 cutover (Oct 2026); the Rust
 port mirrors the old Swift files module for module, and Swift type names
@@ -94,7 +96,7 @@ runs the Python suites with no case of their own (`test_jira_poll.py`,
 `test_confluence.py`, `test_notifications.py`) plus
 the whole cargo workspace; module cases map to `cargo test -p ws-rs <module>`
 (`filter`, `paths`, `screenshot`, `ansi`, `prose` (= `engines::ai_format`), `panes`,
-`vim-keys`, `recent`, `helper-client`, `compare` = Python + `views::compare`),
+`vim-keys`, `recent`, `helper-client`),
 the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
 `WS_PYTHON`), `settings`, `jira-*`, `confluence-*`, `shot-model`,
 …). Direct: `cd rust && cargo test` (~820 tests) or
@@ -178,7 +180,7 @@ An agent can drive and verify the app over the socket — no computer control:
   screen: `bin/ks-vm test [Tests/run_flows.py args]`. See `TESTING.md` §3.0.
 - **`bin/ks-mcp`** (+ `bin/ks-mcp.py`): legacy stdio MCP bridge, registered in `opencode.json`
   (`kitchen-sink` live = `KS_MCP_READ_ONLY=1`; `kitchen-sink-sandbox` disabled). Tools: `ks_state`,
-  `ks_do` (hidden in read-only), `ks_raw` (`screenshot` | `screenshot-permission` | `compare` |
+  `ks_do` (hidden in read-only), `ks_raw` (`screenshot` | `screenshot-permission` |
   `pane-shot` | `window-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
 - Limits: headless proves model/state, **not rendering** — verify visuals with `screenshot -r` /
   `pane-shot` / `window-shot` (the daemon's own shared window straight to a PNG, no overlay);
@@ -188,7 +190,7 @@ An agent can drive and verify the app over the socket — no computer control:
   (`state.input`). A GUI sandbox stores preferences in its own `WS_DEFAULTS_SUITE`, never the live
   app's defaults domain; `do:ai:*`/`do:confluence:*` registers are dead code. Unknown `do:` verbs, `tool:<unknown>` and
   bad `paths:select:` now return `{"error":…}` (→ `isError` in `ks_do`); still silent no-ops:
-  `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty, `compare:select:<out of range>`. Headless
+  `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty. Headless
   still reports `shown: true` for panels/tools that cannot exist without AppKit (F0-7, undecided).
   Requests over 2048 bytes are refused (`request too long`), not truncated. Test status and open
   strategy and the orchestrator playbook for DeepSeek test runs: `TESTING.md`; bug ledger: `APP-BUGS.md`. Deferrals in `BACKLOG.md` ("MCP / headless control").
@@ -222,14 +224,14 @@ the socket with no checkout); build natively on a Linux host or in the pinned im
 with `--docker`, and on Linux `./ws build` runs it.
 
 - Works: `kitchen-sink headless` (the full socket API, no AppKit) and the egui panes —
-  files, switcher/palette, paths, jira, confluence, ai (`egui_commonmark`), compare,
+  files, switcher/palette, paths, jira, confluence, ai (`egui_commonmark`),
   and tools/setup — plus row context menus.
 - Wave 6 landed: the egui terminal panel (`frontend_egui/terminal.rs`, driven by
   `alacritty_terminal` 0.26 directly, not `egui_term`), the `platform::capture` seam
   (`xcap` 0.4.1; no egui overlay or capture UI yet), and OCR via the `tesseract` CLI
   when it is on `PATH`.
 - Window manager: there is no AeroSpace on Linux. Bind your WM's keys to the existing
-  CLI — `kitchen-sink files|jira|confluence|ai|compare|window` (and `term`,
+  CLI — `kitchen-sink files|jira|confluence|ai|window` (and `term`,
   `show`) — which forwards the launch message to the running daemon over
   `$TMPDIR/ws-notes.sock`; `hotkey_prep` is a no-op off macOS.
 - Unsupported / known gaps: QuickLook and the tray/global menu (not started); no Linux
@@ -254,7 +256,7 @@ gitignored.
     `AppInstall::ensure_home`, the CLI client pass, then the daemon
     (`run_daemon`: socket server, NSApplication, status item, daemon UI).
   - `app/` — `cli.rs` (the client side: forward to a running daemon, print
-    replies, `compare`/`pane-shot`/`screenshot` clients, cold starts via
+    replies, `pane-shot`/`screenshot` clients, cold starts via
     `kitchen_sink.sh`, lock hand-over), `host.rs` (`SwitcherController`:
     `ControllerInner` slot state machine, `state_json`, `do_host_action`,
     raw verbs, and the `daemon_ui` module — the shared host window, key
@@ -265,7 +267,7 @@ gitignored.
   - `ui/` — `popup.rs` (popup framework + `route_key`), `shared_window.rs`,
     `card.rs`, `chrome.rs`, `theme.rs`.
   - `views/` — `files.rs`, `jira.rs`, `pane_find.rs` (jira-jump + `/` pane finder),
-    `confluence.rs`, `ai.rs`, `compare.rs`, `screenshot.rs`, `paths.rs`,
+    `confluence.rs`, `ai.rs`, `screenshot.rs`, `paths.rs`,
     `switcher.rs` (palette + view switcher), `terminal.rs`, `tools.rs`,
     `inspector.rs`, `setup.rs` (`AppInstall` + setup UI).
   - `engines/` — pure logic (ai_format, ansi_render, config_text, file_ops,
@@ -284,7 +286,7 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 ### Python packages
 
 - `pylib/` — engines + codecs: `helper/` (the JSON-lines worker), `jsonmgr.py`,
-  `config_text.py` (the commands.toml codec), `compare_*`, `file_ops`,
+  `config_text.py` (the commands.toml codec), `file_ops`,
   `ai_format`, `ansi`, `shot_model`, `paneshot`, `shelf`,
   `status`, `ignore_rules`, `jira_*` / `confluence_*` glue,
   plus the shipped JSON homes. `text_table/` is standalone (no helper protocol):
@@ -313,7 +315,7 @@ root); `Tests/` (Python tests + `helper_fixtures/`,
 
 `rule.md` (non-negotiables), `HANDOFF-rust-port-next.md` (latest status /
 open items), `PRD-*.md`
-(`PRD-keyboard.md` = pane/vim spec; `PRD-compare.md`; …), `BACKLOG.md`,
+(`PRD-keyboard.md` = pane/vim spec; …), `BACKLOG.md`,
 `PRODUCT.md`, `DESIGN.md`, `README.md`. Older plans/PRDs name Swift files —
 map them to the Rust module of the same name.
 
@@ -324,8 +326,8 @@ map them to the Rust module of the same name.
 `main.rs` handles one-shots before AppKit, runs `AppInstall::ensure_home`
 (installed app only), then `app::cli::run`: with `WS_PING_ONLY` it just pings;
 a daemon already holding `<socket>.lock` gets the message forwarded
-(`reload`/`restart` print the JSON reply, `compare --wait` and `screenshot
---raw` block on the reply, `pane-shot` prints the saved path); a cold hotkey
+(`reload`/`restart` print the JSON reply, `screenshot
+--raw` blocks on the reply, `pane-shot` prints the saved path); a cold hotkey
 start (not from launchd) `exec`s `bin/kitchen_sink.sh MODE` so LaunchServices
 launches the bundle (TCC). Otherwise the process takes the lock and becomes the
 daemon: socket server thread, `NSApplication` + main menu + status item, and
@@ -335,7 +337,7 @@ controller's `UiQueue` and `MainQueue`).
 ### Shared-window model
 
 One host window, many views: `SlotView` (`files, jira, detail, releases,
-config, output, confluence, ai, compare, compareText`). `ControllerInner`
+config, output, confluence, ai`). `ControllerInner`
 (`app/host.rs`) is the state machine — `open/push/back/home/present/hide/
 cycle/toggle/hotkey`; `toggle`/`hotkey` hide only when the user is in the
 window (key + active + frontmost), else bring it forward (`hideOrFocus`).
@@ -349,28 +351,28 @@ commands/windows (`[files]`, `[jira]`, … with `enabled = true`).
 `$TMPDIR/ws-notes.sock` (`[app] notes-socket`), one newline-terminated request
 per connection, served serially by `app/socket.rs`. Order: `ping` (no reply) →
 `state` → `do:ACTION` → raw verbs (`reload`/`restart` (JSON),
-`screenshot-permission` (`granted|denied`), `screenshot\t…`, `compare\t…`,
+`screenshot-permission` (`granted|denied`), `screenshot\t…`,
 `pane-shot\t…` — the last three answer later through a `socket::Reply`) →
 anything else is a launch/hotkey message. `state` returns one JSON line;
 `do:ACTION` executes, hops to main (flush), then returns the **same full state
 JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `active`, `keyWindow`, `windows`, `frontmostPid` (all read live from AppKit),
 `views.<view>` (`shown`, `key`, `frame [x,y,w,h]`, `wid`, plus per-view extras),
-`hideOnFocusLoss`, `escHides`, `headerStyle`, `pane`, `screenshot`, `compare`,
+`hideOnFocusLoss`, `escHides`, `headerStyle`, `pane`, `screenshot`,
 `paneShot`, `paths`, `tools.<name>`, `palette`, `paletteCommands`,
 `viewSwitcher`, `terminalPanel`, `activations`, `pid`. Useful `do:` actions:
 `cycle`, `cycle-back`, `hide`, `back`, `home`, `toggle`, `open:<view>`,
 `term`, `switcher`, `reset-size`, `pane:h|j|k|l`,
 `pane:focus:<id>`, `key:<spec>`, `header-style:<style>`,
 `esc-hides:<view>:on|off`, `tool:<name>` / `tool-close:<name>`, `screenshot:*`,
-`compare:*`, `paths:*`, `sidebar-width:<view>[:px]`,
+`paths:*`, `sidebar-width:<view>[:px]`,
 `inspector-width:jira[:px]`, `jira-inspector:show|hide|toggle` (the Jira ticket
 panel), `rail:<view>[:on|off|toggle]` (the sidebar rail — Ctrl+B B on the
-socket; files, jira, confluence, ai, compare). Replies > 8 KB are fine
+socket; files, jira, confluence, ai). Replies > 8 KB are fine
 (accepted sockets are blocking).
 
 **Hotkey fast path.** Messages in `hotkey::HOTKEY_MODES` (`window`, `jira`,
-`files`, `confluence`, `ai`, `compare`) run `hotkey_prep`
+`files`, `confluence`, `ai`) run `hotkey_prep`
 (AeroSpace IPC: focused window → focus file, focused workspace/screen, move
 stray windows) before the toggle. Tool-panel hotkeys (Hyper+X screenshot) are
 not in that list. `[screenshot] text-column-gap` (× line height; 0 = off) makes
@@ -399,7 +401,7 @@ never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
 Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher
 (`views/switcher.rs`), T =
 terminal, B = sidebar rail (every `SidebarView` pane: files,
-jira, confluence, ai, compare; persisted per view as `sidebarRail.<view>`).
+jira, confluence, ai; persisted per view as `sidebarRail.<view>`).
 `PaneNav` moves the focus ring between panes;
 `VimKeys` gives the focused pane normal/insert/search modes. Tool panels are
 non-activating `NSPanel`s that take key once 0.25 s after opening
@@ -420,7 +422,7 @@ pythons, requiring ≥ 3.11. Protocol: one JSON object per line — request
 `{"id", "method", "params"}` → reply `{"id", "ok", "result"}` or
 `{"id", "ok": false, "error": {"message", "traceback"}}`; out-of-order replies
 matched by id; an 8-worker pool; a killed worker restarts on the next call.
-Handle-based engines (`compare.*`, `folder.*`, `fileops.*`, `ignore.*`) keep
+Handle-based engines (`fileops.*`, `ignore.*`) keep
 state in the worker. `script.run` runs the Python CLIs as children.
 `engines/config_text.rs` uses the helper (`config.decode`,
 `config.section_entries`, `config.line`, `config.setting`, …) and caches
@@ -434,7 +436,7 @@ minus .json>")`; user/runtime data keeps its own I/O.
 
 Flat `[section]` tables, one `key = value` per line: `[app]`, `[theme]`,
 `[themes]`, per-view sections (`[files]`, `[jira]`, `[confluence]`,
-`[ai]`, `[compare]`, `[screenshot]`, `[pane-shot]`, `[paths]`, `[pane-find]`,
+`[ai]`, `[screenshot]`, `[pane-shot]`, `[paths]`, `[pane-find]`,
 `[filefast]`), `[icons]`, `[shortcuts]`, `[terminal]`, `[prettyprint]`,
 `[health-checks]`, `[setup]`, `[settings-hub]`, … Reads go through the Python
 line codec (or the pure scans in `host.rs`, which unquote values like the
@@ -474,7 +476,7 @@ exported for Python readers).
 - **Main-thread discipline.** AppKit objects live on main (`MainThreadMarker`);
   the socket thread reaches them through `run_on_main` (blocking, 2 s) or
   `post_main` (async). Never hold the `ControllerInner` lock while waiting on
-  main; lock order is `inner` before the compare model.
+  main.
 - **Helper pool starvation + retries.** One 8-worker pool serves interactive
   calls and long `script.run` jobs; treat helper replies as fallible; don't
   memoize failures.
@@ -501,6 +503,6 @@ exported for Python readers).
 - Vim search highlight (`VimMatchOverlay`/`hlsearch`): rows are ported for the
   sidebar, files, Jira and Confluence lists; text (`NSTextView` temporary
   background) and web (`CSS.highlights`) targets are still unported.
-- `Cmd+K` action picker, `Cmd+/` shortcuts sheet, pane-shot preview window,
-  compare `summary` label. (`do:jira-jump` and the `<leader>sf` pane finder
+- `Cmd+K` action picker, `Cmd+/` shortcuts sheet, pane-shot preview window.
+  (`do:jira-jump` and the `<leader>sf` pane finder
   are ported: `views/pane_find.rs`.)

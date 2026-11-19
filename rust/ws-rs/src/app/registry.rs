@@ -15,8 +15,7 @@ pub mod nav {
     pub const FILES: i64 = 64;
     pub const CONFLUENCE: i64 = 65;
     pub const AI: i64 = 66;
-    pub const COMPARE: i64 = 67;
-    pub const ALL: [i64; 7] = [JIRA, HOME, BACK, FILES, CONFLUENCE, AI, COMPARE];
+    pub const ALL: [i64; 6] = [JIRA, HOME, BACK, FILES, CONFLUENCE, AI];
 
     pub fn is_nav_id(id: i64) -> bool {
         ALL.contains(&id)
@@ -34,8 +33,6 @@ pub enum SlotView {
     Output,
     Confluence,
     Ai,
-    Compare,
-    CompareText,
 }
 
 impl SlotView {
@@ -49,8 +46,6 @@ impl SlotView {
             SlotView::Output => "output",
             SlotView::Confluence => "confluence",
             SlotView::Ai => "ai",
-            SlotView::Compare => "compare",
-            SlotView::CompareText => "compareText",
         }
     }
 
@@ -64,8 +59,6 @@ impl SlotView {
             "output" => SlotView::Output,
             "confluence" => SlotView::Confluence,
             "ai" => SlotView::Ai,
-            "compare" => SlotView::Compare,
-            "compareText" => SlotView::CompareText,
             _ => return None,
         })
     }
@@ -77,14 +70,10 @@ impl SlotView {
         )
     }
 
-    pub fn is_compare(self) -> bool {
-        matches!(self, SlotView::Compare | SlotView::CompareText)
-    }
-
     pub fn is_sub(self) -> bool {
         matches!(
             self,
-            SlotView::Detail | SlotView::Releases | SlotView::Config | SlotView::Output | SlotView::CompareText
+            SlotView::Detail | SlotView::Releases | SlotView::Config | SlotView::Output
         )
     }
 
@@ -94,7 +83,6 @@ impl SlotView {
             SlotView::Files => nav::FILES,
             SlotView::Confluence => nav::CONFLUENCE,
             SlotView::Ai => nav::AI,
-            SlotView::Compare | SlotView::CompareText => nav::COMPARE,
             v if v.is_jira() => nav::JIRA,
             _ => nav::FILES,
         }
@@ -116,7 +104,6 @@ impl SlotView {
             SlotView::Files => "Files",
             SlotView::Confluence => "Confluence",
             SlotView::Ai => "AI",
-            SlotView::Compare | SlotView::CompareText => "Compare",
             v if v.is_jira() => "Jira",
             _ => "Output",
         }
@@ -249,7 +236,7 @@ impl Registry {
     }
 
     /// Register a `do:ACTION` table. Each is asked in turn; first `Some` wins,
-    /// matching the Swift `testQuery` delegation (`compare:`, `screenshot:`…).
+    /// matching the Swift `testQuery` delegation (`screenshot:`…).
     pub fn register_test_do<F>(&mut self, f: F)
     where
         F: Fn(&str) -> Option<Value> + Send + Sync + 'static,
@@ -278,8 +265,6 @@ mod tests {
         assert_eq!(SlotView::Files.nav_id(), 64);
         assert_eq!(SlotView::Confluence.nav_id(), 65);
         assert_eq!(SlotView::Ai.nav_id(), 66);
-        assert_eq!(SlotView::Compare.nav_id(), 67);
-        assert_eq!(SlotView::CompareText.nav_id(), 67);
         assert_eq!(SlotView::Detail.nav_id(), 61);
         assert_eq!(SlotView::Releases.nav_id(), 61);
         assert_eq!(SlotView::Config.nav_id(), 61);
@@ -293,18 +278,15 @@ mod tests {
             assert!(v.is_jira());
         }
         assert!(!SlotView::Files.is_jira());
-        assert!(SlotView::Compare.is_compare() && SlotView::CompareText.is_compare());
         for v in [
             SlotView::Detail,
             SlotView::Releases,
             SlotView::Config,
             SlotView::Output,
-            SlotView::CompareText,
         ] {
             assert!(v.is_sub(), "{v:?} should be sub");
         }
         assert!(!SlotView::Files.is_sub());
-        assert!(!SlotView::Compare.is_sub());
     }
 
     #[test]
@@ -318,13 +300,12 @@ mod tests {
             SlotView::Output,
             SlotView::Confluence,
             SlotView::Ai,
-            SlotView::Compare,
-            SlotView::CompareText,
         ] {
             assert_eq!(SlotView::from_raw(v.raw()), Some(v));
         }
         assert_eq!(SlotView::from_raw("nope"), None);
         assert_eq!(SlotView::from_raw("notes"), None, "the notes view is gone");
+        assert_eq!(SlotView::from_raw("compare"), None, "the compare view is gone");
     }
 
     #[test]
@@ -333,7 +314,7 @@ mod tests {
         assert_eq!(SlotView::Jira.icon_key(), Some("jira-icon"));
         assert_eq!(SlotView::Confluence.icon_key(), Some("confluence-icon"));
         assert_eq!(SlotView::Ai.icon_key(), Some("ai-icon"));
-        assert_eq!(SlotView::Compare.icon_key(), None);
+        assert_eq!(SlotView::Detail.icon_key(), None);
     }
 
     #[test]
@@ -356,9 +337,9 @@ mod tests {
     #[test]
     fn test_do_first_registered_wins() {
         let mut r = Registry::new();
-        r.register_test_do(|a| (a == "compare:open").then(|| json!({"view": "compare"})));
-        r.register_test_do(|a| (a == "compare:open").then(|| json!({"never": true})));
-        assert_eq!(r.dispatch_test_do("compare:open"), Some(json!({"view": "compare"})));
+        r.register_test_do(|a| (a == "files:open").then(|| json!({"view": "files"})));
+        r.register_test_do(|a| (a == "files:open").then(|| json!({"never": true})));
+        assert_eq!(r.dispatch_test_do("files:open"), Some(json!({"view": "files"})));
         assert_eq!(r.dispatch_test_do("unknown"), None);
     }
 }

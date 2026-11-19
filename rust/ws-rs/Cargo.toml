@@ -65,13 +65,6 @@ alacritty_terminal = { version = "0.26.0", default-features = false }
 # there, so it must stay target-gated).
 arboard = { version = "3", default-features = false }
 
-# Non-macOS file pickers (macOS keeps the objc2 NSOpenPanel code; rfd's own
-# macOS backend would link AppKit, so it must stay target-gated too).
-# `async-std` is required: xdg-portal pulls ashpd, and without it ashpd never
-# enables zbus/async-io, so zbus hard-errors on Linux. It is a feature of the
-# named dep, not a new dependency (and avoids tokio).
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
-
 # Non-macOS Jira status stamps: macOS parses the poller's local
 # "yyyy-MM-dd HH:mm:ss" stamps with `NSDateFormatter`; elsewhere `time` parses
 # the same format (the local-time conversion uses libc `mktime` on Unix and

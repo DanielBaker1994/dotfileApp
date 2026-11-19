@@ -44,7 +44,6 @@ _HOMES = {
     "pylib/ansi": "pylib/ansi.json",
     "pylib/shelf": "pylib/shelf.json",
     "pylib/ai_format": "pylib/ai_format.json",
-    "pylib/compare_text": "pylib/compare_text.json",
     "jira/defaults": "jira/defaults.json",
     "confluence/defaults": "confluence/defaults.json",
     "notify/defaults": "notify/defaults.json",

@@ -12,8 +12,8 @@
 //! The controller model stays `Send + Sync` (per-view `MemberState` rows) so it
 //! can be handed to `CommandServer`; AppKit lives only behind the main-thread
 //! [`UiQueue`]/[`MainQueue`] drain. Unported `do:` verbs delegate to
-//! `Registry::dispatch_test_do`, mirroring `testQuery`'s `compare:` /
-//! `screenshot:` delegation.
+//! `Registry::dispatch_test_do`, mirroring `testQuery`'s `screenshot:`
+//! delegation.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,18 +28,16 @@ use crate::app::socket::{CommandHandler, Reply};
 use crate::panes::pane_geometry::{PaneDir, Rect};
 use crate::panes::pane_nav::{NavPane, PaneNav, ViewId};
 use crate::panes::vim_keys::VimKeys;
-use crate::views::compare::{CompareConfig, CompareRecent, CompareWindowModel};
 use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
 use crate::views::tools::ToolKind;
 
 /// The sections `loadCommands` never turns into commands.
-const COMMAND_SECTION_SKIPS: [&str; 11] = [
+const COMMAND_SECTION_SKIPS: [&str; 10] = [
     "icons",
     "shortcuts",
     "app",
     "confluence",
     "ai",
-    "compare",
     "notifications",
     "pane-shot",
     "pane-find",
@@ -48,7 +46,7 @@ const COMMAND_SECTION_SKIPS: [&str; 11] = [
 ];
 
 /// Every `SlotView`, in `testQuery`'s order (`kitchen_sink.swift:3111`).
-pub const ALL_VIEWS: [SlotView; 10] = [
+pub const ALL_VIEWS: [SlotView; 8] = [
     SlotView::Files,
     SlotView::Jira,
     SlotView::Detail,
@@ -57,17 +55,14 @@ pub const ALL_VIEWS: [SlotView; 10] = [
     SlotView::Output,
     SlotView::Confluence,
     SlotView::Ai,
-    SlotView::Compare,
-    SlotView::CompareText,
 ];
 
 /// The `SharedWindow.escViews` set, for the `escHides` document.
-const ESC_VIEWS: [SlotView; 5] = [
+const ESC_VIEWS: [SlotView; 4] = [
     SlotView::Files,
     SlotView::Ai,
     SlotView::Jira,
     SlotView::Confluence,
-    SlotView::Compare,
 ];
 
 /// One view's AppKit-free mirror (a reduced `PopupWindow.testState`).
@@ -249,7 +244,6 @@ struct ControllerInner {
     activations: i64,
     frontmost_pid: i32,
     screenshot: Value,
-    compare: Value,
     pane_shot: Value,
     tools: Map<String, Value>,
     terminal_panel: bool,
@@ -282,10 +276,6 @@ struct ControllerInner {
     /// The daemon UI's command queue (`install_ui`); `None` = headless (tests).
     ui_queue: Option<UiQueue>,
     main_queue: Option<MainQueue>,
-    /// The compare model, so every hide path can release `--wait` callers
-    /// (Swift `slotPark(stopVoice: true)` → `finishWaiters`). Lock order:
-    /// `inner` before the model, never the reverse.
-    compare_model: Option<Arc<Mutex<CompareWindowModel>>>,
 }
 
 impl ControllerInner {
@@ -379,11 +369,6 @@ impl ControllerInner {
     }
 
     fn hide(&mut self, reason: &str) {
-        if matches!(self.current, Some(SlotView::Compare) | Some(SlotView::CompareText)) {
-            if let Some(m) = &self.compare_model {
-                m.lock().unwrap().finish_waiters();
-            }
-        }
         self.visible = false;
         if let Some(cur) = self.current {
             if let Some(m) = self.members.get_mut(&cur) {
@@ -413,8 +398,6 @@ impl ControllerInner {
         if let Some(cur) = self.current {
             if cur.is_jira() && cur != SlotView::Jira {
                 self.open(SlotView::Jira);
-            } else if cur == SlotView::CompareText {
-                self.open(SlotView::Compare);
             } else if esc {
                 self.escape_at_top(cur);
             } else {
@@ -608,7 +591,6 @@ impl ControllerInner {
             "paletteCommands": palette_commands,
             "pane": pane,
             "screenshot": self.screenshot,
-            "compare": self.compare,
             "paneShot": self.pane_shot,
             "activations": self.activations,
             "frontmostPid": self.frontmost_pid,
@@ -632,7 +614,7 @@ impl ControllerInner {
 }
 
 /// The view Ctrl+Tab (`dir` > 0) / Ctrl+Shift+Tab (`dir` < 0) moves to in
-/// the header's `views`, wrapping; a sub view (Jira detail, compare text)
+/// the header's `views`, wrapping; a sub view (Jira detail, releases)
 /// counts as its header icon. `None` when there are no views.
 fn cycle_target(views: &[SlotView], cur: Option<SlotView>, dir: i32) -> Option<SlotView> {
     if views.is_empty() {
@@ -653,9 +635,8 @@ fn cycle_target(views: &[SlotView], cur: Option<SlotView>, dir: i32) -> Option<S
 pub struct SwitcherController {
     inner: Arc<Mutex<ControllerInner>>,
     registry: Registry,
-    /// Handles the view registrations close over, so `do:compare:*` /
-    /// `do:screenshot:*` reach the same model the host holds.
-    compare_model: Option<Arc<Mutex<CompareWindowModel>>>,
+    /// Handle the view registrations close over, so `do:screenshot:*`
+    /// reaches the same controller the host holds.
     screenshot_controller: Option<Arc<Mutex<ScreenshotController>>>,
 }
 
@@ -732,7 +713,6 @@ impl SwitcherController {
             activations: 0,
             frontmost_pid: 0,
             screenshot: json!({ "shown": false, "permission": false, "displays": [], "buttons": [], "objects": [] }),
-            compare: json!({ "shown": false, "view": "", "sessions": [] }),
             pane_shot: json!({}),
             tools: Map::new(),
             terminal_panel: false,
@@ -751,12 +731,10 @@ impl SwitcherController {
             logs: Vec::new(),
             ui_queue: None,
             main_queue: None,
-            compare_model: None,
         };
         SwitcherController {
             inner: Arc::new(Mutex::new(inner)),
             registry: Registry::new(),
-            compare_model: None,
             screenshot_controller: None,
         }
     }
@@ -773,12 +751,6 @@ impl SwitcherController {
         &mut self.registry
     }
 
-    /// The shared compare-window model (held so `do:compare:*` mutates the one
-    /// the host owns); `None` until `register_views` while `[compare] enabled`.
-    pub fn compare_model(&self) -> Option<Arc<Mutex<CompareWindowModel>>> {
-        self.compare_model.clone()
-    }
-
     /// The shared screenshot controller (held so `do:screenshot:*` works).
     pub fn screenshot_controller(&self) -> Option<Arc<Mutex<ScreenshotController>>> {
         self.screenshot_controller.clone()
@@ -786,7 +758,7 @@ impl SwitcherController {
 
     /// Populate the registry from the ported view modules (palette rows + the
     /// `do:*` tables) and rebuild the header nav. Enabled flags are read from
-    /// the real commands.toml (`[jira] enabled`, `[compare] enabled`,
+    /// the real commands.toml (`[jira] enabled`,
     /// `[confluence] enabled`, `[ai] enabled`, `[screenshot] enabled`).
     pub fn register_views(&mut self) {
         let text = config::read_config_text().unwrap_or_default();
@@ -818,27 +790,12 @@ impl SwitcherController {
                 (SlotView::Jira, title_of("jira", "jira")),
                 (SlotView::Confluence, title_of("confluence", "confluence")),
                 (SlotView::Ai, title_of("ai", "ai")),
-                (SlotView::Compare, title_of("compare", "compare")),
-                (SlotView::CompareText, title_of("compare", "compare")),
             ]
             .into_iter()
             .collect();
         }
 
         crate::views::jira::register(&mut self.registry, section_flag(&sections, "jira", false));
-
-        let compare_cfg = CompareConfig::from_entries(
-            sections.get("compare").cloned().unwrap_or_default(),
-        );
-        if crate::views::compare::compare_enabled(&compare_cfg) {
-            let model = Arc::new(Mutex::new(CompareWindowModel::new(
-                compare_cfg,
-                CompareRecent::from_env(),
-            )));
-            crate::views::compare::register_compare_hooks(&mut self.registry, model.clone());
-            self.inner.lock().unwrap().compare_model = Some(model.clone());
-            self.compare_model = Some(model);
-        }
 
         let shot_cfg = ScreenshotConfig::from_entries(
             &sections.get("screenshot").cloned().unwrap_or_default(),
@@ -864,7 +821,7 @@ impl SwitcherController {
         text: &str,
         sections: &HashMap<String, HashMap<String, String>>,
     ) -> Vec<PaletteCommand> {
-        const SKIP: [&str; 11] = COMMAND_SECTION_SKIPS;
+        const SKIP: [&str; 10] = COMMAND_SECTION_SKIPS;
         let settings = self.inner.lock().unwrap().settings.clone();
         let jira = section_flag(sections, "jira", false);
         let label_of = label_of(sections);
@@ -910,10 +867,6 @@ impl SwitcherController {
             let title = label_of("ai", "AI");
             all.push(PaletteCommand::new("ai", title, "views"));
         }
-        if section_flag(sections, "compare", false) && listed("compare") {
-            let title = label_of("compare", "Compare");
-            all.push(PaletteCommand::new("compare", title, "views"));
-        }
         if settings.shared_window {
             all.push(PaletteCommand::new("window", "Kitchen Sink", "views"));
         }
@@ -934,7 +887,7 @@ impl SwitcherController {
     }
 
     /// The header switcher, mirroring `SharedWindow.navIcons`: files and
-    /// jira always; confluence / compare / ai while enabled.
+    /// jira always; confluence / ai while enabled.
     fn build_nav(
         &self,
         sections: &HashMap<String, HashMap<String, String>>,
@@ -953,9 +906,6 @@ impl SwitcherController {
                 label_of("confluence", "Confluence"),
                 icon(&s.confluence_icon_name),
             ));
-        }
-        if section_flag(sections, "compare", false) {
-            nav.push((SlotView::Compare, label_of("compare", "Compare"), None));
         }
         if section_flag(sections, "ai", false) {
             nav.push((SlotView::Ai, label_of("ai", "AI"), icon(&s.ai_icon_name)));
@@ -1196,8 +1146,8 @@ impl SwitcherController {
                 self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
             }
             "terminal" => self.toggle_terminal_panel(),
-            "window" | "show" | "files" | "jira" | "confluence" | "ai"
-            | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
+"window" | "show" | "files" | "jira" | "confluence" | "ai"
+            | "prettyprint" | "filefast" | "health" | "health-checks"
             | "text-table" => {
                 self.toggle_command(name)
             }
@@ -1240,7 +1190,7 @@ impl SwitcherController {
         self.inner.lock().unwrap().open(v);
     }
 
-    /// Push a sub-view (`folder-open` on a file pair → compareText).
+    /// Push a sub-view (a Jira detail / releases page).
     pub fn push_view(&self, v: SlotView) {
         self.inner.lock().unwrap().push(v);
     }
@@ -1278,15 +1228,7 @@ impl SwitcherController {
     }
 
     pub fn back(&self, esc: bool) {
-        let was_sub = self.current() == Some(SlotView::CompareText);
         self.inner.lock().unwrap().back(esc);
-        // Leaving compareText closes the sub-view's session (Swift's separate
-        // sub window) and returns to the session underneath.
-        if was_sub && self.current() != Some(SlotView::CompareText) {
-            if let Some(m) = &self.compare_model {
-                m.lock().unwrap().close_sub();
-            }
-        }
     }
 
     pub fn home(&self) {
@@ -1461,11 +1403,6 @@ impl SwitcherController {
             nav::AI => {
                 if inner.current != Some(SlotView::Ai) {
                     inner.open(SlotView::Ai);
-                }
-            }
-            nav::COMPARE => {
-                if inner.current != Some(SlotView::Compare) {
-                    inner.open(SlotView::Compare);
                 }
             }
             nav::HOME => inner.home(),
@@ -1676,9 +1613,6 @@ impl SwitcherController {
             "ai" => {
                 self.hotkey(SlotView::Ai);
             }
-            "compare" => {
-                self.hotkey(SlotView::Compare);
-            }
             "terminal" => {
                 self.toggle_terminal_panel();
             }
@@ -1815,26 +1749,13 @@ impl SwitcherController {
                 Some(view)
                     if matches!(
                         view,
-                        SlotView::Confluence | SlotView::Ai | SlotView::Compare | SlotView::CompareText
+                        SlotView::Confluence | SlotView::Ai
                     ) =>
                 {
                     None
                 }
                 _ => Some(json!({ "error": "not a card view" })),
             };
-        }
-        if let Some(rest) = action.strip_prefix("compare:") {
-            if let Some(arg) = rest.strip_prefix("open-sub:") {
-                return self.compare_open(arg, true);
-            }
-            if let Some(arg) = rest.strip_prefix("open:") {
-                return self.compare_open(arg, false);
-            }
-            if rest == "back" {
-                self.back(true);
-                return None;
-            }
-            // next/prev/edit/… stay on the model hook below.
         }
         if let Some(rest) = action.strip_prefix("screenshot:") {
             // `screenshot:*` creates real overlay/pin windows: hop to main like
@@ -2196,20 +2117,10 @@ impl SwitcherController {
                     .split_once(':')
                     .map(|(_, r)| r)
                     .unwrap_or_default();
-                if action.starts_with("compare:") || action.starts_with("screenshot:") {
-                    let result = self.registry.dispatch_test_do(action).or_else(|| {
+                if action.starts_with("screenshot:") {
+                    return self.registry.dispatch_test_do(action).or_else(|| {
                         Some(json!({ "error": format!("unhandled action {rest}") }))
                     });
-                    // `folder-open` on a file pair opens the compareText sub-view.
-                    let push_sub = action.starts_with("compare:")
-                        && self
-                            .compare_model
-                            .as_ref()
-                            .map_or(false, |m| m.lock().unwrap().take_sub_pending());
-                    if push_sub {
-                        self.inner.lock().unwrap().push(SlotView::CompareText);
-                    }
-                    return result;
                 }
                 // A verb that no registry hook claims is a typo, not a
                 // success: report it so callers (ks-mcp → isError) can see it
@@ -2271,66 +2182,6 @@ impl SwitcherController {
                     return;
                 }
             });
-        });
-    }
-
-    /// `compare\tWORDS` (`handleCompareMessage`): `--title1/--title2 T`,
-    /// `--wait` (git difftool: reply `done` once the session is closed or the
-    /// view hides), then up to two paths.
-    fn compare_message(&self, rest: &str, reply: Reply) {
-        let words: Vec<&str> = rest.split('\t').collect();
-        let mut paths: Vec<String> = Vec::new();
-        let mut titles = HashMap::new();
-        let wait = words.contains(&"--wait");
-        let mut i = 0;
-        while i < words.len() {
-            match words[i] {
-                "--wait" | "" => {}
-                "--title1" if i + 1 < words.len() => {
-                    titles.insert(crate::views::compare::CompareSide::Left, words[i + 1].to_string());
-                    i += 1;
-                }
-                "--title2" if i + 1 < words.len() => {
-                    titles.insert(crate::views::compare::CompareSide::Right, words[i + 1].to_string());
-                    i += 1;
-                }
-                p => paths.push(p.to_string()),
-            }
-            i += 1;
-        }
-        let reply = if wait { Some(reply) } else { None };
-        let Some(model) = self.compare_model.clone() else {
-            if let Some(r) = reply {
-                r.send("done");
-            }
-            return;
-        };
-        self.open(SlotView::Compare);
-        let Some(left) = paths.first() else {
-            if let Some(r) = reply {
-                r.send("done");
-            }
-            return;
-        };
-        let id = model
-            .lock()
-            .unwrap()
-            .open_message(left, paths.get(1).map(String::as_str), &titles, wait);
-        let Some(reply) = reply else { return };
-        let Some(id) = id else {
-            reply.send("done");
-            return;
-        };
-        std::thread::spawn(move || {
-            while model.lock().unwrap().is_waiting(id) {
-                // An abandoned `compare --wait` (client gone) must not pin an
-                // fd and this thread until the window closes.
-                if reply.peer_closed() {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            reply.send("done");
         });
     }
 
@@ -2480,48 +2331,6 @@ impl SwitcherController {
             reply.send("error: window-shot needs macOS");
         }
     }
-
-    /// `do:compare:open[:sub]:LEFT|RIGHT` — `showCompare` + `openPair` (Swift
-    /// `compareTestDo`): present the compare view (pushing the compareText
-    /// sub-view for `open-sub`) and load the pair into the shared model.
-    fn compare_open(&self, arg: &str, sub: bool) -> Option<Value> {
-        let Some(model) = &self.compare_model else {
-            return None;
-        };
-        let mut parts = arg.splitn(2, '|');
-        let l = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let r = parts
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        // A path that does not exist must refuse (and open nothing) instead of
-        // opening a session for a phantom file.
-        for p in [l.as_deref(), r.as_deref()].into_iter().flatten() {
-            if !std::path::Path::new(p).exists() {
-                return Some(json!({ "error": format!("compare: no such path: {p}") }));
-            }
-        }
-        {
-            let mut m = model.lock().unwrap();
-            if sub {
-                m.open_sub(l.as_deref(), r.as_deref());
-                m.take_sub_pending();
-            } else {
-                m.close_sub();
-                m.open_pair(l.as_deref(), r.as_deref());
-            }
-        }
-        self.open(SlotView::Compare);
-        if sub {
-            self.inner.lock().unwrap().push(SlotView::CompareText);
-        }
-        None
-    }
 }
 
 /// Default `--out` for `window-shot`: a unique PNG under the process's temp
@@ -2649,12 +2458,12 @@ fn strip_comment(v: &str) -> &str {
 }
 
 /// The views whose left pane is resizable (`do:sidebar-width:*`).
-const SIDEBAR_VIEWS: [&str; 3] = ["jira", "confluence", "compare"];
+const SIDEBAR_VIEWS: [&str; 2] = ["jira", "confluence"];
 
 /// The views whose left column is a `SidebarView` with a collapse-to-rail
 /// toggle (`do:rail:*`, Ctrl+B B). Files and AI ride along: fixed-width
 /// sidebars, but the same rail.
-const RAIL_VIEWS: [&str; 5] = ["files", "jira", "confluence", "ai", "compare"];
+const RAIL_VIEWS: [&str; 4] = ["files", "jira", "confluence", "ai"];
 
 /// The `[view] sidebar-width` fallback when unset.
 fn pane_sidebar_default(view: &str) -> f64 {
@@ -2662,17 +2471,6 @@ fn pane_sidebar_default(view: &str) -> f64 {
         "jira" => 168.0,
         _ => 210.0,
     }
-}
-
-/// Router precedence: the compare window's own diff-jump chords (Ctrl+N /
-/// Ctrl+P) get first refusal even when the session rail holds the keyboard.
-/// Swift's `CardWindowController.routeKey` ran the card's `handleKey` before
-/// the focused view's `keyDown`; the Rust router checks the rail first, so
-/// without this a compare whose sidebar is focused never jumps (APP-BUGS #16).
-#[cfg(target_os = "macos")]
-fn compare_before_rail(view: Option<SlotView>, key: &crate::ui::popup::KeyInput) -> bool {
-    matches!(view, Some(SlotView::Compare) | Some(SlotView::CompareText))
-        && crate::views::compare::takes_rail_priority(key)
 }
 
 /// A `DividerRange` from an already-parsed `[section]` map.
@@ -3132,10 +2930,10 @@ impl CommandHandler for SwitcherController {
             }
             inner.state_with_registry(&self.registry)
         };
-        // `screenshot` / `compare` report their real controllers when enabled
-        // (the inner placeholder only covers a disabled/detached tool). Both are
-        // read with `try_lock`: the main thread holds these mutexes while it
-        // runs long AppKit work (the OCR prewarm, a capture, a compare load) and
+        // `screenshot` reports its real controller when enabled (the inner
+        // placeholder only covers a disabled/detached tool). Read with
+        // `try_lock`: the main thread holds the mutex while it runs long
+        // AppKit work (the OCR prewarm, a capture) and
         // this reply is served on the single socket thread — blocking here
         // wedged every later socket verb until that work finished (APP-BUGS #21).
         if let Some(c) = &self.screenshot_controller {
@@ -3143,38 +2941,6 @@ impl CommandHandler for SwitcherController {
                 v["screenshot"] = c.test_state();
                 v["paneShot"] = c.pane_shot_last.clone();
             }
-        }
-        if let Some(m) = &self.compare_model {
-            let Ok(mut m) = m.try_lock() else { return v };
-            let mut st = m.test_state();
-            if let Some(o) = st.as_object_mut() {
-                o.entry("shown").or_insert(json!(false));
-                o.entry("key").or_insert(json!(false));
-                o.entry("frame").or_insert(json!([0, 0, 0, 0]));
-                o.entry("close").or_insert(json!([0, 0]));
-                o.entry("sheet").or_insert(json!(false));
-                o.entry("shortcutsCard").or_insert(json!(false));
-            }
-            let view = v["view"].clone();
-            let is_compare = matches!(view.as_str(), Some("compare") | Some("compareText"));
-            // Swift reports the compare window's frame and its ✕ point.
-            if is_compare {
-                let frame: Option<Vec<f64>> = view
-                    .as_str()
-                    .and_then(|name| v["views"][name]["frame"].as_array())
-                    .map(|a| a.iter().filter_map(Value::as_f64).collect())
-                    .filter(|f: &Vec<f64>| f.len() == 4);
-                if let Some(f) = frame {
-                    st["frame"] = json!(f.iter().map(|x| x.round() as i64).collect::<Vec<_>>());
-                    if let Some(main_h) = live.as_ref().map(|l| l.main_h).filter(|h| *h > 0.0) {
-                        st["close"] = json!(header_close_point(&f, main_h));
-                    }
-                }
-            }
-            // `sub` is the Swift sub-window flag: true while compareText is up.
-            st["sub"] = json!(view.as_str() == Some("compareText"));
-            st["view"] = if is_compare { view } else { json!("") };
-            v["compare"] = st;
         }
         v
     }
@@ -3186,7 +2952,7 @@ impl CommandHandler for SwitcherController {
         // `state` sees the presented window (`views.*.shown`, `windows`).
         let _ = self.run_on_main(|| {}, std::time::Duration::from_millis(1000));
         // A registry hook answers `Some(null)` for "handled, no error"
-        // (`compareTestDo` returning nil): reply with the state like Swift,
+        // (Swift `testQuery` returning nil): reply with the state like Swift,
         // never a bare `null`.
         result.filter(|v| !v.is_null())
     }
@@ -3207,7 +2973,6 @@ impl CommandHandler for SwitcherController {
                 reply.send(if ok { "granted" } else { "denied" });
             }
             "screenshot" => self.screenshot_message(rest, reply),
-            "compare" => self.compare_message(rest, reply),
             "pane-shot" => self.pane_shot_message(rest, reply),
             "window-shot" => self.window_shot_message(rest, reply),
             _ => return Some(reply),
@@ -3301,7 +3066,7 @@ pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, Str
 mod daemon_ui {
     mod host_vim;
     use super::{
-        compare_before_rail, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue,
+        MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue,
         DEFAULT_VIEW,
     };
     use crate::app::registry::{RectI, SlotView};
@@ -3376,7 +3141,7 @@ mod daemon_ui {
         match action {
             PaletteAction::Command(name) => matches!(
                 name.as_str(),
-                "window" | "files" | "jira" | "confluence" | "ai" | "compare"
+                "window" | "files" | "jira" | "confluence" | "ai"
                     | "jira-config"
             ),
             PaletteAction::Workspace(_) => false,
@@ -3435,11 +3200,6 @@ mod daemon_ui {
         }
     }
 
-    thread_local! {
-        /// The folder tree's Quick Look panel source (menu ▸ Quick Look).
-        static COMPARE_QUICK_LOOK: RefCell<crate::views::files::QuickLook> = RefCell::new(crate::views::files::QuickLook::new());
-    }
-
     /// `~`-abbreviated path for prompts and toasts.
     fn tilde_path(p: &str) -> String {
         crate::app::pathfmt::tilde_path(p, &std::env::var("HOME").unwrap_or_default())
@@ -3459,8 +3219,6 @@ mod daemon_ui {
         confluence: Option<ConfState>,
         /// The live Jira list (`ListSession`) + its view.
         jira: Option<(crate::views::jira_view::JiraList, Retained<crate::views::jira_view::JiraView>)>,
-        /// The live compare surface (compare + compareText share it).
-        compare: Option<crate::views::compare::CompareSurface>,
         /// The Ctrl+B prefix machine (`SharedWindow.prefixKey`).
         prefix: popup::PrefixState,
         /// The `show` palette (commands + workspaces).
@@ -4238,7 +3996,6 @@ mod daemon_ui {
             }
             self.sync_tools();
             self.sync_member_states();
-            self.sync_compare();
             self.watch_focus();
             self.live_pane_refresh();
             self.refresh_workspace_strip();
@@ -4263,29 +4020,6 @@ mod daemon_ui {
                     job();
                 }
             }
-        }
-
-        /// `CompareWindow.syncAll`: repaint the live compare surface from the
-        /// model while a compare view is up (a no-op unless it changed).
-        fn sync_compare(&self) {
-            let state = self.ivars().state.borrow();
-            let Some(st) = state.as_ref() else {
-                return;
-            };
-            if !matches!(st.current, Some(SlotView::Compare) | Some(SlotView::CompareText))
-                || !st.window.isVisible()
-            {
-                return;
-            }
-            let (Some(surface), Some(model)) =
-                (st.compare.as_ref(), self.ivars().controller.compare_model())
-            else {
-                return;
-            };
-            let Ok(mut m) = model.try_lock() else {
-                return;
-            };
-            surface.sync(&mut m);
         }
 
         /// The polled focus observers: `SharedWindow`'s didResignKey →
@@ -4623,7 +4357,7 @@ mod daemon_ui {
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.switcher.take().unwrap_or_else(ViewSwitcherPanel::new);
             // The views' "where it is" (read here: the state is borrowed).
-            let wheres = Self::where_texts(st, &controller);
+            let wheres = Self::where_texts(st);
             let rows = self.prepare_panel(
                 &mut panel,
                 Box::new({
@@ -4646,7 +4380,7 @@ mod daemon_ui {
         }
 
         /// `showViewSwitcher`'s per-view "where it is" (`whereText` / `tabName`).
-        fn where_texts(st: &DaemonUiState, controller: &SwitcherController) -> HashMap<SlotView, String> {
+        fn where_texts(st: &DaemonUiState) -> HashMap<SlotView, String> {
             let mut w = HashMap::new();
             if let Some(b) = st.files.as_ref() {
                 w.insert(SlotView::Files, b.where_text());
@@ -4664,10 +4398,6 @@ mod daemon_ui {
             }
             if let Some(a) = st.ai.as_ref() {
                 w.insert(SlotView::Ai, a.model.where_text());
-            }
-            if let Some(m) = controller.compare_model() {
-                let label = m.lock().unwrap().current().map(|s| s.label()).unwrap_or_else(|| "Home".into());
-                w.insert(SlotView::Compare, label);
             }
             w
         }
@@ -4687,8 +4417,8 @@ mod daemon_ui {
                 .registry()
                 .nav_icons()
                 .iter()
-                // Ctrl+B W lists every view the header shows (Compare and AI
-                // were left out, so they were unreachable from it); Hyper+S
+                // Ctrl+B W lists every view the header shows (AI was left
+                // out once, so it was unreachable from it); Hyper+S
                 // keeps the full palette.
                 .map(|n| {
                     // The display name comes from the nav tip (config `label`),
@@ -4697,7 +4427,6 @@ mod daemon_ui {
                     let section = match n.view {
                         SlotView::Files => "files",
                         SlotView::Confluence => "confluence",
-                        SlotView::Compare | SlotView::CompareText => "compare",
                         SlotView::Ai => "ai",
                         _ => "jira",
                     };
@@ -5197,7 +4926,7 @@ mod daemon_ui {
         }
 
         /// True when the window's first responder is a text field / editor
-        /// (the compare window's own keys stand down there).
+        /// (single-letter keys stand down there).
         fn key_in_text(&self) -> bool {
             self.ivars()
                 .state
@@ -5363,18 +5092,6 @@ mod daemon_ui {
                 return true;
             }
 
-            // Ctrl+N / Ctrl+P ("next / previous difference") are the compare
-            // window's own chords and the session sidebar's list nav claims
-            // them too (`ui::sidebar::nav_key`); give the model first refusal
-            // so a compare whose sidebar holds the keyboard still jumps
-            // (APP-BUGS #16).
-            if compare_before_rail(self.ivars().controller.current(), &key) {
-                let in_text = self.key_in_text();
-                if self.compare_key(key, in_text) {
-                    return true;
-                }
-            }
-
             // `(w.firstResponder as? PopupTabsBar)?.handleNavKey(e)`: a rail
             // with the keyboard owns ↑↓ / Return / Esc / letters.
             let rail = self.ivars().state.borrow().as_ref().and_then(|st| st.window.firstResponder());
@@ -5390,22 +5107,6 @@ mod daemon_ui {
             let current = self.ivars().controller.current();
             if current.is_some_and(|v| v.is_jira()) && self.jira_key(&key) {
                 return true;
-            }
-            if matches!(current, Some(SlotView::Compare) | Some(SlotView::CompareText)) {
-                let in_text = self.key_in_text();
-                // Folder copy / move chords ask Replace / Keep Both / Skip first.
-                if !in_text {
-                    if let Some((from, move_)) = crate::views::compare::folder_transfer_key(&key) {
-                        let is_folder = self.compare_with(|m| m.current_is_folder()).unwrap_or(false);
-                        if is_folder {
-                            self.compare_folder_transfer(from, move_);
-                            return true;
-                        }
-                    }
-                }
-                if self.compare_key(key, in_text) {
-                    return true;
-                }
             }
             if current == Some(SlotView::Files) && self.files_key(&key) {
                 return true;
@@ -5458,13 +5159,6 @@ mod daemon_ui {
                     }
                     if current == Some(SlotView::Jira) && self.jira_surface(|l| l.escape_step()) == Some(true) {
                         // `onEscape`: query → board list → pinned list first.
-                        return true;
-                    }
-                    if current == Some(SlotView::CompareText) {
-                        // PRD-compare KR6: Esc in compareText steps back to the
-                        // compare view (Swift `slot.back(esc: true)`), it never
-                        // hides the window directly.
-                        self.ivars().controller.back(true);
                         return true;
                     }
                     let closes = popup::esc_streak_closes(key.esc_streak, cfg.esc_close_count);
@@ -5536,10 +5230,6 @@ mod daemon_ui {
                 KeyAction::CommandK => match current {
                     Some(v) if v.is_jira() => {
                         self.jira_actions();
-                        true
-                    }
-                    Some(SlotView::Compare) | Some(SlotView::CompareText) => {
-                        self.compare_actions();
                         true
                     }
                     // Swift wires `onCommandK` only for list windows.
@@ -5811,7 +5501,6 @@ mod daemon_ui {
                 SlotView::Jira => st.jira.as_ref()?.1.nav_panes(),
                 SlotView::Confluence => st.confluence.as_ref()?.view.nav_panes(),
                 SlotView::Ai => st.ai.as_ref()?.view.nav_panes(),
-                SlotView::Compare | SlotView::CompareText => st.compare.as_ref()?.nav_panes(),
                 _ => return None,
             };
             Some((st.window.clone(), panes))
@@ -5879,19 +5568,6 @@ mod daemon_ui {
             if let (Some(o), Some(v)) = (doc.as_object_mut(), self.vim_test_state().as_object()) {
                 for (k, val) in v {
                     o.insert(k.clone(), val.clone());
-                }
-            }
-            // Focus just moved into a compare path box: select its text so
-            // typing replaces the old path rather than appending to it.
-            let focused = doc.get("focused").and_then(|f| f.as_str()).unwrap_or("").to_string();
-            if focused == "left-path" || focused == "right-path" {
-                let was = serde_json::from_str::<serde_json::Value>(&self.ivars().live_pane_sig.borrow())
-                    .ok()
-                    .and_then(|v| v.get("focused").and_then(|f| f.as_str()).map(str::to_string));
-                if was.as_deref() != Some(focused.as_str()) {
-                    if let Some(s) = self.ivars().state.borrow().as_ref().and_then(|st| st.compare.as_ref()) {
-                        s.chrome().select_side_text(focused == "right-path");
-                    }
                 }
             }
             let sig = doc.to_string();
@@ -6371,700 +6047,12 @@ mod daemon_ui {
                     SlotView::Files => st.files = None,
                     SlotView::Ai => st.ai = None,
                     SlotView::Confluence => st.confluence = None,
-                    SlotView::Compare | SlotView::CompareText => {
-                        st.compare = None;
-                        st.views.remove(&SlotView::Compare);
-                        st.views.remove(&SlotView::CompareText);
-                    }
                     _ if v.is_jira() => st.jira = None,
                     _ => {}
                 }
                 st.current = None;
             }
             self.present(v);
-        }
-
-        /// `CompareWindow.handleKey` from the key router: the model's verdict
-        /// plus the host's cue to push `.compareText` when the key opened a sub
-        /// session (Return on a folder file row, like `do:compare:folder-open`).
-        /// The pending flag is taken on every compare key so it can never leak
-        /// into the next compare verb (APP-BUGS N2).
-        fn compare_key(&self, key: crate::ui::popup::KeyInput, in_text: bool) -> bool {
-            let Some(m) = self.ivars().controller.compare_model() else {
-                return false;
-            };
-            // Never hold the compare-model lock across `push_view`: it takes
-            // the controller lock (order is inner → model).
-            let (used, opened_sub, notice) = {
-                let mut model = m.lock().unwrap();
-                let (used, sub) = model.handle_key_with_sub(key, in_text);
-                (used, sub, model.take_notice())
-            };
-            if let Some(n) = notice {
-                crate::ui::toast::show(&n, "info.circle");
-            }
-            if opened_sub {
-                self.ivars().controller.push_view(SlotView::CompareText);
-            }
-            // Home (Cmd+0): the start page's Left path box takes the keyboard
-            // once it is built (nothing had focus; typing was lost).
-            if used && key.cmd && !key.shift && key.key_code == 29 {
-                self.compare_home_focus();
-            }
-            used
-        }
-
-        /// Home (Cmd+0 / the sidebar's Home): repaint so the start page is
-        /// built, then give its Left path box the keyboard — and again after
-        /// the next drain, which may rebuild it (nothing had focus; typing
-        /// was lost until a click).
-        fn compare_home_focus(&self) {
-            if let Some(st) = self.ivars().state.borrow().as_ref() {
-                if let Some(s) = st.compare.as_ref() {
-                    s.invalidate();
-                }
-            }
-            self.sync_compare();
-            self.live_pane_focus("left-path");
-            on_ui(|ui| {
-                ui.live_pane_focus("left-path");
-            });
-        }
-
-        /// Run `f` on the shared compare model, then repaint the surface.
-        fn compare_with<R>(&self, f: impl FnOnce(&mut crate::views::compare::CompareWindowModel) -> R) -> Option<R> {
-            let model = self.ivars().controller.compare_model()?;
-            let (r, notice) = {
-                let mut m = model.lock().ok()?;
-                let r = f(&mut m);
-                (r, m.take_notice())
-            };
-            if let Some(n) = notice {
-                crate::ui::toast::show(&n, "info.circle");
-            }
-            if let Some(st) = self.ivars().state.borrow().as_ref() {
-                if let Some(s) = st.compare.as_ref() {
-                    s.invalidate();
-                }
-            }
-            self.sync_compare();
-            Some(r)
-        }
-
-        fn compare_event(&self, ev: crate::views::compare_view::CompareEvent) {
-            use crate::ui::sidebar::SidebarEvent;
-            use crate::views::compare::{CompareFilter, CompareSide};
-            use crate::views::compare_view::CompareEvent as E;
-            match ev {
-                E::Sidebar(SidebarEvent::Select(i)) => {
-                    self.compare_with(|m| m.select_open(i));
-                }
-                E::Sidebar(SidebarEvent::Close(i)) => {
-                    self.compare_with(|m| m.close_session(i));
-                }
-                E::Sidebar(SidebarEvent::Pinned(k)) => {
-                    let home = k == "home";
-                    self.compare_with(|m| if home { m.show_start_page() } else { m.start_pasted() });
-                    if home {
-                        self.compare_home_focus();
-                    }
-                }
-                E::Sidebar(SidebarEvent::Rail(_)) => {
-                    if let Some(st) = self.ivars().state.borrow().as_ref() {
-                        if let Some(s) = st.compare.as_ref() {
-                            s.chrome().layout_all();
-                            s.invalidate();
-                        }
-                    }
-                }
-                E::Sidebar(SidebarEvent::MenuRow(i, x, y)) => {
-                    // `pillMenu(_:)`: Close, then each side's path.
-                    use crate::ui::menu_kit::{popup, MenuEntry};
-                    let paths = self
-                        .compare_with(|m| {
-                            m.sessions.get(i).map(|s| {
-                                (s.path.get(&CompareSide::Left).cloned(), s.path.get(&CompareSide::Right).cloned())
-                            })
-                        })
-                        .flatten();
-                    let Some((lp, rp)) = paths else { return };
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let mut e = vec![
-                        MenuEntry::item("Close", move || {
-                            if let Some(ui) = weak.load() {
-                                ui.compare_with(|m| m.close_session(i));
-                            }
-                        }),
-                        MenuEntry::Separator,
-                    ];
-                    for (name, p) in [("Left", lp), ("Right", rp)] {
-                        let Some(p) = p else { continue };
-                        let p2 = p.clone();
-                        e.push(MenuEntry::item(&format!("Copy {name} Path"), move || copy_text_to_pasteboard(&p)));
-                        e.push(MenuEntry::item(&format!("Reveal {name} in Files"), move || reveal_in_files(&[p2])));
-                    }
-                    popup(e, None, x, y);
-                }
-                E::Sidebar(_) => {}
-                E::Compare { left, right } => {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let exp = |p: &str| -> String {
-                        let p = p.trim();
-                        if let Some(rest) = p.strip_prefix('~') { format!("{home}{rest}") } else { p.to_string() }
-                    };
-                    let (l, r) = (exp(&left), exp(&right));
-                    if l.is_empty() && r.is_empty() {
-                        return;
-                    }
-                    if let Some(msg) = crate::views::compare::missing_compare_path(&l, &r) {
-                        crate::ui::toast::show(&msg, "exclamationmark.triangle.fill");
-                        return;
-                    }
-                    let dirs = std::path::Path::new(&l).is_dir() && std::path::Path::new(&r).is_dir();
-                    self.compare_with(|m| {
-                        if dirs {
-                            m.open_folders(&l, &r);
-                        } else {
-                            m.open_pair((!l.is_empty()).then_some(l.as_str()), (!r.is_empty()).then_some(r.as_str()));
-                        }
-                    });
-                }
-                E::NewText => {
-                    self.compare_with(|m| m.start_pasted());
-                }
-                E::Browse { right } => {
-                    let opts = crate::platform::PickOpts {
-                        files: true,
-                        dirs: true,
-                        multiple: false,
-                    };
-                    if let Some(p) = crate::platform::pick_path(&opts) {
-                        if let Some(st) = self.ivars().state.borrow().as_ref() {
-                            if let Some(s) = st.compare.as_ref() {
-                                s.chrome().set_side_text(right, &p.to_string_lossy());
-                            }
-                        }
-                    }
-                }
-                E::OpenRecent(i) => {
-                    let rows = self.compare_with(|m| {
-                        m.recent_selection = i;
-                        m.recent.load()
-                    });
-                    let filter_rows = {
-                        let st = self.ivars().state.borrow();
-                        let model = self.ivars().controller.compare_model();
-                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
-                            (Some(s), Some(m)) => m.lock().ok().map(|m| s.recent_rows(&m)),
-                            _ => None,
-                        }
-                    };
-                    let _ = rows;
-                    let Some(e) = filter_rows.and_then(|r| r.get(i).cloned()) else { return };
-                    if e.missing() {
-                        return;
-                    }
-                    let (l, r) = (e.entry.left.clone(), e.entry.right.clone());
-                    let dirs = std::path::Path::new(&l).is_dir() && std::path::Path::new(&r).is_dir();
-                    self.compare_with(|m| {
-                        if dirs {
-                            m.open_folders(&l, &r);
-                        } else {
-                            m.open_pair(Some(&l), Some(&r));
-                        }
-                    });
-                }
-                E::RemoveRecent(i) => {
-                    let row = {
-                        let st = self.ivars().state.borrow();
-                        let model = self.ivars().controller.compare_model();
-                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
-                            (Some(s), Some(m)) => m.lock().ok().and_then(|m| s.recent_rows(&m).get(i).cloned()),
-                            _ => None,
-                        }
-                    };
-                    if let Some(r) = row {
-                        self.compare_with(|m| m.recent.remove(&r.entry));
-                    }
-                }
-                E::RecentMenu { row, x, y } => {
-                    use crate::ui::menu_kit::{popup, MenuEntry};
-                    let entry = {
-                        let st = self.ivars().state.borrow();
-                        let model = self.ivars().controller.compare_model();
-                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
-                            (Some(s), Some(m)) => m.lock().ok().and_then(|m| s.recent_rows(&m).get(row).cloned()),
-                            _ => None,
-                        }
-                    };
-                    let Some(e) = entry else { return };
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (w1, w2, w3, w4, w5) = (weak.clone(), weak.clone(), weak.clone(), weak.clone(), weak);
-                    let (l, r) = (e.entry.left.clone(), e.entry.right.clone());
-                    let (l2, r2) = (l.clone(), r.clone());
-                    let (fl, fr) = (l.clone(), r.clone());
-                    let ent = e.entry.clone();
-                    let gone = self
-                        .compare_with(|m| {
-                            m.recent
-                                .load()
-                                .iter()
-                                .filter(|e| !std::path::Path::new(&e.left).exists() || !std::path::Path::new(&e.right).exists())
-                                .count()
-                        })
-                        .unwrap_or(0);
-                    let mut tail = Vec::new();
-                    if gone > 0 {
-                        tail.push(MenuEntry::item(&format!("Remove All Missing ({gone})"), move || {
-                            if let Some(ui) = w4.load() {
-                                ui.compare_event(E::ClearMissing);
-                            }
-                        }));
-                    }
-                    tail.push(MenuEntry::item("Clear All Recents", move || {
-                        if let Some(ui) = w5.load() {
-                            ui.compare_event(E::ClearAll);
-                        }
-                    }));
-                    popup(
-                        vec![
-                            MenuEntry::item("Open", move || {
-                                if let Some(ui) = w1.load() {
-                                    ui.compare_event(E::OpenRecent(row));
-                                }
-                            }),
-                            MenuEntry::item("Fill the Path Fields", move || {
-                                if let Some(ui) = w3.load() {
-                                    if let Some(st) = ui.ivars().state.borrow().as_ref() {
-                                        if let Some(s) = st.compare.as_ref() {
-                                            s.chrome().set_side_text(false, &tilde_path(&fl));
-                                            s.chrome().set_side_text(true, &tilde_path(&fr));
-                                        }
-                                    }
-                                }
-                            }),
-                            MenuEntry::item("Reveal Left in Files", move || reveal_in_files(&[l2])),
-                            MenuEntry::item("Reveal Right in Files", move || reveal_in_files(&[r2])),
-                            MenuEntry::item("Copy Absolute Paths", move || copy_text_to_pasteboard(&format!("{l}\n{r}"))),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Remove from Recent", move || {
-                                if let Some(ui) = w2.load() {
-                                    ui.compare_with(|m| m.recent.remove(&ent));
-                                }
-                            }),
-                        ]
-                        .into_iter()
-                        .chain(tail)
-                        .collect(),
-                        None,
-                        x,
-                        y,
-                    );
-                }
-                E::ClearMissing => {
-                    self.compare_with(|m| {
-                        let keep: Vec<_> = m
-                            .recent
-                            .load()
-                            .into_iter()
-                            .filter(|e| std::path::Path::new(&e.left).exists() && std::path::Path::new(&e.right).exists())
-                            .collect();
-                        m.recent.save(&keep);
-                    });
-                }
-                E::ClearAll => {
-                    let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    crate::ui::sheet::alert_sheet(
-                        &window,
-                        "Clear all recent comparisons?",
-                        "Pasted text kept for them is deleted too.",
-                        &["Clear All", "Cancel"],
-                        move |b| {
-                            if b == 0 {
-                                if let Some(ui) = weak.load() {
-                                    ui.compare_with(|m| m.recent.clear_all());
-                                }
-                            }
-                        },
-                    );
-                }
-                E::RecentFilter(q) => {
-                    if let Some(st) = self.ivars().state.borrow().as_ref() {
-                        if let Some(s) = st.compare.as_ref() {
-                            s.set_recent_filter(&q);
-                        }
-                    }
-                    self.sync_compare();
-                }
-                E::Filter(i) => {
-                    self.compare_with(|m| m.set_filter(CompareFilter::ALL[i.min(3)]));
-                }
-                E::Tool(i) => {
-                    self.compare_with(|m| match i {
-                        0 => m.jump_section(-1),
-                        1 => m.jump_section(1),
-                        2 => m.swap_sides(),
-                        3 => {
-                            let _ = m.test_do("reload");
-                        }
-                        _ => {}
-                    });
-                    let _ = CompareSide::Left;
-                }
-                E::PaneMenu { right, row, x, y } => {
-                    let side = if right { CompareSide::Right } else { CompareSide::Left };
-                    self.compare_pane_menu(side, row, x, y);
-                }
-                E::FolderMenu { id, x, y } => self.compare_folder_menu(id, x, y),
-                E::FolderClick { row, shift, double } => {
-                    // `compare_with` drops the model lock before `push_view`.
-                    let opened = self.compare_with(|m| m.folder_click(row, shift, double).1).unwrap_or(false);
-                    if opened {
-                        self.ivars().controller.push_view(SlotView::CompareText);
-                    }
-                }
-            }
-        }
-
-        /// `CompareFolderView.menu(_:_:)`: the folder tree's right-click menu
-        /// for node `id`, acting on the focused side.
-        fn compare_folder_menu(&self, id: usize, x: f64, y: f64) {
-            use crate::engines::file_ops::Clash;
-            use crate::ui::menu_kit::{popup, MenuEntry};
-            use crate::views::compare::{CompareSide, CompareWindowModel};
-            let Some(Some(t)) = self.compare_with(|m| m.folder_page.menu_target(id)) else { return };
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let act = |f: Box<dyn FnOnce(&mut CompareWindowModel)>| {
-                let w = weak.clone();
-                move || {
-                    if let Some(ui) = w.load() {
-                        ui.compare_with(f);
-                    }
-                }
-            };
-            let item = |title: &str, enabled: bool, f: Box<dyn FnOnce()>| {
-                if enabled {
-                    MenuEntry::item(title, f)
-                } else {
-                    MenuEntry::disabled(title)
-                }
-            };
-            let w = weak.clone();
-            let open = move || {
-                let Some(ui) = w.load() else { return };
-                let sub = ui
-                    .compare_with(|m| {
-                        let _ = m.test_do("folder-open");
-                        m.take_sub_pending()
-                    })
-                    .unwrap_or(false);
-                if sub {
-                    ui.ivars().controller.push_view(SlotView::CompareText);
-                }
-            };
-            let mut e = Vec::new();
-            if t.is_folder {
-                e.push(MenuEntry::item(if t.expanded { "Collapse" } else { "Expand" }, open));
-            } else {
-                e.push(MenuEntry::item("Open in Text Compare", open));
-            }
-            e.push(MenuEntry::Separator);
-            for (title, from, move_, enabled) in [
-                ("Copy to Right  ⌥→", CompareSide::Left, false, t.has_left),
-                ("Copy to Left  ⌥←", CompareSide::Right, false, t.has_right),
-                ("Move to Right  ⌃⌥R", CompareSide::Left, true, t.has_left),
-                ("Move to Left  ⌃⌥L", CompareSide::Right, true, t.has_right),
-            ] {
-                let w = weak.clone();
-                e.push(item(title, enabled, Box::new(move || {
-                    if let Some(ui) = w.load() {
-                        ui.compare_folder_transfer(from, move_);
-                    }
-                })));
-            }
-            let _ = Clash::Replace;
-            e.push(MenuEntry::Separator);
-            let on_side = t.path.is_some();
-            let name = t.path.as_deref().and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-            let w = weak.clone();
-            let rename_path = t.path.clone().unwrap_or_default();
-            e.push(item("Rename…  F2", on_side, Box::new(move || {
-                let Some(ui) = w.load() else { return };
-                let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-                let w2 = w.clone();
-                crate::ui::sheet::form_sheet(
-                    &window,
-                    "Rename",
-                    &tilde_path(&rename_path),
-                    vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
-                    "Rename",
-                    move |answer| {
-                        let Some(name) = answer.and_then(|v| v.into_iter().next()) else { return };
-                        if let Some(ui) = w2.load() {
-                            ui.compare_with(|m| m.folder_page.rename_target(&name));
-                        }
-                    },
-                );
-            })));
-            let w = weak.clone();
-            e.push(MenuEntry::item("New Folder…  ⌘⇧N", move || {
-                let Some(ui) = w.load() else { return };
-                let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-                let base = ui.compare_with(|m| m.folder_page.new_folder_base()).flatten().unwrap_or_default();
-                let w2 = w.clone();
-                crate::ui::sheet::form_sheet(
-                    &window,
-                    "New Folder",
-                    &format!("in {}", tilde_path(&base)),
-                    vec![crate::ui::sheet::FormRow::new("Name", "untitled folder", "")],
-                    "Create",
-                    move |answer| {
-                        let Some(name) = answer.and_then(|v| v.into_iter().next()) else { return };
-                        if let Some(ui) = w2.load() {
-                            ui.compare_with(|m| m.folder_page.new_folder(&name));
-                        }
-                    },
-                );
-            }));
-            e.push(item("Move to Trash  ⌘⌫", on_side, Box::new(act(Box::new(|m| m.folder_page.trash_selection())))));
-            e.push(MenuEntry::Separator);
-            e.push(item("Copy Absolute Path", on_side, Box::new(act(Box::new(|m| {
-                let paths = m.folder_page.target_paths();
-                if paths.is_empty() {
-                    return;
-                }
-                copy_text_to_pasteboard(&paths.join("\n"));
-                let msg = if paths.len() == 1 {
-                    format!("Copied {} to clipboard", tilde_path(&paths[0]))
-                } else {
-                    format!("Copied {} paths to clipboard", paths.len())
-                };
-                crate::ui::toast::show(&msg, "doc.on.clipboard");
-            })))));
-            let p = t.path.clone().unwrap_or_default();
-            if on_side && !t.is_folder {
-                e.extend(crate::views::files::copy_contents_entry(&p));
-            }
-            let p1 = p.clone();
-            e.push(item("Reveal in Files", on_side, Box::new(move || reveal_in_files(&[p1]))));
-            let w = weak.clone();
-            e.push(item("Quick Look  Space", t.has_left || t.has_right, Box::new(move || {
-                let Some(ui) = w.load() else { return };
-                let paths = ui.compare_with(|m| m.folder_page.target_paths()).unwrap_or_default();
-                if let Some(mtm) = MainThreadMarker::new() {
-                    COMPARE_QUICK_LOOK.with(|q| q.borrow_mut().toggle(mtm, &paths));
-                }
-            })));
-            if t.is_folder {
-                e.push(MenuEntry::Separator);
-                let id = t.id;
-                e.push(item("Set as Base Folder  ⌘↓", t.has_left && t.has_right, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, None))))));
-                e.push(item("Set as Left Base Folder", t.left_dir, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, Some(CompareSide::Left)))))));
-                e.push(item("Set as Right Base Folder", t.right_dir, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, Some(CompareSide::Right)))))));
-            }
-            e.push(MenuEntry::Separator);
-            let ex = t.name.clone();
-            e.push(MenuEntry::item(&format!("Exclude “{}”", t.name), act(Box::new(move |m| m.folder_page.exclude(&ex)))));
-            popup(e, None, x, y);
-        }
-
-        /// `CompareFolderView.transfer(from:move:)`: copy / move the selection
-        /// across, asking first when items already exist on the other side.
-        fn compare_folder_transfer(&self, from: crate::views::compare::CompareSide, move_: bool) {
-            use crate::engines::file_ops::Clash;
-            let clashes = self.compare_with(|m| m.folder_page.clash_count(from)).unwrap_or(0);
-            if clashes == 0 {
-                self.compare_with(|m| m.folder_page.copy_or_move(from, move_, Clash::Replace));
-                return;
-            }
-            let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
-            let other = from.other().raw();
-            let title = if clashes == 1 {
-                format!("1 item already exists on the {other} side")
-            } else {
-                format!("{clashes} items already exist on the {other} side")
-            };
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            crate::ui::sheet::alert_sheet(
-                &window,
-                &title,
-                "Replace them, keep both (the copy gets a new name), or skip them?",
-                &["Replace", "Keep Both", "Skip", "Cancel"],
-                move |b| {
-                    let clash = match b {
-                        0 => Clash::Replace,
-                        1 => Clash::KeepBoth,
-                        2 => Clash::Skip,
-                        _ => return,
-                    };
-                    if let Some(ui) = weak.load() {
-                        ui.compare_with(|m| m.folder_page.copy_or_move(from, move_, clash));
-                    }
-                },
-            );
-        }
-
-        /// `CompareWindow.paneMenu(row:side:)`: the text pane's right-click
-        /// menu. The click first moves the cursor and focus there
-        /// (`paneClicked`), like Swift.
-        fn compare_pane_menu(&self, side: crate::views::compare::CompareSide, row: usize, x: f64, y: f64) {
-            use crate::ui::menu_kit::{popup, MenuEntry};
-            use crate::views::compare::{CompareSide, Eol};
-            struct Info {
-                has_rows: bool,
-                can_copy_across: bool,
-                in_section: bool,
-                line: i64,
-                pick: Option<(CompareSide, i64)>,
-                is_anchor: Option<usize>,
-                anchors: usize,
-                path: Option<String>,
-                dirty: bool,
-            }
-            let info = self.compare_with(|m| {
-                if m.current_is_folder() {
-                    return None;
-                }
-                m.move_cursor(row as i64, false);
-                let pick = m.align_pick;
-                let in_section = m.cursor_in_section();
-                let s = m.current_mut()?;
-                s.focus = side;
-                let n = s.display_count();
-                let mrow = (n > 0).then(|| s.model_row(s.cursor));
-                Some(Info {
-                    has_rows: n > 0,
-                    can_copy_across: s.anchor.is_some() || in_section,
-                    in_section,
-                    line: mrow.map(|r| s.model.rows()[r].line(side) as i64).unwrap_or(-1),
-                    pick,
-                    is_anchor: mrow.filter(|r| s.model.is_anchor(*r)),
-                    anchors: s.model.anchors().len(),
-                    path: s.path.get(&side).cloned(),
-                    dirty: s.dirty(side),
-                })
-            });
-            let Some(Some(info)) = info else { return };
-            let clip = crate::platform::get_text();
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let act = |f: Box<dyn FnOnce(&mut crate::views::compare::CompareWindowModel)>| {
-                let w = weak.clone();
-                move || {
-                    if let Some(ui) = w.load() {
-                        ui.compare_with(f);
-                    }
-                }
-            };
-            let other = if side == CompareSide::Left { "Right" } else { "Left" };
-            let key = if side == CompareSide::Left { "R" } else { "L" };
-            let item = |title: &str, enabled: bool, f: Box<dyn FnOnce()>| {
-                if enabled {
-                    MenuEntry::item(title, f)
-                } else {
-                    MenuEntry::disabled(title)
-                }
-            };
-            let mut e = vec![
-                MenuEntry::item("Copy", act(Box::new(|m| {
-                    if let Some(t) = m.rows_text() {
-                        copy_text_to_pasteboard(&t);
-                    }
-                }))),
-                item(
-                    &format!("Copy to {other}  (⌃{key})"),
-                    info.can_copy_across,
-                    Box::new(act(Box::new(move |m| m.copy_across(side)))),
-                ),
-                item(
-                    &format!("Copy Line to {other}  (⌃⌥{key})"),
-                    info.has_rows,
-                    Box::new(act(Box::new(move |m| m.copy_line(side)))),
-                ),
-            ];
-            let w = weak.clone();
-            e.push(item(
-                "Paste Clipboard Here",
-                clip.is_some(),
-                Box::new(move || {
-                    let Some(t) = clip else { return };
-                    if let Some(ui) = w.load() {
-                        ui.compare_with(|m| match t.strip_prefix("file:") {
-                            Some(p) => m.open_file_into(side, p),
-                            None => m.set_pasted(&t, side),
-                        });
-                    }
-                }),
-            ));
-            e.push(item("Select Section", info.in_section, Box::new(act(Box::new(|m| m.select_section())))));
-            e.push(MenuEntry::Separator);
-            let line = info.line;
-            match info.pick {
-                Some((ps, pl)) if ps != side && line >= 0 => {
-                    let ps_name = if ps == CompareSide::Left { "Left" } else { "Right" };
-                    e.push(MenuEntry::item(
-                        &format!("Align With Picked {ps_name} Line {}", pl + 1),
-                        act(Box::new(move |m| m.align_with(side, line))),
-                    ));
-                    e.push(MenuEntry::item("Cancel Align With", act(Box::new(|m| m.align_pick = None))));
-                }
-                _ => e.push(item(
-                    "Align With…  (pick this line, then one on the other side)",
-                    line >= 0,
-                    Box::new(act(Box::new(move |m| m.align_with(side, line)))),
-                )),
-            }
-            if let Some(r) = info.is_anchor {
-                e.push(MenuEntry::item("Remove This Alignment", act(Box::new(move |m| m.clear_alignment(Some(r))))));
-            }
-            if info.anchors > 0 {
-                e.push(MenuEntry::item(
-                    &format!("Clear All Alignments ({})", info.anchors),
-                    act(Box::new(|m| m.clear_alignment(None))),
-                ));
-            }
-            let mut conv = vec![
-                MenuEntry::item("Trim Trailing Whitespace", act(Box::new(move |m| m.trim(side)))),
-                MenuEntry::Separator,
-            ];
-            for (eol, label) in [(Eol::Lf, "LF"), (Eol::Crlf, "CRLF"), (Eol::Cr, "CR")] {
-                conv.push(MenuEntry::item(
-                    &format!("Line Endings → {label}"),
-                    act(Box::new(move |m| m.convert_eol(side, eol))),
-                ));
-            }
-            e.push(MenuEntry::submenu(&format!("Convert {} Side", if side == CompareSide::Left { "Left" } else { "Right" }), conv));
-            e.push(MenuEntry::Separator);
-            let path = info.path.clone();
-            let has_path = path.is_some();
-            let p = path.clone().unwrap_or_default();
-            let (p1, p2) = (p.clone(), p.clone());
-            e.push(item("Copy Absolute Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
-            e.extend(crate::views::files::copy_contents_entry(&p));
-            e.push(item("Reveal in Files", has_path, Box::new(move || reveal_in_files(&[p2]))));
-            let w = weak.clone();
-            e.push(MenuEntry::item("Open File into This Side…  (⌘O)", move || {
-                let opts = crate::platform::PickOpts {
-                    files: true,
-                    dirs: false,
-                    multiple: false,
-                };
-                let Some(p) = crate::platform::pick_path(&opts) else { return };
-                let p = p.to_string_lossy().into_owned();
-                if let Some(ui) = w.load() {
-                    ui.compare_with(|m| m.open_file_into(side, &p));
-                }
-            }));
-            e.push(item(
-                "Save This Side  (⌘S)",
-                info.dirty || !has_path,
-                Box::new(act(Box::new(move |m| {
-                    if !m.save(side) {
-                        crate::ui::toast::not_ported("Compare Save As (side has no file)");
-                    }
-                }))),
-            ));
-            popup(e, None, x, y);
         }
 
         /// Run `f` on the AI state, then push a fresh snapshot.
@@ -10130,8 +9118,8 @@ mod daemon_ui {
                     self.jira_toggle_search();
                     true
                 }
-                // Cmd+L: focus the search box, as in Files / Confluence / AI /
-                // Compare (only focuses, never closes, unlike Cmd+F).
+                // Cmd+L: focus the search box, as in Files / Confluence / AI
+                // (only focuses, never closes, unlike Cmd+F).
                 popup::KEY_L if key.cmd && !key.ctrl && !key.opt && !key.shift => {
                     if !self.live_pane_focus("search") {
                         self.jira_toggle_search();
@@ -10173,83 +9161,6 @@ mod daemon_ui {
                 }
                 _ => false,
             }
-        }
-
-        /// `CompareWindow.actionPicker()`: the session's actions (Swift pops
-        /// an `NSMenu`; here the shared Cmd+K card).
-        fn compare_actions(&self) {
-            let Some(mtm) = MainThreadMarker::new() else { return };
-            let Some(model) = self.ivars().controller.compare_model() else { return };
-            let (has, folder) = {
-                let m = model.lock().unwrap();
-                (m.current().is_some(), m.current_is_folder())
-            };
-            let mut items: Vec<(&str, &str, &str)> = vec![("New Comparison", "the start page · ⌘0", "start")];
-            if has && folder {
-                items.extend([
-                    ("Next Difference", "⌃N", "folder-key:ctrl-n"),
-                    ("Previous Difference", "⌃P", "folder-key:ctrl-p"),
-                    ("Open Pair (Text Compare)", "⏎", "folder-open"),
-                    ("Copy to Right", "⌥→", "folder-copy:right"),
-                    ("Copy to Left", "⌥←", "folder-copy:left"),
-                    ("Rescan", "F5", "folder-rescan"),
-                ]);
-            } else if has {
-                items.extend([
-                    ("Next Difference", "⌃N", "next"),
-                    ("Previous Difference", "⌃P", "prev"),
-                    ("Copy to Right", "⌥→ · the section under the cursor", "copy-right"),
-                    ("Copy to Left", "⌥← · the section under the cursor", "copy-left"),
-                    ("Swap Sides", "⌘⌥X", "swap"),
-                    ("Reload Both Sides", "F5", "reload"),
-                    ("Save Left", "⌘S with the left side focused", "save:left"),
-                    ("Save Right", "⌘S with the right side focused", "save:right"),
-                    ("Undo", "⌘Z", "undo"),
-                ]);
-            }
-            let Some(root) = self.ivars().state.borrow().as_ref().and_then(|st| st.window.contentView()) else { return };
-            let acts: Vec<String> = items.iter().map(|i| i.2.to_string()).collect();
-            let ctrl = self.ivars().controller.clone();
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let picker = crate::ui::action_picker::ActionPicker::show(
-                mtm,
-                &root,
-                "Compare actions",
-                items.iter().map(|i| (i.0.to_string(), i.1.to_string())).collect(),
-                crate::ui::theme::section_colors("compare"),
-                Box::new(move |i| {
-                    let Some(a) = acts.get(i) else { return };
-                    let Some(m) = ctrl.compare_model() else { return };
-                    let mut m = m.lock().unwrap();
-                    let key = |code: u16| popup::KeyInput { key_code: code, chars: None, cmd: false, ctrl: true, opt: false, shift: false, esc_streak: 0 };
-                    match a.as_str() {
-                        "folder-key:ctrl-n" => {
-                            m.handle_key(key(45), false);
-                        }
-                        "folder-key:ctrl-p" => {
-                            m.handle_key(key(35), false);
-                        }
-                        "folder-copy:right" | "folder-copy:left" => {
-                            let from = if a == "folder-copy:right" {
-                                crate::views::compare::CompareSide::Left
-                            } else {
-                                crate::views::compare::CompareSide::Right
-                            };
-                            drop(m);
-                            if let Some(ui) = weak.load() {
-                                ui.compare_folder_transfer(from, false);
-                            }
-                        }
-                        other => {
-                            if let Some(err) = m.test_do(other) {
-                                drop(m);
-                                ctrl.log(&format!("compare action {other}: {err}"));
-                            }
-                        }
-                    }
-                }),
-            );
-            *self.ivars().action_picker.borrow_mut() = picker;
         }
 
         /// `showActions()` for the Jira list: the highlighted row.
@@ -10442,22 +9353,15 @@ mod daemon_ui {
         /// The rule-2 file context menu. A single row is the shared core
         /// (`crate::views::files::file_context_menu`); the rows this surface
         /// backs richer (Quick Look, the Copy/Cut/Duplicate block, the
-        /// Finder-titled `Compress “{name}”`, Compare) splice around it.
+        /// Finder-titled `Compress “{name}”`) splice around it.
         /// Multi-selection keeps its count-labelled assembly: the core is a
         /// single-path builder and there is no single-row rename for a set.
         fn files_row_menu(&self, x: f64, y: f64) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::views::files::{can_perform, Action};
-            let Some((paths, ctx, rows_sel)) = self.files_surface(|b| {
+            let Some((paths, ctx)) = self.files_surface(|b| {
                 let ctx = b.perm_context(pasteboard_file_paths().len());
-                let sel: Vec<(String, bool)> = b
-                    .list
-                    .selected_rows()
-                    .into_iter()
-                    .filter(|&i| !b.list.rows[i].is_parent())
-                    .map(|i| (b.list.rows[i].path.clone(), b.list.rows[i].is_dir))
-                    .collect();
-                (b.selected_paths(), ctx, sel)
+                (b.selected_paths(), ctx)
             }) else {
                 return;
             };
@@ -10522,24 +9426,6 @@ mod daemon_ui {
                 {
                     let ps = paths.clone();
                     entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&ps)));
-                }
-                if rows_sel.len() == 2 && rows_sel[0].1 == rows_sel[1].1 {
-                    let (l, r) = (rows_sel[0].0.clone(), rows_sel[1].0.clone());
-                    let dirs = rows_sel[0].1;
-                    let w = weak.clone();
-                    entries.push(MenuEntry::Separator);
-                    entries.push(MenuEntry::item("Compare", move || {
-                        let Some(ui) = w.load() else { return };
-                        ui.ivars().controller.open(SlotView::Compare);
-                        ui.present(SlotView::Compare);
-                        ui.compare_with(|m| {
-                            if dirs {
-                                m.open_folders(&l, &r);
-                            } else {
-                                m.open_pair(Some(&l), Some(&r));
-                            }
-                        });
-                    }));
                 }
                 entries.push(MenuEntry::Separator);
                 entries.push(MenuEntry::item(
@@ -11356,13 +10242,6 @@ mod daemon_ui {
                 SlotView::Ai => {
                     self.ai_surface(|a| a.view.set_rail(on));
                 }
-                SlotView::Compare => {
-                    let st = self.ivars().state.borrow();
-                    if let Some(s) = st.as_ref().and_then(|s| s.compare.as_ref()) {
-                        s.chrome().set_rail(on);
-                        s.invalidate();
-                    }
-                }
                 _ => {}
             }
         }
@@ -11410,7 +10289,6 @@ mod daemon_ui {
             let mut files_state = None;
             let mut jira_state = None;
             let mut conf_w = None;
-            let mut compare_w = None;
             {
                 let state = self.ivars().state.borrow();
                 if let Some(st) = state.as_ref() {
@@ -11427,7 +10305,6 @@ mod daemon_ui {
                         jira_state = Some(v);
                     }
                     conf_w = st.confluence.as_ref().map(|cs| cs.view.sidebar_width());
-                    compare_w = st.compare.as_ref().map(|cs| cs.sidebar_width());
                 }
             }
             if let Some(v) = files_state {
@@ -11444,11 +10321,6 @@ mod daemon_ui {
                 self.ivars()
                     .controller
                     .set_view_state(SlotView::Confluence, json!({ "sidebarWidth": w }));
-            }
-            if let Some(w) = compare_w {
-                self.ivars()
-                    .controller
-                    .set_view_state(SlotView::Compare, json!({ "sidebarWidth": w }));
             }
         }
 
@@ -11517,12 +10389,6 @@ mod daemon_ui {
                     let state = self.ivars().state.borrow();
                     if let Some(cs) = state.as_ref().and_then(|st| st.confluence.as_ref()) {
                         cs.view.set_sidebar_width(width);
-                    }
-                }
-                SlotView::Compare | SlotView::CompareText => {
-                    let state = self.ivars().state.borrow();
-                    if let Some(cs) = state.as_ref().and_then(|st| st.compare.as_ref()) {
-                        cs.set_sidebar_width(width);
                     }
                 }
                 _ => {}
@@ -11614,20 +10480,6 @@ mod daemon_ui {
                             self.wire_inspector_divider(&view);
                             st.jira = Some((list, view));
                             root
-                        } else if matches!(v, SlotView::Compare | SlotView::CompareText) {
-                            st.compare
-                                .get_or_insert_with(|| {
-                                    let surface = crate::views::compare::CompareSurface::build(mtm);
-                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                                    surface.set_on_event(Box::new(move |ev| {
-                                        if let Some(ui) = weak.load() {
-                                            ui.compare_event(ev);
-                                        }
-                                    }));
-                                    self.wire_sidebar_divider(SlotView::Compare, &surface.divider());
-                                    surface
-                                })
-                                .content_view()
                         } else {
                             placeholder(mtm, v)
                         };
@@ -11684,8 +10536,6 @@ mod daemon_ui {
                     SlotView::Files => &["files-filter"],
                     SlotView::Confluence => &["search"],
                     SlotView::Ai => &["input"],
-                    // A session's diff / tree, else the start page's path box.
-                    SlotView::Compare | SlotView::CompareText => &["diff", "tree", "left-path"],
                     v if v.is_jira() => &["search"],
                     _ => &[],
                 };
@@ -11848,7 +10698,6 @@ mod daemon_ui {
                 jira: None,
                 confluence: None,
                 ai: None,
-                compare: None,
                 prefix: popup::PrefixState::new(),
                 palette: None,
                 switcher: None,
@@ -11874,7 +10723,6 @@ mod daemon_ui {
             SlotView::Files => "files",
             SlotView::Confluence => "confluence",
             SlotView::Ai => "ai",
-            SlotView::Compare | SlotView::CompareText => "compare",
             _ => "jira",
         }
     }
@@ -11894,7 +10742,7 @@ mod daemon_ui {
     }
 
     /// The header nav icon per view (`filesNavIcon`,
-    /// `jiraNavIcon`, `confluenceNavIcon`, `compareNavIcon`, `aiNavIcon`):
+    /// `jiraNavIcon`, `confluenceNavIcon`, `aiNavIcon`):
     /// the configured image file, else Swift's glyph fallback.
     fn nav_icon_image(
         v: SlotView,
@@ -11910,9 +10758,6 @@ mod daemon_ui {
             SlotView::Files => named_image("NSFolder")
                 .unwrap_or_else(|| glyph_icon("folder.fill", "F", jira_accent, 32.0)),
             SlotView::Confluence => glyph_icon("book.pages", "C", jira_accent, 32.0),
-            SlotView::Compare | SlotView::CompareText => {
-                glyph_icon("arrow.left.arrow.right", "⇆", srgb(0.53, 0.75, 0.95), 32.0)
-            }
             SlotView::Ai => glyph_icon("sparkles", "✦", srgb(0.72, 0.56, 0.98), 32.0),
             _ => glyph_icon("ticket", "J", jira_accent, 32.0),
         }
@@ -12324,41 +11169,13 @@ mod tests {
     /// the whole test body.
     static CONF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// APP-BUGS #16: with the compare session sidebar focused, Ctrl+N / Ctrl+P
-    /// must reach the compare model (next / previous difference) instead of
-    /// the rail's own list keys. This pins the view gate + key class the
-    /// router consults before `SidebarView::handle_nav_key`.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn compare_jump_chords_route_before_the_rail() {
-        let key = |code: u16, ctrl: bool, cmd: bool| crate::ui::popup::KeyInput {
-            key_code: code,
-            chars: None,
-            cmd,
-            ctrl,
-            opt: false,
-            shift: false,
-            esc_streak: 0,
-        };
-        assert!(compare_before_rail(Some(SlotView::Compare), &key(45, true, false)));
-        assert!(compare_before_rail(Some(SlotView::CompareText), &key(35, true, false)));
-        // Only the compare views, and only the diff-jump chords: arrows (and
-        // modified forms the model does not claim) stay with the focused rail.
-        assert!(!compare_before_rail(Some(SlotView::Jira), &key(45, true, false)));
-        assert!(!compare_before_rail(Some(SlotView::Files), &key(35, true, false)));
-        assert!(!compare_before_rail(None, &key(45, true, false)));
-        assert!(!compare_before_rail(Some(SlotView::Compare), &key(125, false, false)));
-        assert!(!compare_before_rail(Some(SlotView::Compare), &key(45, false, false)));
-        assert!(!compare_before_rail(Some(SlotView::Compare), &key(45, true, true)));
-    }
-
     /// Take `CONF_ENV_LOCK`, surviving a poisoned mutex (a panicking test
     /// leaves no inconsistent state — the lock guards nothing but ordering).
     fn lock_conf_env() -> std::sync::MutexGuard<'static, ()> {
         CONF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    const REQUIRED: [&str; 19] = [
+    const REQUIRED: [&str; 18] = [
         "view",
         "visible",
         "active",
@@ -12372,7 +11189,6 @@ mod tests {
         "paletteCommands",
         "pane",
         "screenshot",
-        "compare",
         "paneShot",
         "activations",
         "frontmostPid",
@@ -12523,12 +11339,12 @@ mod tests {
     #[test]
     fn cycle_walks_the_header_views_both_ways() {
         use SlotView::*;
-        let views = [Files, Jira, Confluence, Compare, Ai];
+        let views = [Files, Jira, Confluence, Ai];
         assert_eq!(cycle_target(&views, Some(Files), 1), Some(Jira));
         assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Files), "wraps forward");
         assert_eq!(cycle_target(&views, Some(Files), -1), Some(Ai), "wraps back");
         assert_eq!(cycle_target(&views, Some(Detail), 1), Some(Confluence), "a Jira sub view is Jira");
-        assert_eq!(cycle_target(&views, Some(CompareText), -1), Some(Confluence));
+        assert_eq!(cycle_target(&views, Some(Releases), -1), Some(Files), "a Jira sub view counts as Jira");
         assert_eq!(cycle_target(&views, None, 1), Some(Files));
         assert_eq!(cycle_target(&[], Some(Files), 1), None);
 
@@ -12536,7 +11352,7 @@ mod tests {
         c.registry_mut().set_nav(vec![
             (Files, "Files".into(), None),
             (Jira, "Jira".into(), None),
-            (Compare, "Compare".into(), None),
+            (Confluence, "Confluence".into(), None),
             (Ai, "AI".into(), None),
         ]);
         c.open(Files);
@@ -12545,11 +11361,11 @@ mod tests {
             assert_eq!(c.do_action("cycle"), None);
             seen.push(c.current().unwrap());
         }
-        assert_eq!(seen, [Jira, Compare, Ai, Files]);
+        assert_eq!(seen, [Jira, Confluence, Ai, Files]);
         assert_eq!(c.do_action("cycle-back"), None);
         assert_eq!(c.current(), Some(Ai));
         assert_eq!(c.do_action("cycle-back"), None);
-        assert_eq!(c.current(), Some(Compare));
+        assert_eq!(c.current(), Some(Confluence));
     }
 
     #[test]
@@ -12578,8 +11394,8 @@ mod tests {
     fn dispatch_unknown_delegates_to_registry() {
         let mut c = controller();
         c.registry_mut()
-            .register_test_do(|a| (a == "compare:open").then(|| json!({ "ok": true })));
-        assert_eq!(c.do_action("compare:open"), Some(json!({ "ok": true })));
+            .register_test_do(|a| (a == "custom:open").then(|| json!({ "ok": true })));
+        assert_eq!(c.do_action("custom:open"), Some(json!({ "ok": true })));
         assert_eq!(
             c.do_action("totally-unknown").unwrap()["error"],
             json!("unknown action totally-unknown")
@@ -13216,9 +12032,6 @@ enabled = true
 [ai]
 enabled = true
 
-[compare]
-enabled = true
-
 [screenshot]
 enabled = true
 ";
@@ -13228,8 +12041,8 @@ enabled = true
         let ids: Vec<i64> = c.registry().nav_icons().iter().map(|n| n.id).collect();
         assert_eq!(
             ids,
-            vec![64, 61, 65, 67, 66],
-            "files / jira / confluence / compare / ai (Swift navIcons)"
+            vec![64, 61, 65, 66],
+            "files / jira / confluence / ai (Swift navIcons)"
         );
 
         let titles: Vec<String> =
@@ -13241,99 +12054,23 @@ enabled = true
                 "screenshot",
                 "Confluence",
                 "AI",
-                "Compare",
                 "Kitchen Sink",
             ],
             "commands.toml rows, then the enabled slot commands and the window"
         );
 
-        assert!(c.compare_model().is_some(), "compare handle held");
         assert!(c.screenshot_controller().is_some(), "screenshot handle held");
 
-        assert_eq!(c.do_action("compare:start"), None, "handled: falls through to state");
+        assert_eq!(c.do_action("compare:start").unwrap()["error"], json!("unknown action compare:start"));
         assert_eq!(c.do_action("screenshot:close"), None, "handled: falls through to state");
 
         let mut off = controller();
         off.register_views_from_text("");
         let ids: Vec<i64> = off.registry().nav_icons().iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec![64, 61], "confluence / compare / ai stay hidden");
-        assert!(off.compare_model().is_none());
+        assert_eq!(ids, vec![64, 61], "confluence / ai stay hidden");
         let titles: Vec<String> =
             off.registry().palette_commands().iter().map(|p| p.title.clone()).collect();
         assert_eq!(titles, vec!["Kitchen Sink"], "no commands -> just the window");
-    }
-
-    #[test]
-    fn compare_open_sub_and_back() {
-        // `do:compare:open[:sub]:LEFT|RIGHT` presents the view and loads the
-        // pair; `back` returns from the compareText sub-view (Swift
-        // `compareTestDo`). The pair load decodes through the Python helper —
-        // skip when it is unavailable (the view transitions still run).
-        let mut c = controller();
-        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
-        let helper = crate::app::python_helper::PythonHelper::shared();
-        if !crate::app::python_helper::lib_has_helper(&lib) {
-            return;
-        }
-        helper.configure(&lib);
-        if helper.call_default("ping", json!({})).is_err() {
-            eprintln!("skipping compare_open test: python helper unavailable");
-            return;
-        }
-        c.register_views_from_text("[compare]\nenabled = true\n");
-        if c.compare_model().is_none() {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("ws-host-compare-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let left = dir.join("left.txt");
-        std::fs::write(&left, "a\nb\nc\n").unwrap();
-        let one = format!("compare:open:{}", left.display());
-        assert_eq!(c.do_action(&one), None);
-        let s = c.state_json();
-        assert_eq!(s["view"], json!("compare"));
-        assert_eq!(s["visible"], json!(true));
-        assert!(s["compare"]["current"]["sections"].as_i64().unwrap() > 0, "{s}");
-        assert_eq!(s["compare"]["sub"], json!(false));
-
-        let sub = format!("compare:open-sub:{}", left.display());
-        assert_eq!(c.do_action(&sub), None);
-        let s = c.state_json();
-        assert_eq!(s["view"], json!("compareText"));
-        assert_eq!(s["compare"]["sub"], json!(true));
-
-        assert_eq!(c.do_action("compare:back"), None);
-        let s = c.state_json();
-        assert_eq!(s["view"], json!("compare"));
-        assert_eq!(s["compare"]["sub"], json!(false));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn compare_open_rejects_a_missing_path() {
-        // `compare:open:[sub]:LEFT|RIGHT` must refuse a path that does not exist
-        // and open nothing, for both the pair and the sub-view form.
-        let mut c = controller();
-        c.register_views_from_text("[compare]\nenabled = true\n");
-        if c.compare_model().is_none() {
-            return;
-        }
-        let missing = "/nonexistent/kitchen-sink-wave3/no-such-file";
-        for verb in ["compare:open", "compare:open-sub"] {
-            let action = format!("{verb}:{missing}|/etc/hosts");
-            let err = c.do_action(&action).unwrap();
-            assert_eq!(
-                err["error"],
-                json!(format!("compare: no such path: {missing}")),
-                "{action}"
-            );
-            assert_eq!(c.current(), None, "{action} must open nothing");
-        }
-        // A missing right-hand path is refused the same way.
-        let action = format!("compare:open:/etc/hosts|{missing}");
-        let err = c.do_action(&action).unwrap();
-        assert_eq!(err["error"], json!(format!("compare: no such path: {missing}")));
-        assert_eq!(c.current(), None);
     }
 
     #[test]
@@ -13438,13 +12175,14 @@ enabled = true
         // writes the owner's real NSUserDefaults (`sidebarRail.<view>`),
         // which tests stay out of (see settings.rs's ignored round-trip).
         let c = controller();
-        for v in ["files", "jira", "confluence", "ai", "compare"] {
+        for v in ["files", "jira", "confluence", "ai"] {
             let r = c.do_action(&format!("rail:{v}")).unwrap();
             assert_eq!(r["view"], json!(v));
             assert!(r["rail"].is_boolean(), "read on '{v}': {r}");
         }
         // Views without a sidebar error; so do bad modes.
         assert!(c.do_action("rail:detail").unwrap()["error"].is_string());
+        assert!(c.do_action("rail:compare").unwrap()["error"].is_string(), "the compare view is gone");
         assert!(c.do_action("rail:jira:sideways").unwrap()["error"].is_string());
     }
 
@@ -13530,9 +12268,9 @@ enabled = true
         // Mirrors the shipped commands.toml: the views are listed (their
         // labels show), `in-palette = false` sections (screenshot / terminal)
         // stay out, and palette-first rows lead (the live daemon now lists the
-        // views as well as the tools). The skip-listed views (confluence / ai /
-        // compare) are added by their dedicated blocks, so each must appear
-        // exactly once.
+        // views as well as the tools). The skip-listed views (confluence / ai)
+        // are added by their dedicated blocks, so each must appear exactly
+        // once.
         let fixture = "\
 [filefast]
 enabled = true
@@ -13570,10 +12308,6 @@ label = \"Confluence\"
 [ai]
 enabled = true
 label = \"AI\"
-
-[compare]
-enabled = true
-label = \"Compare\"
 ";
         let mut c = controller();
         c.register_views_from_text(fixture);
@@ -13589,13 +12323,12 @@ label = \"Compare\"
                 "Health Checks",
                 "Confluence",
                 "AI",
-                "Compare",
                 "Kitchen Sink",
             ]
         );
         // The dedicated `listed()` blocks are the only place a view could be
         // added twice — assert each one shows up exactly once.
-        for title in ["Jira", "Confluence", "AI", "Compare"] {
+        for title in ["Jira", "Confluence", "AI"] {
             assert_eq!(
                 titles.iter().filter(|t| *t == title).count(),
                 1,
@@ -13608,7 +12341,7 @@ label = \"Compare\"
             c.registry().nav_icons().iter().map(|n| n.tip.as_str()).collect();
         assert_eq!(
             nav_tips,
-            vec!["Files", "Jira", "Confluence", "Compare", "AI"]
+            vec!["Files", "Jira", "Confluence", "AI"]
         );
     }
 

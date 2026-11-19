@@ -1213,39 +1213,6 @@ pub fn config_value_problem(section: &str, key: &str, value: &str) -> Option<Str
             _ => {}
         }
     }
-    if section == "compare" {
-        match key {
-            "content" => {
-                return if ["auto", "always", "never"].contains(&value.to_lowercase().as_str()) {
-                    None
-                } else {
-                    Some(format!("'{value}' is not one of auto | always | never"))
-                };
-            }
-            "gutter-arrows" => {
-                return if ["hover", "always", "off"].contains(&value.to_lowercase().as_str()) {
-                    None
-                } else {
-                    Some(format!("'{value}' is not one of hover | always | off"))
-                };
-            }
-            "recent" => {
-                return match value.parse::<i64>() {
-                    Ok(n) if (0..=500).contains(&n) => None,
-                    _ => Some(format!("{value}: 0…500 (recent pairs kept)")),
-                };
-            }
-            "ignore-leading-ws" | "ignore-trailing-ws" | "ignore-embedded-ws" | "ignore-case"
-            | "ignore-line-endings" | "ignore-blank-lines" | "use-gitignore" => {
-                return if config_text::tri(Some(value)).is_none() {
-                    Some(format!("'{value}' is not true/false"))
-                } else {
-                    None
-                };
-            }
-            _ => {}
-        }
-    }
     if section == "screenshot" {
         match key {
             "return" => {
@@ -1970,12 +1937,6 @@ mod tests {
             config_value_problem("jira", "columns", "key:Key:10:left:bogus").as_deref(),
             Some("'key' flag 'bogus' is not filter | sort")
         );
-        // compare
-        assert_eq!(
-            config_value_problem("compare", "content", "sometimes").as_deref(),
-            Some("'sometimes' is not one of auto | always | never")
-        );
-        assert_eq!(config_value_problem("compare", "content", "always"), None);
         // screenshot
         assert_eq!(
             config_value_problem("screenshot", "return", "none").as_deref(),
@@ -2012,7 +1973,6 @@ mod tests {
             config_value_problem("prettyprint", "syntax-highlight", "sometimes").as_deref(),
             Some("'sometimes' is not true/false")
         );
-        assert_eq!(config_value_problem("compare", "use-gitignore", "zzz").as_deref(), Some("'zzz' is not true/false"));
     }
 
     #[test]

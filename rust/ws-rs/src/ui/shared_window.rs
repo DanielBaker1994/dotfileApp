@@ -35,17 +35,15 @@ pub const NAV_BACK: i64 = nav::BACK;
 pub const NAV_FILES: i64 = nav::FILES;
 pub const NAV_CONFLUENCE: i64 = nav::CONFLUENCE;
 pub const NAV_AI: i64 = nav::AI;
-pub const NAV_COMPARE: i64 = nav::COMPARE;
 
 /// `PopupChrome.workspaceBase` — workspace-switch header buttons start here.
 pub const WORKSPACE_BASE: i64 = 1000;
 
-pub const ESC_VIEWS: [SlotView; 5] = [
+pub const ESC_VIEWS: [SlotView; 4] = [
     SlotView::Files,
     SlotView::Ai,
     SlotView::Jira,
     SlotView::Confluence,
-    SlotView::Compare,
 ];
 
 pub fn is_esc_view(v: SlotView) -> bool {
@@ -58,7 +56,6 @@ pub fn nav_on(v: SlotView) -> Option<i64> {
         SlotView::Files => Some(NAV_FILES),
         SlotView::Confluence => Some(NAV_CONFLUENCE),
         SlotView::Ai => Some(NAV_AI),
-        SlotView::Compare | SlotView::CompareText => Some(NAV_COMPARE),
         v if v.is_jira() => Some(NAV_JIRA),
         _ => None,
     }
@@ -404,22 +401,10 @@ impl<H: SharedWindowHost> SharedWindow<H> {
                     self.stack.push(cur);
                 }
             } else {
-                self.stack = if v.is_jira() {
-                    vec![SlotView::Jira]
-                } else if v == SlotView::CompareText {
-                    vec![SlotView::Compare]
-                } else {
-                    Vec::new()
-                };
+                self.stack = if v.is_jira() { vec![SlotView::Jira] } else { Vec::new() };
             }
         } else {
-            self.stack = if v.is_jira() {
-                vec![SlotView::Jira]
-            } else if v == SlotView::CompareText {
-                vec![SlotView::Compare]
-            } else {
-                Vec::new()
-            };
+            self.stack = if v.is_jira() { vec![SlotView::Jira] } else { Vec::new() };
         }
         self.stack.retain(|x| *x != v);
         self.present(v, None);
@@ -428,7 +413,7 @@ impl<H: SharedWindowHost> SharedWindow<H> {
     /// `back(esc:)`.
     pub fn back(&mut self, esc: bool) {
         while let Some(prev) = self.stack.pop() {
-            if self.host.has_member(prev) || prev == SlotView::Jira || prev == SlotView::Compare {
+            if self.host.has_member(prev) || prev == SlotView::Jira {
                 self.open(prev);
                 return;
             }
@@ -436,8 +421,6 @@ impl<H: SharedWindowHost> SharedWindow<H> {
         if let Some(cur) = self.current {
             if cur.is_jira() && cur != SlotView::Jira {
                 self.open(SlotView::Jira);
-            } else if cur == SlotView::CompareText {
-                self.open(SlotView::Compare);
             } else if esc {
                 self.escape_at_top(cur);
             } else {
@@ -469,13 +452,7 @@ impl<H: SharedWindowHost> SharedWindow<H> {
             self.guest = None;
         }
         if self.last == v {
-            self.last = if v.is_jira() {
-                SlotView::Jira
-            } else if v == SlotView::CompareText {
-                SlotView::Compare
-            } else {
-                SlotView::Files
-            };
+            self.last = if v.is_jira() { SlotView::Jira } else { SlotView::Files };
         }
         if self.last_jira == v {
             self.last_jira = SlotView::Jira;
@@ -517,11 +494,6 @@ impl<H: SharedWindowHost> SharedWindow<H> {
             NAV_AI => {
                 if self.current != Some(SlotView::Ai) {
                     self.open(SlotView::Ai);
-                }
-            }
-            NAV_COMPARE => {
-                if self.current != Some(SlotView::Compare) {
-                    self.open(SlotView::Compare);
                 }
             }
             NAV_HOME => self.home(),
@@ -1103,14 +1075,6 @@ mod tests {
     }
 
     #[test]
-    fn back_from_compare_text_goes_to_compare() {
-        let mut w = window();
-        w.open(SlotView::CompareText);
-        w.back(false);
-        assert_eq!(w.current(), Some(SlotView::Compare));
-    }
-
-    #[test]
     fn back_esc_at_top_hides_only_when_configured() {
         let mut w = SharedWindow::new(MockHost::default().with_esc(SlotView::Ai, 1));
         w.open(SlotView::Ai);
@@ -1153,10 +1117,10 @@ mod tests {
     #[test]
     fn member_gone_adjusts_last_and_current() {
         let mut w = window();
-        w.open(SlotView::CompareText);
-        w.member_gone(SlotView::CompareText);
+        w.open(SlotView::Releases);
+        w.member_gone(SlotView::Releases);
         assert_eq!(w.current(), None);
-        assert_eq!(w.last(), SlotView::Compare);
+        assert_eq!(w.last(), SlotView::Jira);
     }
 
     #[test]
@@ -1186,7 +1150,6 @@ mod tests {
             SlotView::Ai,
             SlotView::Jira,
             SlotView::Confluence,
-            SlotView::Compare,
         ] {
             assert!(is_esc_view(v), "{v:?}");
         }
@@ -1195,7 +1158,6 @@ mod tests {
             SlotView::Releases,
             SlotView::Config,
             SlotView::Output,
-            SlotView::CompareText,
         ] {
             assert!(!is_esc_view(v), "{v:?}");
         }

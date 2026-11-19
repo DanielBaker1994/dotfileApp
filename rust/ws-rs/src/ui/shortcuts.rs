@@ -93,8 +93,8 @@ pub fn shared_groups(entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
         .collect()
 }
 
-/// `showShortcuts(on:view:)` per view: the view's own rows first (compare
-/// lists both Text and Folder Compare), then the shared groups.
+/// `showShortcuts(on:view:)` per view: the view's own rows first, then the
+/// shared groups.
 pub fn groups_for(view: &str, entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
     let mut out: Vec<ShortcutGroup> = Vec::new();
     let own: &[(&str, &str)] = match view {
@@ -102,7 +102,6 @@ pub fn groups_for(view: &str, entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
         "jira" => &[("Jira", "jira")],
         "confluence" => &[("Confluence", "confluence")],
         "ai" => &[("AI", "ai")],
-        "compare" => &[("Text Compare", "compare"), ("Folder Compare", "compare-folders")],
         "palette" => &[("Palette", "palette")],
         "paths" => &[("Paths", "paths")],
         "screenshot" => &[("Screenshot", "screenshot")],
@@ -413,8 +412,8 @@ x = 1
 "files: Cmd+C" = "copy the file"
 # a comment
 "sidebar: Return" = "open the row"
-"compare: Cmd+0" = "Home"
-"compare-folders: F5" = "scan again"
+"jira: Cmd+0" = "Home"
+"ai: F5" = "rerun"
 "all: Ctrl+B W" = "prefix: view switcher — \"where\""
 [prettyprint]
 "files: nope" = "not in shortcuts"
@@ -434,10 +433,9 @@ x = 1
         let g = groups_for("files", &e);
         let titles: Vec<&str> = g.iter().map(|g| g.0.as_str()).collect();
         assert_eq!(titles, ["Files", "Sidebars", "Everywhere"]);
-        let c = groups_for("compare", &e);
-        assert_eq!(c[0].0, "Text Compare");
-        assert_eq!(c[1].0, "Folder Compare");
-        assert_eq!(groups_for("jira", &e)[0].0, "Sidebars");
+        assert_eq!(groups_for("jira", &e)[0].0, "Jira");
+        assert_eq!(groups_for("ai", &e)[0].0, "AI");
+        assert!(groups_for("compare", &e).iter().all(|g| g.0 != "Text Compare"), "the compare view is gone");
     }
 
     #[test]
@@ -494,8 +492,9 @@ x = 1
             return;
         }
         let e = parse_entries(&text);
-        for v in ["all", "files", "jira", "compare", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
+        for v in ["all", "files", "jira", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
             assert!(!e.iter().any(|x| x.view == "notes"), "the notes view is gone");
+            assert!(!e.iter().any(|x| x.view.starts_with("compare")), "the compare view is gone");
             assert!(e.iter().any(|x| x.view == v), "no [shortcuts] rows for {v}");
         }
         // A shared `all:` row must not be copied into a view (guards against

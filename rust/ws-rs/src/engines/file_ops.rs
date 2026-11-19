@@ -2,7 +2,7 @@
 //!
 //! The ops + undo stack live in python; the handle crosses the helper as an
 //! integer. Callers pass an [`UndoStack`]; [`FileOps::shared`] is the browser's
-//! global stack (compare sessions own their own).
+//! global stack.
 
 use serde_json::{json, Value};
 use std::sync::OnceLock;

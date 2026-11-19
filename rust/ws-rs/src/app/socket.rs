@@ -6,7 +6,7 @@
 //! - `ping` -> close, no reply.
 //! - `state` -> state JSON + `\n`.
 //! - `do:ACTION` -> the action's JSON reply, or (no error) the full state JSON.
-//! - `reload` / `restart` / `screenshot\t…` / `compare\t…` / `pane-shot\t…` /
+//! - `reload` / `restart` / `screenshot\t…` / `pane-shot\t…` /
 //!   `window-shot\t…` -> one raw line when requested.
 //! - anything else -> `launch`, no reply.
 
@@ -40,19 +40,18 @@ const SEND_TIMEOUT_SECS: i64 = 5;
 const READ_MAX: usize = 2048;
 const LISTEN_BACKLOG: i32 = 64;
 
-const RAW_VERBS: [&str; 7] = [
+const RAW_VERBS: [&str; 6] = [
     "reload",
     "restart",
     "screenshot",
     "screenshot-permission",
-    "compare",
     "pane-shot",
     "window-shot",
 ];
 
 /// The reply side of one raw-verb connection: a dup of the client fd that the
 /// handler may answer now or later, from any thread (Swift keeps `cfd` open
-/// for `compare --wait`, screenshot and pane-shot replies). Dropping it
+/// for screenshot and pane-shot replies). Dropping it
 /// closes the connection.
 #[cfg(unix)]
 pub struct Reply {
@@ -84,7 +83,7 @@ impl Reply {
     }
 
     /// True once the client has hung up (EOF / hangup). Lets a deferred
-    /// handler stop waiting for an abandoned `compare --wait` instead of
+    /// handler stop waiting for an abandoned client instead of
     /// holding an fd and a thread until the window closes.
     pub fn peer_closed(&self) -> bool {
         let mut p = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
@@ -149,7 +148,7 @@ pub trait CommandHandler: Send + Sync {
     fn state_json(&self) -> Value;
     /// Handle a `do:` verb. `None` = no error: fall through to `state_json`.
     fn do_action(&self, action: &str) -> Option<Value>;
-    /// Handle a raw-verb request (`reload`, `screenshot`, `compare`, …).
+    /// Handle a raw-verb request (`reload`, `screenshot`, `pane-shot`, …).
     /// `None` = the request wants no reply (close silently).
     fn raw_request(&self, verb: &str, rest: &str) -> Option<String>;
     /// Take a raw verb asynchronously: keep `reply` to answer later (or drop
@@ -327,7 +326,7 @@ fn configure_conn(fd: RawFd) {
     // open after the server closed it (APP-BUGS #17).
     set_cloexec(fd);
     // On macOS an accepted socket inherits the listener's O_NONBLOCK: a reply
-    // larger than the socket buffer (~8 KB — a `state` with compare rows) then
+    // larger than the socket buffer (~8 KB — a big `state`) then
     // hits EAGAIN and is cut short. Replies are written blocking, bounded by
     // SO_SNDTIMEO so a stalled client cannot wedge the accept loop.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
@@ -949,11 +948,11 @@ mod tests {
         let h = Arc::new(EchoRaw::default());
         let path = temp_path("raw-args");
         let _s = CommandServer::start(&path, h.clone() as Arc<dyn CommandHandler>).unwrap();
-        let reply = request(&path, "compare\t--wait /a /b").unwrap().unwrap();
-        assert_eq!(reply, "compare:--wait /a /b");
+        let reply = request(&path, "screenshot\t--raw /a /b").unwrap().unwrap();
+        assert_eq!(reply, "screenshot:--raw /a /b");
         assert_eq!(
             h.seen.lock().unwrap().as_slice(),
-            &[("compare".to_string(), "--wait /a /b".to_string())]
+            &[("screenshot".to_string(), "--raw /a /b".to_string())]
         );
     }
 
@@ -983,7 +982,7 @@ mod tests {
                 Some("sync".to_string())
             }
             fn raw_deferred(&self, verb: &str, _rest: &str, reply: Reply) -> Option<Reply> {
-                if verb != "compare" {
+                if verb != "pane-shot" {
                     return Some(reply);
                 }
                 std::thread::spawn(move || {
@@ -996,7 +995,7 @@ mod tests {
         }
         let path = temp_path("raw-deferred");
         let _s = CommandServer::start(&path, Arc::new(Later) as Arc<dyn CommandHandler>).unwrap();
-        assert_eq!(request(&path, "compare\t--wait\t/a").unwrap().as_deref(), Some("done"));
+        assert_eq!(request(&path, "pane-shot\t--copy\t/a").unwrap().as_deref(), Some("done"));
         assert_eq!(request(&path, "reload").unwrap().as_deref(), Some("sync"), "handed back: sync path");
     }
 

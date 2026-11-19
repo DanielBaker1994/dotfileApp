@@ -75,11 +75,6 @@ case "${1:-all}" in
     vim-keys)
         rust_test panes::vim_search
         ;;
-    compare)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_compare.py"
-        rust_test views::compare
-        ;;
     settings)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_settings_hub.py"

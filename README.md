@@ -1,6 +1,6 @@
 # kitchen-sink
 
-A macOS app: AeroSpace switcher popup + files / Jira / Confluence / AI / compare views,
+A macOS app: AeroSpace switcher popup + files / Jira / Confluence / AI views,
 with a borders focused-window outline. Native AppKit app written in Rust
 (objc2; `rust/`), no runtime dependencies beyond what the installer brings.
 
@@ -93,7 +93,7 @@ menu, or pass a command. `./ws help` lists everything.
 ./ws                     # interactive menu
 ./ws build               # compile kitchen-sink.app + TCC re-grant + relaunch
 ./ws build --build-only  # compile + grant, do NOT launch
-./ws test config         # unit tests (any suite: compare, recent, …)
+./ws test config         # unit tests (any suite: recent, paths, …)
 ./ws test ui             # the UI suite
 ./ws doctor              # health check of the whole stack
 ./ws dmg                 # the distributable disk image
@@ -104,7 +104,7 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
 
 - `rust/ws-rs` — the app (`kitchen-sink` binary): `app/` host, socket, CLI
   client, config, Python helper client; `ui/` popup framework + shared
-  window; `views/` files, jira, confluence, AI, compare, screenshot, …;
+  window; `views/` files, jira, confluence, AI, screenshot, …;
   `engines/` pure logic; `panes/` pane focus + vim keys
 - `rust/swiftterm-shim` — the one Swift piece: a tiny `NSView` wrapper around
   the pinned SwiftTerm library for the embedded terminal

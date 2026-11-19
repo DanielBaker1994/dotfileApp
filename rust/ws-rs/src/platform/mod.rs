@@ -17,9 +17,6 @@ pub use capture::*;
 pub mod settings;
 pub use settings::*;
 
-pub mod dialog;
-pub use dialog::*;
-
 pub mod dispatch;
 pub use dispatch::*;
 

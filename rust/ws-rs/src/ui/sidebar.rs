@@ -4,7 +4,7 @@
 //! icon rows with a right-aligned meta / badge, the collapse-to-rail toggle
 //! at the bottom-left with an optional status dot + line, hover pills,
 //! wheel scrolling and an "+" add button. Files (PINNED / PLACES), Jira (MY
-//! WORK / PINNED / BOARDS / SYNCED), Confluence, Compare and AI (RULES)
+//! WORK / PINNED / BOARDS / SYNCED), Confluence and AI (RULES)
 //! draw their left column through this one view.
 
 use crate::ui::chrome::Rect;

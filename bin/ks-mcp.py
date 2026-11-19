@@ -7,7 +7,7 @@ Thin v1 surface (deliberately small; the Python cold path stays out):
     ks_state   read the daemon's full state JSON
     ks_do      run a `do:<action>` verb (mutating; hidden in read-only mode)
     ks_raw     allow-listed raw verbs:
-               screenshot | screenshot-permission | compare | pane-shot | window-shot
+               screenshot | screenshot-permission | pane-shot | window-shot
     ks_help    offline guide (do: actions, raw verbs, state fields); no daemon
 
 Point it at the live app (read-only recommended) or at an isolated headless
@@ -20,7 +20,7 @@ or `KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)`).
 Transport: newline-delimited JSON-RPC 2.0 on stdio (legacy MCP handshake:
 initialize → notifications/initialized → tools/list → tools/call). stdout is
 protocol-only; diagnostics go to stderr. Single-threaded: one slow call
-(`compare --wait`, an interactive screenshot) blocks the others.
+(an interactive screenshot) blocks the others.
 
 Socket resolution: --socket > $KS_SOCKET > $TMPDIR/ws-notes.sock.
 Read-only mode: --read-only or KS_MCP_READ_ONLY=1 hides `ks_do` and rejects it
@@ -42,7 +42,7 @@ SERVER_VERSION = "1.0.0"
 SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 LATEST_PROTOCOL = "2025-11-25"
 
-RAW_VERBS = ("screenshot", "screenshot-permission", "compare", "pane-shot", "window-shot")
+RAW_VERBS = ("screenshot", "screenshot-permission", "pane-shot", "window-shot")
 READ_ONLY_RAW_VERBS = ("screenshot-permission",)
 
 # The `do:` action grammar. It lives in one constant because clients that render
@@ -52,7 +52,7 @@ READ_ONLY_RAW_VERBS = ("screenshot-permission",)
 DO_ACTIONS = (
     "Valid actions — pass one of these: `open:<view>` or `show[:<view>]` "
     "(`files`, `jira`, `detail`, `releases`, `config`, `output`, "
-    "`confluence`, `ai`, `compare`, `compareText`; bare `show` re-presents the "
+    "`confluence`, `ai`; bare `show` re-presents the "
     "last view, or `jira` if none), `rebuild-card:<view>`, "
     "`cycle` / `cycle-back` (the next / previous header view; Files when none "
     "are registered), `hide`, `back` (returns to the previous view), `home`, "
@@ -68,10 +68,7 @@ DO_ACTIONS = (
     "`header-style:<quiet|flat|edge|stripe|tinted|glow|aurora>`, "
     "`esc-hides:<view>:on|off`, `hide-on-focus-loss:on|off`, "
     "`tool:<paths|prettyprint|filefast|health-checks|health|text-table>`, "
-    "`tool-close:<name>` (a non-panel name errors), `compare:<sub>` (e.g. "
-    "`next`, `prev`, `swap`, `reload`, `select:<n>`, "
-    "`filter:<all|diffs|same|context>`, `folder-open`), "
-    "`compare:open[:sub]:<left>|<right>` (both paths must exist), "
+    "`tool-close:<name>` (a non-panel name errors), "
     "`screenshot:<sub>`, `board:<sub>` (Jira board: `open:<id>`, `list`, "
     "`list-open:<id>`, `list-star:<id>`, `view:<board|sprint|mode>`, "
     "`sprint:<id>`, `mode:<columns|table>`, `pin`). "
@@ -91,8 +88,6 @@ RAW_HELP = (
     "- `window-shot` — capture the daemon's own shared window to a PNG with no "
     "overlay: args `--view <view>` (open it first), `--out <path.png>` (default "
     "a temp file), `--scale 1|2`. Replies the saved path.\n"
-    "- `compare` — the compare tool; args `--wait`, `--title1 T`, `--title2 T`, "
-    "then 1-2 paths.\n"
     "- `screenshot-permission` — reports `granted`/`denied`.\n"
     "WARNING: `screenshot` and `pane-shot` capture the real screen. "
     "`window-shot` captures only the daemon's own window. A headless sandbox "
@@ -117,7 +112,7 @@ STATE_HELP = (
     "- `lastKey` — the last `key:<spec>` recorded (\"\" when none).\n"
     "- `input` — `do:input:*` delivery: `posted`, `dropped`, `lastError`.\n"
     "Other keys: `active`, `keyWindow`, `escHides`, `hideOnFocusLoss`, `pane`, "
-    "`screenshot`, `compare`, `paneShot`, `terminalPanel`, `viewSwitcher`, "
+    "`screenshot`, `paneShot`, `terminalPanel`, `viewSwitcher`, "
     "`activations`, `frontmostPid`, `pid`."
 )
 
@@ -133,7 +128,6 @@ HEADLESS_HELP = (
 
 SOCKET_TIMEOUT = 5.0
 SCREENSHOT_RAW_TIMEOUT = 60.0
-COMPARE_WAIT_TIMEOUT = 300.0
 PANE_SHOT_TIMEOUT = 60.0
 WINDOW_SHOT_TIMEOUT = 60.0
 
@@ -315,14 +309,6 @@ class Server:
             if not text:
                 return error_result("screenshot-permission: no answer")
             return text_result(text)
-        if verb == "compare":
-            wait = "--wait" in raw_args
-            timeout = COMPARE_WAIT_TIMEOUT if wait else SOCKET_TIMEOUT
-            data, timed_out = send_and_read(self.sock, payload, timeout, "line")
-            text = data.decode("utf-8", "replace").strip()
-            if wait and not text:
-                return error_result(f"compare --wait: no reply within {timeout:.0f} s")
-            return self.raw_text_result(text or "ok")
         if verb == "window-shot":
             data, timed_out = send_and_read(self.sock, payload, WINDOW_SHOT_TIMEOUT, "line")
             text = data.decode("utf-8", "replace").strip()
@@ -426,11 +412,10 @@ class Server:
             },
         )
         raw_desc = (
-            "Raw socket verb (screenshot, window-shot, compare...). WARNING: screen capture.\n"
+            "Raw socket verb (screenshot, window-shot, pane-shot...). WARNING: screen capture.\n"
             "Send an allow-listed raw socket verb: `screenshot` (args like `-g` "
             "for geometry or `-r` for a raw PNG; interactive forms come up in the "
-            "app), `screenshot-permission` (granted/denied), `compare` (args "
-            "`--wait`, `--title1 T`, `--title2 T`, then 1-2 paths), `pane-shot` "
+            "app), `screenshot-permission` (granted/denied), `pane-shot` "
             "(args per `kitchen-sink pane-shot --help`), `window-shot` (capture "
             "the daemon's own shared window: `--view <view>`, `--out <path.png>`, "
             "`--scale 1|2`; replies the saved path). WARNING: `screenshot` "

@@ -37,8 +37,8 @@ focus or context, and always does what the keyboard expects.
 
 All three of these together; no single one leads:
 
-1. **One window replaces many.** Notes (nvim pane), files, Jira, Confluence,
-   AI, Compare (text and folder) are views of ONE shared window, switched
+1. **One window replaces many.** Files, Jira, Confluence and AI are views
+   of ONE shared window, switched
    with Ctrl+Tab and header icons. /screenshot, /paths, /filefast and
    /pane-shot are tool panels next to it.
 2. **Keyboard speed and reliability.** Hyper+N shows or hides it in tens of
@@ -64,7 +64,7 @@ All three of these together; no single one leads:
 ## Capabilities and Constraints
 
 - Views of the shared window: notes, files (Recent / Arrived), AI, Jira
-  (lists, detail, releases, Jira Config), Confluence search, Compare.
+  (lists, detail, releases, Jira Config), Confluence search.
   Tool panels: /screenshot (Flameshot-style, OCR Copy Text), /paths,
   /filefast, /prettyprint, /health-checks, /pane-shot.
 - Tool panels must never activate the app or bring the shared window with
@@ -80,7 +80,7 @@ All three of these together; no single one leads:
 
 ## Evidence on Hand
 
-- Specs: `PRD-compare.md`, `PRD-screenshot.md`, `PRD-settings-hub.md`.
+- Specs: `PRD-screenshot.md`, `PRD-settings-hub.md`.
   Agent and system docs: `AGENT_CONTEXT.md`.
 - Test suites under `Tests/` and `bin/run-tests.sh`, plus UI drivers
   `bin/ui-test.sh` and `bin/ui-test-focus.py`.

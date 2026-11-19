@@ -62,14 +62,12 @@ for the test strategy and how workers run these flows; the UI suites were delete
   `shown` plus a visual or independent check.
 - `views.notes.query` is always `""` (seeded at `host.rs:497`, never updated), so
   note-find match counts are not assertable.
-- `compare` exposes no per-session `differences` count; the runner recomputes one
-  (`compare.current.sections` / `compare.current.important`) with `difflib`.
 - The `Cmd+K` action picker and the `Cmd+/` shortcuts card have **no `state`
   representation** (host.rs:539-570) — visual oracles only.
 
 ## Flows
 
-45 flows, by feature: notes 6 · files 7 · compare 6 · view-switcher 2 ·
+45 flows, by feature: notes 6 · files 7 · view-switcher 2 ·
 view-cycling 1 · header-styles 1 · shortcuts-sheet 1 · action-picker 1 ·
 esc-hides 1 · hide-on-focus-loss 1 · terminal-drawer 1 · browser-drawer 1 ·
 pane-navigation 2 · vim-keys 1 · tools 4 · paths-shelf 2 · config-view 2 ·
@@ -90,18 +88,12 @@ output-view 1 · jira 2 · screenshot 1 · ai 1.
 | `files-rename` | files | Cmd+R renames the selected file, and a name with a space and an accent is accepted. | gui |
 | `files-new-folder` | files | Cmd+Shift+N creates a new folder in the current folder. | gui |
 | `files-hidden-toggle` | files | Cmd+Shift+. shows hidden (dot) files in the list. | gui |
-| `compare-text-open` | compare | Opening two text files shows a text compare with their differences. | gui |
-| `compare-text-diff-count` | compare | The differences the app shows match an independent line diff of the two files. | gui |
-| `compare-next-diff` | compare | Ctrl+N jumps to the next difference and Ctrl+P back to the previous one. | gui |
-| `compare-filter-switch` | compare | Cmd+2 shows only differences; Cmd+1 shows all rows. | gui |
-| `compare-swap-sides` | compare | Cmd+Opt+X swaps the left and right sides. | gui |
-| `compare-folder-open` | compare | Two folders open as a folder compare with per-status counts. | gui |
 | `switcher-open` | view-switcher | Ctrl+B W opens the view switcher listing the open windows. | gui |
 | `switcher-close-esc` | view-switcher | Esc closes only the switcher overlay, leaving the window under it visible (rule 6). | gui |
 | `cycle-views` | view-cycling | Ctrl+Tab cycles the shared window's views and back. | gui |
 | `header-style-set` | header-styles | Header styles change live; an unknown style is refused. | gui |
 | `shortcuts-sheet-visual` | shortcuts-sheet | Cmd+/ shows the shortcuts card for the current view. | gui |
-| `action-picker-visual` | action-picker | Cmd+K opens the action menu in Jira (it is wired only for Jira and Compare). | gui |
+| `action-picker-visual` | action-picker | Cmd+K opens the action menu in Jira (it is wired only for Jira). | gui |
 | `esc-hides-on` | esc-hides | With Esc Hides on for notes, one Esc hides the window. | gui |
 | `hide-on-focus-loss-state` | hide-on-focus-loss | Hide On Focus Loss reflects the setting and can be flipped at runtime. | gui |
 | `terminal-drawer` | terminal-drawer | The notes terminal drawer toggles open and closed. | gui |
@@ -133,9 +125,6 @@ run (`bin/ks-mcp-sandbox.sh` reseeds a missing `commands.toml` from the repo, so
 | --- | --- | --- |
 | notes folder + 3 notes | `notes/Alpha.md`, `notes/Beta.md`, `notes/Quill.md` | all `notes-*` |
 | Files root tree | `files/` with `README.txt`, `spaced name.txt`, `.hidden.txt`, `docs/reading.md`, `notes/deep.txt`, `empty/` | all `files-*` |
-| compare text pair | `compare/textL.txt`, `compare/textR.txt` | `compare-text-*`, `compare-next-diff`, `compare-filter-switch`, `compare-swap-sides` |
-| compare folder pair | `compare/left/{a.txt,common.txt,only_left.txt}`, `compare/right/{a.txt,common.txt}` | `compare-folder-open` |
-| identical pair | `compare/identicalL.txt`, `compare/identicalR.txt` | reserved (identical-file edge; not yet wired to a flow) |
 | jira cache dir | `.cache/kitchen-sink/jira_json/` (empty is fine for `jira-open`) | `jira-*` |
 | config tweak | `commands.toml` (`cfg-sandbox`) | every flow |
 
@@ -148,7 +137,6 @@ run (`bin/ks-mcp-sandbox.sh` reseeds a missing `commands.toml` from the repo, so
 | files | filename with a space and an accent | `files-rename` |
 | files | hidden (dot) files | `files-hidden-toggle` |
 | files | recursive filter `**` across nested folders | `files-recursive-search` |
-| compare | many-vs-few line changes grouped into hunks | `compare-text-diff-count` |
 | header-styles | invalid style value refused | `header-style-set` |
 | paths-shelf | out-of-range selection refused | `paths-select-out-of-range` |
 | jira | unimplemented board verb must error, not no-op | `jira-board-error` |
@@ -195,12 +183,6 @@ report them as known, not new):
   typed path, but Tab is mapped to list-selection wrap (popup.rs:649); this looks
   unported — a candidate bug, listed rather than asserted because the expected
   behaviour is genuinely ambiguous.
-- **Compare edit + save, find (`Cmd+F`/`Cmd+G`), go-to-line, folder
-  next/prev/sync/copy-move chords, `Cmd+K` folder menu.** The compare key handler
-  covers next/prev, filters, swap, save, copy and undo
-  (`rust/ws-rs/src/views/compare.rs:4067-4255`); the remaining documented rows
-  (commands.toml:495-536) were left for a follow-up. Compare find looks
-  unported (`current.find` is hardcoded `false`, compare.rs:4039).
 - **Palette (Hyper+S), `Cmd+K` picker rows, right-click menus.** Transient
   non-activating panels; the palette has a `state.palette` flag but the pickers
   and menus have no state (BACKLOG.md:87-90). Only `action-picker-visual`

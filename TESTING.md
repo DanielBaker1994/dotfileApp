@@ -4,7 +4,7 @@
 what they report and writes the result. It does not need to be a strong model if it follows this
 file. Paste the blocks marked **VERBATIM** into briefs unchanged.
 
-**Goal:** find real bugs in kitchen-sink's features (notes, nvim editing, files, compare, drawers,
+**Goal:** find real bugs in kitchen-sink's features (notes, nvim editing, files, drawers,
 palette, prose, keys) at low token cost. Hardening the MCP bridge or the socket is **not** the goal
 (that was waves 1–3 and they found almost no app bugs). Swift parity is not a goal.
 
@@ -183,7 +183,7 @@ sleep 0.5; ks state | jq .input        # {posted, dropped, lastError}; dropped>0
 
 Activation needs both calls: since macOS 14 an app can't make itself frontmost while another app is
 active, so `ks-input activate` (run from the terminal) brings it forward and `do:input:activate` makes a
-window key if none is (it keeps an existing key window, e.g. compare). Delivery is asynchronous: wait
+window key if none is (it keeps an existing key window, e.g. a panel). Delivery is asynchronous: wait
 ~0.3–1 s, then check the effect, not just the reply. Limits: code that
 polls the *hardware* modifier state or cursor position (not the event) won't see these; drag and scroll
 are not implemented yet (use `ks-input` for those).
@@ -248,7 +248,7 @@ through the app.
 ```bash
 python3 Tests/run_flows.py --list                          # the 45 flows
 python3 Tests/run_flows.py                                 # all flows; builds the working tree into a signed sandbox copy
-python3 Tests/run_flows.py --feature compare --repeat 3    # flakiness check
+python3 Tests/run_flows.py --feature files --repeat 3      # flakiness check
 python3 Tests/run_flows.py --replay $OUT/findings.jsonl    # triage: does each finding reproduce? (k/N)
 ```
 
@@ -297,11 +297,6 @@ Each lane fills the brief template (§6). "Par" = can run in parallel with other
 `Tests/mcp_verbs.json` happy cases. After each step: the socket answers, the reply is JSON, and these
 invariants hold: at most one `current` view, `visible` agrees with `windows`, frames have non-negative
 sizes, no panic in the log. Report the shortest failing prefix (re-run with the same seed, halve). Par.
-
-**H-CMP — compare against difflib.** Generate pairs of text files (empty, identical, CRLF vs LF, unicode,
-5000 lines, one-byte change, trailing newline only) and folder pairs (same size + different content,
-which is bug #14's case). Load each with `ks $'compare\t<a>\t<b>'`, read `state.compare.current`, and
-compare the counts with Python `difflib` / `filecmp.cmp(shallow=False)`. Par.
 
 **H-CFG — config fuzz.** Copy `commands.toml`, apply one mutation per case (missing section, wrong type,
 unknown key, huge value, duplicate key, unicode, empty file), send `reload`, then check: no panic, the

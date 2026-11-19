@@ -8,7 +8,6 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "macos")]
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -23,7 +22,6 @@ use crate::engines::screenshot_annotations::ShotArgs;
 /// `ipcSocketTimeout`: how long a fire-and-forget launch message may take to connect.
 const IPC_TIMEOUT: Duration = Duration::from_secs(1);
 
-const COMPARE_USAGE: &str = "usage: kitchen-sink compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]";
 
 /// What `main` does after the client pass.
 pub enum Outcome {
@@ -255,7 +253,6 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
             open_command = Some("screenshot".to_string());
         }
         Some("pane-shot") => return Outcome::Exit(pane_shot(&sock, &args[2..])),
-        Some("compare") if args.len() > 2 => return Outcome::Exit(compare(&sock, paths, &args[2..])),
         Some("term") => {
             return Outcome::Exit(if send_launch_message(&sock, "term") { 0 } else { not_running() });
         }
@@ -343,122 +340,12 @@ fn pane_shot(sock: &str, rest: &[String]) -> i32 {
     0
 }
 
-/// The `compare\t…` message for `kitchen-sink compare` argv (paths made
-/// absolute and standardized, tabs in titles flattened); `None` = usage error.
-pub fn compare_message(rest: &[String], cwd: &str) -> Option<(String, bool)> {
-    let mut words: Vec<String> = Vec::new();
-    let mut wait = false;
-    let mut paths = 0;
-    let mut i = 0;
-    while i < rest.len() {
-        let w = &rest[i];
-        if w == "--wait" {
-            wait = true;
-        } else if (w == "--title1" || w == "--title2") && i + 1 < rest.len() {
-            words.push(w.clone());
-            words.push(rest[i + 1].replace('\t', " "));
-            i += 1;
-        } else if w.starts_with('-') && w.len() > 1 {
-            return None;
-        } else {
-            let abs = if w.starts_with('/') { w.clone() } else { format!("{cwd}/{w}") };
-            words.push(standardize_path(&abs));
-            paths += 1;
-        }
-        i += 1;
-    }
-    if !(1..=2).contains(&paths) {
-        return None;
-    }
-    let mut parts = vec!["compare".to_string()];
-    if wait {
-        parts.push("--wait".to_string());
-    }
-    parts.extend(words);
-    Some((parts.join("\t"), wait))
-}
-
-/// `NSString.standardizingPath` for absolute paths: drop `.`, resolve `..`.
-fn standardize_path(p: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for part in p.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            x => out.push(x),
-        }
-    }
-    format!("/{}", out.join("/"))
-}
-
-fn compare(sock: &str, paths: &Paths, rest: &[String]) -> i32 {
-    let cwd = std::env::current_dir()
-        .map(|d| d.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "/".to_string());
-    let Some((msg, wait)) = compare_message(rest, &cwd) else {
-        eprintln!("{COMPARE_USAGE}");
-        return 2;
-    };
-    let deliver = || -> bool {
-        if wait {
-            send_request(sock, &msg, Duration::from_secs(7 * 86400)).is_some()
-        } else {
-            send_launch_message(sock, &msg)
-        }
-    };
-    let mut ok = deliver();
-    if !ok {
-        // Cold start in the background, then retry for 15 s.
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(bundle) = &paths.app_bundle_path {
-                if Path::new(bundle).exists() {
-                    let _ = std::process::Command::new("/usr/bin/open").args(["-g", bundle]).status();
-                }
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = paths;
-            let _ = spawn_self_detached(None);
-        }
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !ok && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(200));
-            if send_launch_message(sock, "ping") {
-                ok = deliver();
-            }
-        }
-    }
-    if ok {
-        0
-    } else {
-        not_running()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn v(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn compare_message_matches_main_swift() {
-        let (msg, wait) =
-            compare_message(&v(&["--wait", "--title1", "a\tb", "x/../a.txt", "/abs/./b.txt"]), "/cwd").unwrap();
-        assert!(wait);
-        assert_eq!(msg, "compare\t--wait\t--title1\ta b\t/cwd/a.txt\t/abs/b.txt");
-        let (msg, wait) = compare_message(&v(&["one.txt"]), "/w").unwrap();
-        assert!(!wait);
-        assert_eq!(msg, "compare\t/w/one.txt");
-        assert!(compare_message(&v(&["--bogus", "a"]), "/w").is_none(), "unknown flag");
-        assert!(compare_message(&v(&["a", "b", "c"]), "/w").is_none(), "three paths");
-        assert!(compare_message(&v(&["--wait"]), "/w").is_none(), "no paths");
     }
 
     #[test]

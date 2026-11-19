@@ -2,8 +2,6 @@
 
 pub mod ai;
 pub mod ai_view;
-pub mod compare;
-pub mod compare_view;
 pub mod confluence;
 pub mod confluence_view;
 pub mod file_popup;
