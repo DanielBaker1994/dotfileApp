@@ -787,6 +787,7 @@ impl PathsWindow {
         scroll.setAutohidesScrollers(true);
         scroll.setDrawsBackground(false);
         let list = crate::views::files_view::FileListView::new(mtm, colors, false);
+        list.refuse_drops();
         scroll.setDocumentView(Some(&list));
         content.addSubview(&scroll);
         let empty = NSTextField::labelWithString(&NSString::from_str(""), mtm);

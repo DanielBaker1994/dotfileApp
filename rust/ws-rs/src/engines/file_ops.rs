@@ -167,7 +167,18 @@ impl FileOps {
         let params = json!({
             "paths": paths, "into": into, "move": move_, "stack": undo.handle()
         });
-        outcome(fo_call("fileops.transfer", params))
+        // Copies run as long as the bytes take (a multi-GB file, a network
+        // mount): callers run this off the main thread, so wait up to 6 h,
+        // and report a timeout / helper loss instead of a silent success.
+        match crate::app::python_helper::PythonHelper::shared().call(
+            "fileops.transfer",
+            params,
+            Duration::from_secs(6 * 3600),
+            Duration::from_secs(5),
+        ) {
+            Ok(v) => Outcome::from_json(&v),
+            Err(e) => Outcome { changes: Vec::new(), failed: Some(format!("Transfer failed: {e}")) },
+        }
     }
 
     pub fn duplicate(paths: &[String], undo: &UndoStack) -> Outcome {

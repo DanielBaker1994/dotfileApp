@@ -183,9 +183,13 @@ mod appkit {
         /// The preview-pane list reports `PreviewOpen` instead of clicks.
         preview: Cell<bool>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
-        /// Mouse-down point (window coords) + row, armed until the drag
-        /// threshold is crossed or the button goes up.
-        drag_origin: Cell<Option<(NSPoint, usize)>>,
+        /// Mouse-down point (window coords), row and that row's path, armed
+        /// until the drag threshold is crossed or the button goes up. The
+        /// path is what gets dragged: the Recent / Arrived lists and the
+        /// "Find Recent Files" shelf repaint live (a download finishing, a
+        /// zip auto-extracting), so the row index can point at another file
+        /// by the time the pointer moves.
+        drag_origin: RefCell<Option<(NSPoint, usize, String)>>,
         /// A plain click on an already-marked row is held back until mouse-up
         /// so dragging a multi-selection does not collapse it first.
         pending_click: Cell<Option<(usize, bool)>>,
@@ -260,7 +264,8 @@ mod appkit {
                 }
                 let plain = !mods.contains(NSEventModifierFlags::Command)
                     && !mods.contains(NSEventModifierFlags::Shift);
-                self.ivars().drag_origin.set(Some((e.locationInWindow(), row)));
+                let path = self.ivars().rows.borrow().get(row).map(|r| r.path.clone()).unwrap_or_default();
+                *self.ivars().drag_origin.borrow_mut() = Some((e.locationInWindow(), row, path));
                 let in_multi = {
                     let m = self.ivars().marked.borrow();
                     m.len() > 1 && m.contains(&row)
@@ -279,7 +284,7 @@ mod appkit {
 
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, _e: &NSEvent) {
-                self.ivars().drag_origin.set(None);
+                self.ivars().drag_origin.borrow_mut().take();
                 if let Some((row, double)) = self.ivars().pending_click.take() {
                     self.emit(FilesEvent::Click { row, cmd: false, shift: false, double });
                 }
@@ -287,16 +292,20 @@ mod appkit {
 
             #[unsafe(method(mouseDragged:))]
             fn mouse_dragged(&self, e: &NSEvent) {
-                let Some((origin, row)) = self.ivars().drag_origin.get() else { return };
+                let Some(origin) = self.ivars().drag_origin.borrow().as_ref().map(|o| o.0) else { return };
                 let now = e.locationInWindow();
                 if (now.x - origin.x).hypot(now.y - origin.y) < 4.0 {
                     return;
                 }
-                self.ivars().drag_origin.set(None);
+                let Some((_, row, path)) = self.ivars().drag_origin.borrow_mut().take() else { return };
                 // Dragging a marked row drags every marked row; any other row
                 // drags just itself (Finder semantics).
                 self.ivars().pending_click.set(None);
-                self.begin_drag(e, row);
+                // A drag is not a click: drop the click-to-rename the
+                // mouse-down on an already-selected row armed.
+                #[cfg(target_os = "macos")]
+                crate::app::host::cancel_click_rename();
+                self.begin_drag(e, row, &path);
             }
 
             #[unsafe(method(rightMouseDown:))]
@@ -457,7 +466,7 @@ mod appkit {
                 on_event: RefCell::new(None),
                 preview: Cell::new(preview),
                 tracking: RefCell::new(None),
-                drag_origin: Cell::new(None),
+                drag_origin: RefCell::new(None),
                 pending_click: Cell::new(None),
                 drop_row: Cell::new(-2),
             });
@@ -469,23 +478,52 @@ mod appkit {
             v
         }
 
+        /// Stop accepting drops (the "Find Recent Files" shelf lists files
+        /// from everywhere: there is no folder to drop into).
+        pub fn refuse_drops(&self) {
+            self.unregisterDraggedTypes();
+        }
+
         /// Start a real file drag (`NSURL` writers) so the rows can be dropped
-        /// into Finder, a terminal, mail, another app's window…
-        fn begin_drag(&self, e: &NSEvent, row: usize) {
+        /// into Finder, a terminal, mail, a browser upload… Any file type
+        /// works: the pasteboard only carries file URLs (the receiver reads
+        /// the bytes), so a zip or a multi-GB file drags like a text file.
+        /// `path` is the file under the pointer at mouse-down; `row` is only
+        /// a hint, re-resolved against the live rows.
+        fn begin_drag(&self, e: &NSEvent, row: usize, path: &str) {
             let paths: Vec<String> = {
                 let rows = self.ivars().rows.borrow();
                 let marked = self.ivars().marked.borrow();
-                let idx: Vec<usize> = if marked.contains(&row) {
-                    marked.iter().copied().collect()
+                let row = if rows.get(row).is_some_and(|r| r.path == path) {
+                    Some(row)
                 } else {
-                    vec![row]
+                    rows.iter().position(|r| r.path == path)
                 };
-                idx.into_iter()
-                    .filter_map(|i| rows.get(i))
-                    .filter(|r| !r.is_parent())
-                    .map(|r| r.path.clone())
-                    .collect()
+                match row {
+                    Some(row) if marked.contains(&row) => marked
+                        .iter()
+                        .filter_map(|&i| rows.get(i))
+                        .filter(|r| !r.is_parent())
+                        .map(|r| r.path.clone())
+                        .collect(),
+                    Some(row) if rows[row].is_parent() => Vec::new(),
+                    _ if path.is_empty() => Vec::new(),
+                    _ => vec![path.to_string()],
+                }
             };
+            if paths.is_empty() {
+                return;
+            }
+            // A row can outlive its file (a zip removed after Archive
+            // Utility unpacked it, a download renamed on completion): a URL
+            // to a missing file makes every target refuse the drop silently.
+            let gone = |p: &String| std::fs::symlink_metadata(p).is_err();
+            let missing = paths.iter().filter(|p| gone(p)).count();
+            let paths: Vec<String> = paths.into_iter().filter(|p| !gone(p)).collect();
+            if missing > 0 {
+                let what = if missing == 1 { "1 file no longer exists".to_string() } else { format!("{missing} files no longer exist") };
+                crate::ui::toast::show(&format!("Can't drag: {what}"), "exclamationmark.triangle.fill");
+            }
             if paths.is_empty() {
                 return;
             }

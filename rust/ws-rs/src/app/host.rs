@@ -3269,6 +3269,12 @@ pub fn reveal_in_files(paths: &[String]) {
 /// showing `path` — the preview panel's right-click menu builds its
 /// `file_context_menu` from these. `sheet` hosts the Rename… prompt. macOS
 /// only: the surface has no AppKit half elsewhere.
+/// Drop a pending click-to-rename (a row drag started: it was never a click).
+#[cfg(target_os = "macos")]
+pub fn cancel_click_rename() {
+    daemon_ui::cancel_click_rename();
+}
+
 #[cfg(target_os = "macos")]
 pub fn popup_file_menu_actions(
     path: &str,
@@ -3614,7 +3620,7 @@ mod daemon_ui {
         static CLICK_RENAME_GEN: Cell<u64> = const { Cell::new(0) };
     }
 
-    fn cancel_click_rename() {
+    pub fn cancel_click_rename() {
         CLICK_RENAME_GEN.with(|g| g.set(g.get() + 1));
     }
 
@@ -6007,7 +6013,6 @@ mod daemon_ui {
                 }
                 E::BlankMenu { x, y } => self.files_blank_menu(x, y),
                 E::Drop { row, paths, copy, force_move } => {
-                    use crate::engines::file_ops::FileOps;
                     use std::os::unix::fs::MetadataExt;
                     let dest = self
                         .files_surface(|b| match row {
@@ -6036,9 +6041,8 @@ mod daemon_ui {
                     let dev = |p: &str| std::fs::metadata(p).map(|m| m.dev()).ok();
                     let same_volume = src.iter().all(|p| dev(p).is_some() && dev(p) == dev(&dest));
                     let mv = force_move || (!copy && same_volume);
-                    let o = FileOps::transfer(&src, &dest, mv, FileOps::shared());
-                    let verb = if mv { "Moved" } else { "Copied" };
-                    self.files_op_done(format!("{verb} {} item(s) into {}", src.len(), std::path::Path::new(&dest).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dest.clone())), o.failed);
+                    let name = std::path::Path::new(&dest).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dest.clone());
+                    self.files_transfer(src, dest, mv, format!("into {name}"));
                 }
                 E::PreviewOpen(i) => {
                     let target = self.files_surface(|b| match b.preview().1 {
@@ -9992,16 +9996,37 @@ mod daemon_ui {
         }
 
         fn files_paste(&self, force_move: bool) {
-            use crate::engines::file_ops::FileOps;
             let src = pasteboard_file_paths();
             let Some(Some(dir)) = self.files_surface(|b| b.ops_directory()) else { return };
             if src.is_empty() {
                 return;
             }
             let mv = force_move || FILES_CUT.with(|c| c.replace(false));
-            let o = FileOps::transfer(&src, &dir, mv, FileOps::shared());
-            let verb = if mv { "Moved" } else { "Copied" };
-            self.files_op_done(format!("{verb} {} item(s) here", src.len()), o.failed);
+            self.files_transfer(src, dir, mv, "here".into());
+        }
+
+        /// Copy / move `src` into `dest` off the main thread, then refresh
+        /// and toast `"Copied N item(s) <where>"`. A dropped or pasted
+        /// multi-GB file (or a copy onto a network mount) takes as long as
+        /// the bytes take; doing it inline froze the whole app meanwhile.
+        fn files_transfer(&self, src: Vec<String>, dest: String, mv: bool, where_: String) {
+            use crate::engines::file_ops::FileOps;
+            let bytes: u64 = src
+                .iter()
+                .filter_map(|p| std::fs::symlink_metadata(p).ok())
+                .map(|m| if m.is_dir() { 1 << 30 } else { m.len() })
+                .sum();
+            // A same-volume move is a rename (instant); anything else that
+            // is big gets a "working" toast so the wait is not a mystery.
+            if !mv && bytes >= 64 << 20 {
+                crate::ui::toast::show(&format!("Copying {} item(s)\u{2026}", src.len()), "doc.on.doc");
+            }
+            std::thread::spawn(move || {
+                let o = FileOps::transfer(&src, &dest, mv, FileOps::shared());
+                let verb = if mv { "Moved" } else { "Copied" };
+                let what = format!("{verb} {} item(s) {where_}", src.len());
+                on_ui(move |ui| ui.files_op_done(what, o.failed));
+            });
         }
 
         fn files_key(&self, key: &popup::KeyInput) -> bool {
