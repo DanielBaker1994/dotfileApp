@@ -1,4 +1,5 @@
 ---
+
 name: kitchen-sink
 description: A keyboard-summoned card dressed in your terminal theme — one window, many tools, layered like a tmux status bar.
 colors:

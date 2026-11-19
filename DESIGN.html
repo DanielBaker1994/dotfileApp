@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="description" content="A keyboard-summoned card dressed in your terminal theme — one window, many tools, layered like a tmux status bar." />
+  <title>DESIGN</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <style>
+
+  /* ═══ ONE palette, ONE rule set ═══
+     Every color below reads a --p-* variable. This :root block is the plain light
+     style; the kitchen-sink app appends its theme's :root { --p-*: … } AFTER this
+     file (same specificity, later wins) and a document template overrides both via
+     :root:has(.name) (more specific). So one set of rules serves the plain nvim
+     build, the app's reading view / PDF, and every template. */
+  :root {
+    --p-bg: #ffffff; --p-text: #1a1a1a; --p-dim: #6b7c90; --p-accent: #2b6cb0; --p-accent2: #1f5190;
+    --p-well: #f5f6f7; --p-s0: #f7fbff; --p-s1: #eaf3fb; --p-rule: #d6e4f0;
+    --p-info: #0b66c3; --p-info-tint: rgba(11,102,195,.05);
+    --p-success: #0a8a3a; --p-success-tint: rgba(10,138,58,.05);
+    --p-warning: #b45309; --p-warning-tint: rgba(224,155,0,.06);
+    --p-danger: #b00020; --p-danger-tint: rgba(176,0,32,.06);
+    --p-accent2-tint: rgba(31,81,144,.06); --p-selection: rgba(43,108,176,.25);
+    --md-accent_pretty: var(--p-accent); --md-accent_pretty-2: var(--p-accent2); --md-muted: var(--p-dim);
+  }
+  ::selection { background: var(--p-selection); }
+  div.sourceCode { background-color: transparent; }   /* pandoc paints this near-white */
+
+  /* "Hack Nerd Font" is installed in ~/Library/Fonts and resolved by
+     weasyprint via fontconfig; no @font-face needed. */
+  .glyph { font-family: "Hack Nerd Font" }
+
+
+  html {
+      color: var(--p-text);
+      background-color: var(--p-bg);
+  }
+  body { color: var(--p-text); }
+  body {
+      margin: 0 auto;
+      max-width: 50em;
+      padding-left: 0px;
+      padding-right: 0px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: manual;   /* auto put "in‐⏎cidunt" into copied text */
+      overflow-wrap: break-word;
+      /* text-rendering: optimizeLegibility; */
+      font-kerning: normal;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+  }
+  /* @media (max-width: 800px) { */
+  /*     body { */
+  /*         font-size: 0.9em; */
+  /*         padding: 0px; */
+  /*     } */
+  /**/
+  /* } */
+  /**/
+
+  /* GitHub alerts (> [!NOTE] ...): pandoc -f gfm emits
+     <div class="note"><div class="title"><p>Note</p></div> ...body... </div>
+     for the five standard types. --a = stripe/icon, --bg = tint, --t = text. */
+  div.note, div.tip, div.important, div.warning, div.caution {
+    margin: 0.8em 0;
+    padding: 0.7em 1em 0.5em;
+    border-left: 6px solid var(--a);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--t);
+    box-sizing: border-box;
+  }
+  div.note { --a: var(--p-info); --bg: var(--p-info-tint); --t: var(--p-text); }
+  div.tip { --a: var(--p-success); --bg: var(--p-success-tint); --t: var(--p-text); }
+  div.important { --a: var(--p-accent2); --bg: var(--p-accent2-tint); --t: var(--p-text); }
+  div.warning { --a: var(--p-warning); --bg: var(--p-warning-tint); --t: var(--p-text); }
+  div.caution { --a: var(--p-danger); --bg: var(--p-danger-tint); --t: var(--p-text); }
+
+  div.note > div.title, div.tip > div.title, div.important > div.title,
+  div.warning > div.title, div.caution > div.title {
+    font-weight: 700;
+    color: var(--a);
+  }
+  div.note > div.title p, div.tip > div.title p, div.important > div.title p,
+  div.warning > div.title p, div.caution > div.title p { margin: 0 0 0.3em; }
+  div.note > div.title::before, div.tip > div.title::before, div.important > div.title::before,
+  div.warning > div.title::before, div.caution > div.title::before {
+    font-family: "Hack Nerd Font", monospace;
+    float: left;
+    margin-right: 0.45em;
+  }
+  div.note > div.title::before      { content: "\ea74"; }
+  div.tip > div.title::before       { content: "\f0336"; }
+  div.important > div.title::before { content: "\f06a"; }
+  div.warning > div.title::before   { content: "\f071"; }
+  div.caution > div.title::before   { content: "\f140c"; }
+  div.note > p:last-child, div.tip > p:last-child, div.important > p:last-child,
+  div.warning > p:last-child, div.caution > p:last-child { margin-bottom: 0.2em; }
+
+
+  /* ═══ Developer callouts + badges — work with or without a document template ═══
+     Callout:  <div class="callout risk">  (blank line)  markdown  (blank line)  </div>
+     kinds: decision risk breaking deprecated action example question rollback perf
+     Badge:    <span class="badge ok">Shipped</span>   (ok warn bad info muted accent)
+     Colors follow the --p-* palette (plain defaults at the top of this file). */
+  .callout { margin: .8em 0; padding: .7em 1em .5em; border-left: 6px solid var(--a); border-radius: 6px;
+             background: var(--bg); box-sizing: border-box; break-inside: avoid;
+             --a: var(--p-accent); --bg: var(--p-s0); }
+  .callout::before { display: block; margin-bottom: .35em; font-size: .78em; font-weight: 700;
+                     letter-spacing: .07em; text-transform: uppercase; color: var(--a); }
+  .callout > :first-child { margin-top: 0; }
+  .callout > :last-child { margin-bottom: .2em; }
+  .callout.decision   { --a: var(--p-accent2); --bg: var(--p-accent2-tint); }
+  .callout.risk       { --a: var(--p-warning); --bg: var(--p-warning-tint); }
+  .callout.breaking   { --a: var(--p-danger);  --bg: var(--p-danger-tint); }
+  .callout.deprecated { --a: var(--p-dim);     --bg: var(--p-s0); }
+  .callout.action     { --a: var(--p-success); --bg: var(--p-success-tint); }
+  .callout.example    { --a: var(--p-info);    --bg: var(--p-info-tint); }
+  .callout.question   { --a: var(--p-accent);  --bg: var(--p-s0); }
+  .callout.rollback   { --a: var(--p-danger);  --bg: var(--p-s0); }
+  .callout.perf       { --a: var(--p-success); --bg: var(--p-s0); }
+  .callout.decision::before   { content: "Decision"; }
+  .callout.risk::before       { content: "Risk"; }
+  .callout.breaking::before   { content: "Breaking change"; }
+  .callout.deprecated::before { content: "Deprecated"; }
+  .callout.action::before     { content: "Action"; }
+  .callout.example::before    { content: "Example"; }
+  .callout.question::before   { content: "Open question"; }
+  .callout.rollback::before   { content: "Rollback"; }
+  .callout.perf::before       { content: "Performance"; }
+
+  .badge { display: inline-block; padding: 0 .6em; border-radius: 999px; border: 1px solid var(--a); background: var(--bg);
+           color: var(--a); font: 600 .78em/1.7 "Helvetica Neue", Helvetica, Arial, sans-serif; white-space: nowrap;
+           vertical-align: .08em; --a: var(--p-accent); --bg: var(--p-s0); }
+  .badge.ok     { --a: var(--p-success); --bg: var(--p-success-tint); }
+  .badge.warn   { --a: var(--p-warning); --bg: var(--p-warning-tint); }
+  .badge.bad    { --a: var(--p-danger);  --bg: var(--p-danger-tint); }
+  .badge.info   { --a: var(--p-info);    --bg: var(--p-info-tint); }
+  .badge.muted  { --a: var(--p-dim);     --bg: var(--p-s0); }
+  .badge.accent { --a: var(--p-accent2); --bg: var(--p-accent2-tint); }
+
+  /* diagrams (```dot / ```d2 → inline SVG by diagrams.lua) */
+  figure.diagram { margin: .9em 0; text-align: center; break-inside: avoid; }
+  figure.diagram svg { max-width: 100%; height: auto; }
+  pre.diagram-error { border: 1px solid var(--p-danger); border-left-width: 6px; border-radius: 6px;
+    background: var(--p-danger-tint); color: var(--p-text); white-space: pre-wrap; padding: .7em 1em; }
+  pre.diagram-error strong { color: var(--p-danger); }
+
+  /* ```diff: removed / added / hunk lines (pandoc tags them st / va / dt) */
+  code.sourceCode.diff span.st { color: var(--p-danger); }
+  code.sourceCode.diff span.va { color: var(--p-success); }
+  code.sourceCode.diff span.dt { color: var(--p-info); }
+
+  /* Common pseudo-element style for all language icons (single authoritative block) */
+  pre.sourceCode.bash::before,
+  pre.sourceCode.cpp::before,
+  pre.sourceCode.lua::before,
+  pre.sourceCode.python::before,
+  pre.sourceCode.shell::before,
+  pre.sourceCode.java::before,
+  pre.sourceCode.file::before,
+  pre.sourceCode.log::before,
+  pre.sourceCode.vim::before,
+  pre[class*="bash"]::before,
+  pre[class*="cpp"]::before,
+  pre[class*="lua"]::before,
+  pre[class*="python"]::before,
+  pre[class*="shell"]::before,
+  pre[class*="java"]::before,
+  pre[class*="file"]::before,
+  pre[class*="vim"]::before,
+  pre[class*="log"]::before {
+    font-family: "Hack Nerd Font", monospace;
+    display: block;
+    margin-bottom: 0.4em;
+    font-size: 1.2em;
+    line-height: 1;
+  }
+
+
+  pre.sourceCode.vim::before,
+  pre[class*="vim"]::before  { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.bash::before,
+  pre[class*="bash"]::before  { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.cpp::before,
+  pre[class*="cpp"]::before   { content: "󰙲"; color: var(--p-dim); }
+
+  pre.sourceCode.lua::before,
+  pre[class*="lua"]::before   { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.python::before,
+  pre[class*="python"]::before { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.shell::before,
+  pre[class*="shell"]::before  { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.java::before,
+  pre[class*="java"]::before   { content: "󰬷"; color: var(--p-dim); }
+
+  pre.sourceCode.file::before,
+  pre[class*="file"]::before   { content: ""; color: var(--p-dim); }
+
+  pre.sourceCode.log::before,
+  pre[class*="log"]::before    { content: "󱂅"; color: var(--p-dim); }
+
+  /* Fenced code block background and rounded corners */
+  .sourceCode > pre,
+  pre.sourceCode,
+  pre[class*="bash"],
+  pre[class*="cpp"],
+  pre[class*="lua"],
+  pre[class*="python"],
+  pre[class*="vim"],
+  pre[class*="shell"],
+  pre[class*="java"],
+  pre[class*="log"],
+  pre[class*="file"] {
+    background-color: var(--p-well);
+    border: 1px solid var(--p-rule);
+    color: var(--p-text);
+    border-radius: 8px;
+    padding: 0.8em 1em;
+    margin: 0.8em 0;
+    overflow: auto;
+    -webkit-font-smoothing: antialiased;
+    /* box-shadow: inset 0 0 0 1px rgba(0,0,0,0.02); */
+    /* preserve code whitespace behavior; generators decide wrapping */
+    white-space: pre;
+    word-break: normal;
+  }
+
+  /* Ensure inner <code> does not add its own background or separate corners */
+  .sourceCode > pre > code,
+  pre.sourceCode > code,
+  pre[class*="log"] code,
+  pre[class*="file"] code {
+    background: transparent;
+    border-radius: inherit;
+    padding: 0;
+    display: block;
+  }
+
+
+  /* Tables: the frame hugs the table, a solid accent header, a raised first column as
+     row labels, hairline grid, and a dim dot in empty cells so blank tables read as
+     intentional. Separate borders keep the rounded frame intact. */
+  table { display: table; width: auto; max-width: 100%; border-collapse: separate; border-spacing: 0;
+          margin: .8em 0; font-size: 0.95em; border: 1px solid var(--p-rule); border-radius: 4px;
+          background-color: var(--p-s0); break-inside: avoid; }
+  thead tr, thead th { background: var(--p-accent); color: var(--p-bg); font-weight: 600; text-align: left; }
+  thead th:first-child { border-top-left-radius: 3px; }
+  thead th:last-child { border-top-right-radius: 3px; }
+  th, td { padding: 12px 15px; border: none; color: var(--p-text); }
+  thead th { color: var(--p-bg); }
+  thead th + th { border-left: 1px solid var(--p-bg); }
+  tbody td { background-color: var(--p-s0); border-top: 1px solid var(--p-rule); }
+  tbody td + td { border-left: 1px solid var(--p-rule); }
+  tbody td:first-child { background-color: var(--p-s1); font-weight: 600; }
+  tbody td:empty::after { content: "\00B7"; color: var(--p-rule); }
+  tbody tr:hover { background-color: transparent; }
+
+  /* Section headers */
+  h1{ margin:18px 0 10px 0; font-size:22px; color:var(--md-accent_pretty); }
+  h2{ margin:16px 0 8px 0; font-size:18px; color:var(--md-accent_pretty-2); font-weight:600; }
+  h3{ margin:16px 0 8px 0; font-size:16px; color:var(--md-accent_pretty-2); }
+
+  /* Document title: the first H1, plus an optional subtitle paragraph directly
+     beneath it. Kept after the generic h1 rule so it wins the cascade. The
+     :first-of-type match also covers legacy docs wrapped in
+     <article class="enable_pretty_title">. */
+  h1:first-of-type {
+    margin: 0 0 6px 0;
+    padding-top: 24px;
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 600;
+    font-size: 26px;
+    color: var(--md-accent_pretty-2);
+  }
+  h1:first-of-type + p {
+    margin: 6px 0 0 0;
+    color: var(--md-muted);
+    font-size: 13px;
+  }
+
+
+
+  /* Color only the list marker (bullet/number), not the list item text */
+  ul, ol {
+    color: inherit;
+  }
+  ul li::marker,
+  ol li::marker {
+    color: var(--md-accent_pretty);
+  }
+
+  /* If you have nested lists and want markers to inherit the same accent color */
+  ul ul li::marker,
+  ol ol li::marker {
+    color: var(--md-accent_pretty);
+  }
+
+  hr {
+    border: none;
+    border-top: 2px solid var(--p-rule);
+    height: 1px;
+    margin: 1em 0;
+  }
+
+  /* Inline code chips */
+  :not(pre) > code {
+    font-family: "Hack Nerd Font Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--p-well);
+    color: var(--p-accent2);
+    padding: 2px 6px;
+    border-radius: 5px;
+  }
+
+  /* Links */
+  a {
+    color: var(--md-accent_pretty);
+    text-decoration: none;
+    border-bottom: 1px solid var(--p-accent);
+  }
+
+  /* Plain blockquotes. GitHub alerts become div.note / div.tip / ... (above),
+     so this only styles standard markdown quotes. */
+  blockquote {
+    margin: 0.8em 0;
+    padding: 0.3em 1em;
+    border-left: 4px solid var(--p-accent);
+    color: var(--p-dim);
+  }
+
+  /* Images (weasyprint has no box-shadow; border gives the framing) */
+  img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+    border-radius: 8px;
+    border: 1px solid var(--p-rule);
+  }
+
+  /* Monospace font for fenced code */
+  pre, pre > code {
+    font-family: "Hack Nerd Font Mono", Menlo, Consolas, monospace;
+  }
+
+  /* Optional table of contents: add --toc --toc-depth=2 to the pandoc call */
+  nav#TOC {
+    border: 1px solid var(--p-rule);
+    border-radius: 8px;
+    padding: 12px 20px;
+    margin: 1em 0;
+  }
+  nav#TOC > h2 { margin-top: 0; }
+  nav#TOC ul { list-style: none; padding-left: 1.2em; }
+  nav#TOC > ul { padding-left: 0.5em; }
+  nav#TOC a { border-bottom: none; }
+
+  /* PDF pagination (ignored by browsers): plain pages; a document template
+     (below) swaps in its own `@page doc` */
+  @page {
+    margin: 18mm 16mm;
+    background-color: var(--p-bg);
+    @bottom-center {
+      content: counter(page) " / " counter(pages);
+      font-size: 9px;
+      color: var(--p-dim);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     Document templates — SHARED by the kitchen-sink app (reading view + Export
+     PDF) and EXTERNAL_BUILD_AND_OPEN_PDF (nvim): this file is the single source,
+     both pipelines load it. ONE marker line in the markdown restyles the whole
+     document (screen reading view AND PDF export):
+
+         <div class="doc tokyo-night" data-foot="Confidential"></div>
+
+     Put it anywhere (top is tidy). Templates: tokyo-night · paper · executive ·
+     terminal + 10 researched palettes (see below). No marker = the app-theme look above, untouched. Snippets:
+     `markdown_doc_tokyo_night` … in kitchen-sink/vim/snippets/markdown.json.
+
+     Content conventions (same as friendly_document_styling.css):
+       # Title            → page-1 title + the running header on pages 2+
+       paragraph under it → subtitle (running header, right side)
+       data-foot="…"      → footer text, left ("Page n of N" is on the right)
+
+     A template only sets --p-* colors + --t-* shape variables, so a new
+     template = ~15 lines. The app's own theme layer (kitchen-sink prose_theme.css)
+     uses the same --p-* names for its no-marker look; the gated block below gives
+     the plain nvim pipeline the same consumers. */
+
+  /* marker: zero-height, but present so string-set can read it */
+  .doc { display: block; height: 0; margin: 0; padding: 0; overflow: hidden;
+         string-set: doc-foot attr(data-foot); }
+  h1:first-of-type { string-set: doc-title content(text); }
+  h1:first-of-type + p { string-set: doc-sub content(text); }
+
+  /* — template palettes: retarget the --p-* variables, nothing else — */
+  :root:has(.tokyo-night) {
+    --p-bg: #1a1b26; --p-text: #c0caf5; --p-dim: #7982a9; --p-accent: #7aa2f7; --p-accent2: #bb9af7;
+    --p-well: #16161e; --p-s0: #1f2335; --p-s1: #292e42; --p-rule: #3b4261;
+    --p-info: #7dcfff; --p-info-tint: rgba(125,207,255,.12); --p-success: #9ece6a; --p-success-tint: rgba(158,206,106,.12);
+    --p-accent2-tint: rgba(187,154,247,.12); --p-warning: #e0af68; --p-warning-tint: rgba(224,175,104,.12);
+    --p-danger: #f7768e; --p-danger-tint: rgba(247,118,142,.12); --p-selection: rgba(122,162,247,.28);
+    --t-kw: #bb9af7; --t-str: #9ece6a; --t-com: #565f89; --t-fn: #7aa2f7; --t-num: #ff9e64;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif; --t-title-on: var(--p-bg);
+    --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.paper) {
+    --p-bg: #ffffff; --p-text: #1d1d1f; --p-dim: #6e6e73; --p-accent: #1f3a5f; --p-accent2: #8a5a2b;
+    --p-well: #f5f5f7; --p-s0: #fbfbfd; --p-s1: #f0f0f3; --p-rule: #d2d2d7;
+    --p-info: #1f6feb; --p-info-tint: rgba(31,111,235,.08); --p-success: #1a7f37; --p-success-tint: rgba(26,127,55,.08);
+    --p-accent2-tint: rgba(138,90,43,.08); --p-warning: #9a6700; --p-warning-tint: rgba(154,103,0,.08);
+    --p-danger: #cf222e; --p-danger-tint: rgba(207,34,46,.08); --p-selection: rgba(31,58,95,.2);
+    --t-kw: #8250df; --t-str: #0a3069; --t-com: #6e7781; --t-fn: #1f3a5f; --t-num: #953800;
+    --t-head-font: Georgia, "Times New Roman", serif; --t-title-bg: transparent;
+    --t-title-color: var(--p-accent); --t-title-rule: var(--p-text);
+  }
+  :root:has(.executive) {
+    --p-bg: #ffffff; --p-text: #1b2432; --p-dim: #5b6779; --p-accent: #0b3d91; --p-accent2: #c2410c;
+    --p-well: #f1f4f9; --p-s0: #f8fafc; --p-s1: #e8edf5; --p-rule: #cfd8e6;
+    --p-info: #0b3d91; --p-info-tint: rgba(11,61,145,.07); --p-success: #15803d; --p-success-tint: rgba(21,128,61,.07);
+    --p-accent2-tint: rgba(194,65,12,.07); --p-warning: #b45309; --p-warning-tint: rgba(180,83,9,.07);
+    --p-danger: #b91c1c; --p-danger-tint: rgba(185,28,28,.07); --p-selection: rgba(11,61,145,.2);
+    --t-kw: #7c3aed; --t-str: #15803d; --t-com: #64748b; --t-fn: #0b3d91; --t-num: #c2410c;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --t-title-bg: var(--p-accent); --t-title-color: #ffffff; --t-title-rule: transparent;
+  }
+  :root:has(.terminal) {
+    --p-bg: #0c0f0a; --p-text: #c9d6c0; --p-dim: #6f8266; --p-accent: #7ee787; --p-accent2: #e3b341;
+    --p-well: #070906; --p-s0: #12170f; --p-s1: #1b2217; --p-rule: #2c3a26;
+    --p-info: #79c0ff; --p-info-tint: rgba(121,192,255,.1); --p-success: #7ee787; --p-success-tint: rgba(126,231,135,.1);
+    --p-accent2-tint: rgba(227,179,65,.1); --p-warning: #e3b341; --p-warning-tint: rgba(227,179,65,.1);
+    --p-danger: #ff7b72; --p-danger-tint: rgba(255,123,114,.1); --p-selection: rgba(126,231,135,.25);
+    --t-kw: #ff7b72; --t-str: #a5d6ff; --t-com: #6e7681; --t-fn: #d2a8ff; --t-num: #79c0ff;
+    --t-head-font: "Hack Nerd Font", Menlo, monospace; --t-title-bg: transparent;
+    --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.terminal) body { font-family: "Hack Nerd Font", Menlo, monospace; font-size: .92em; }
+  :root:has(.paper) body { font-family: Georgia, "Times New Roman", serif; }
+
+  /* — researched palettes (official hex values: Catppuccin, Dracula, Nord, Gruvbox,
+     Solarized, Rosé Pine) — one block each; copy one to make your own — */
+  :root:has(.catppuccin-mocha) {
+    --p-bg: #1e1e2e; --p-text: #cdd6f4; --p-dim: #7f849c; --p-accent: #89b4fa; --p-accent2: #cba6f7;
+    --p-well: #181825; --p-s0: #313244; --p-s1: #45475a; --p-rule: #45475a;
+    --p-info: #89dceb; --p-info-tint: rgba(137,220,235,0.12); --p-success: #a6e3a1; --p-success-tint: rgba(166,227,161,0.12);
+    --p-accent2-tint: rgba(203,166,247,0.12); --p-warning: #f9e2af; --p-warning-tint: rgba(249,226,175,0.12);
+    --p-danger: #f38ba8; --p-danger-tint: rgba(243,139,168,0.12); --p-selection: rgba(137,180,250,0.25);
+    --t-kw: #cba6f7; --t-str: #a6e3a1; --t-com: #6c7086; --t-fn: #89b4fa; --t-num: #fab387;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.catppuccin-latte) {
+    --p-bg: #eff1f5; --p-text: #4c4f69; --p-dim: #8c8fa1; --p-accent: #1e66f5; --p-accent2: #8839ef;
+    --p-well: #dce0e8; --p-s0: #e6e9ef; --p-s1: #ccd0da; --p-rule: #bcc0cc;
+    --p-info: #209fb5; --p-info-tint: rgba(32,159,181,0.08); --p-success: #40a02b; --p-success-tint: rgba(64,160,43,0.08);
+    --p-accent2-tint: rgba(136,57,239,0.08); --p-warning: #df8e1d; --p-warning-tint: rgba(223,142,29,0.08);
+    --p-danger: #d20f39; --p-danger-tint: rgba(210,15,57,0.08); --p-selection: rgba(30,102,245,0.25);
+    --t-kw: #8839ef; --t-str: #40a02b; --t-com: #9ca0b0; --t-fn: #1e66f5; --t-num: #fe640b;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.dracula) {
+    --p-bg: #282a36; --p-text: #f8f8f2; --p-dim: #6272a4; --p-accent: #bd93f9; --p-accent2: #ff79c6;
+    --p-well: #21222c; --p-s0: #343746; --p-s1: #44475a; --p-rule: #44475a;
+    --p-info: #8be9fd; --p-info-tint: rgba(139,233,253,0.12); --p-success: #50fa7b; --p-success-tint: rgba(80,250,123,0.12);
+    --p-accent2-tint: rgba(255,121,198,0.12); --p-warning: #ffb86c; --p-warning-tint: rgba(255,184,108,0.12);
+    --p-danger: #ff5555; --p-danger-tint: rgba(255,85,85,0.12); --p-selection: rgba(189,147,249,0.25);
+    --t-kw: #ff79c6; --t-str: #f1fa8c; --t-com: #6272a4; --t-fn: #50fa7b; --t-num: #bd93f9;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.nord) {
+    --p-bg: #2e3440; --p-text: #d8dee9; --p-dim: #7b88a1; --p-accent: #88c0d0; --p-accent2: #b48ead;
+    --p-well: #272c36; --p-s0: #3b4252; --p-s1: #434c5e; --p-rule: #4c566a;
+    --p-info: #81a1c1; --p-info-tint: rgba(129,161,193,0.12); --p-success: #a3be8c; --p-success-tint: rgba(163,190,140,0.12);
+    --p-accent2-tint: rgba(180,142,173,0.12); --p-warning: #ebcb8b; --p-warning-tint: rgba(235,203,139,0.12);
+    --p-danger: #bf616a; --p-danger-tint: rgba(191,97,106,0.12); --p-selection: rgba(136,192,208,0.25);
+    --t-kw: #81a1c1; --t-str: #a3be8c; --t-com: #616e88; --t-fn: #88c0d0; --t-num: #b48ead;
+    --t-head-font: "Helvetica Neue", Helvetica, Arial, sans-serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.gruvbox-dark) {
+    --p-bg: #282828; --p-text: #ebdbb2; --p-dim: #928374; --p-accent: #fabd2f; --p-accent2: #d3869b;
+    --p-well: #1d2021; --p-s0: #3c3836; --p-s1: #504945; --p-rule: #665c54;
+    --p-info: #83a598; --p-info-tint: rgba(131,165,152,0.12); --p-success: #b8bb26; --p-success-tint: rgba(184,187,38,0.12);
+    --p-accent2-tint: rgba(211,134,155,0.12); --p-warning: #fe8019; --p-warning-tint: rgba(254,128,25,0.12);
+    --p-danger: #fb4934; --p-danger-tint: rgba(251,73,52,0.12); --p-selection: rgba(250,189,47,0.25);
+    --t-kw: #fb4934; --t-str: #b8bb26; --t-com: #928374; --t-fn: #83a598; --t-num: #d3869b;
+    --t-head-font: "Hack Nerd Font", Menlo, monospace; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.gruvbox-dark) body { font-family: "Hack Nerd Font", Menlo, monospace; font-size: .92em; }
+  :root:has(.gruvbox-light) {
+    --p-bg: #fbf1c7; --p-text: #3c3836; --p-dim: #7c6f64; --p-accent: #b57614; --p-accent2: #8f3f71;
+    --p-well: #f2e5bc; --p-s0: #f9f5d7; --p-s1: #ebdbb2; --p-rule: #d5c4a1;
+    --p-info: #076678; --p-info-tint: rgba(7,102,120,0.08); --p-success: #79740e; --p-success-tint: rgba(121,116,14,0.08);
+    --p-accent2-tint: rgba(143,63,113,0.08); --p-warning: #af3a03; --p-warning-tint: rgba(175,58,3,0.08);
+    --p-danger: #9d0006; --p-danger-tint: rgba(157,0,6,0.08); --p-selection: rgba(181,118,20,0.25);
+    --t-kw: #9d0006; --t-str: #79740e; --t-com: #928374; --t-fn: #076678; --t-num: #8f3f71;
+    --t-head-font: "Hack Nerd Font", Menlo, monospace; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.gruvbox-light) body { font-family: "Hack Nerd Font", Menlo, monospace; font-size: .92em; }
+  :root:has(.solarized-dark) {
+    --p-bg: #002b36; --p-text: #93a1a1; --p-dim: #657b83; --p-accent: #268bd2; --p-accent2: #6c71c4;
+    --p-well: #00212b; --p-s0: #073642; --p-s1: #0d4553; --p-rule: #1f5563;
+    --p-info: #2aa198; --p-info-tint: rgba(42,161,152,0.12); --p-success: #859900; --p-success-tint: rgba(133,153,0,0.12);
+    --p-accent2-tint: rgba(108,113,196,0.12); --p-warning: #b58900; --p-warning-tint: rgba(181,137,0,0.12);
+    --p-danger: #dc322f; --p-danger-tint: rgba(220,50,47,0.12); --p-selection: rgba(38,139,210,0.25);
+    --t-kw: #859900; --t-str: #2aa198; --t-com: #586e75; --t-fn: #268bd2; --t-num: #d33682;
+    --t-head-font: Georgia, "Times New Roman", serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.solarized-dark) body { font-family: Georgia, "Times New Roman", serif; }
+  :root:has(.solarized-light) {
+    --p-bg: #fdf6e3; --p-text: #586e75; --p-dim: #839496; --p-accent: #268bd2; --p-accent2: #6c71c4;
+    --p-well: #eee8d5; --p-s0: #f7f0dc; --p-s1: #eee8d5; --p-rule: #d9d2bd;
+    --p-info: #2aa198; --p-info-tint: rgba(42,161,152,0.08); --p-success: #859900; --p-success-tint: rgba(133,153,0,0.08);
+    --p-accent2-tint: rgba(108,113,196,0.08); --p-warning: #b58900; --p-warning-tint: rgba(181,137,0,0.08);
+    --p-danger: #dc322f; --p-danger-tint: rgba(220,50,47,0.08); --p-selection: rgba(38,139,210,0.25);
+    --t-kw: #859900; --t-str: #2aa198; --t-com: #93a1a1; --t-fn: #268bd2; --t-num: #d33682;
+    --t-head-font: Georgia, "Times New Roman", serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.solarized-light) body { font-family: Georgia, "Times New Roman", serif; }
+  :root:has(.rose-pine) {
+    --p-bg: #191724; --p-text: #e0def4; --p-dim: #908caa; --p-accent: #c4a7e7; --p-accent2: #ebbcba;
+    --p-well: #16141f; --p-s0: #1f1d2e; --p-s1: #26233a; --p-rule: #403d52;
+    --p-info: #9ccfd8; --p-info-tint: rgba(156,207,216,0.12); --p-success: #9ccfd8; --p-success-tint: rgba(156,207,216,0.12);
+    --p-accent2-tint: rgba(235,188,186,0.12); --p-warning: #f6c177; --p-warning-tint: rgba(246,193,119,0.12);
+    --p-danger: #eb6f92; --p-danger-tint: rgba(235,111,146,0.12); --p-selection: rgba(196,167,231,0.25);
+    --t-kw: #c4a7e7; --t-str: #f6c177; --t-com: #6e6a86; --t-fn: #9ccfd8; --t-num: #ebbcba;
+    --t-head-font: Georgia, "Times New Roman", serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.rose-pine) body { font-family: Georgia, "Times New Roman", serif; }
+  :root:has(.rose-pine-dawn) {
+    --p-bg: #faf4ed; --p-text: #575279; --p-dim: #797593; --p-accent: #907aa9; --p-accent2: #d7827e;
+    --p-well: #f2e9e1; --p-s0: #fffaf3; --p-s1: #f4ede8; --p-rule: #dfdad9;
+    --p-info: #56949f; --p-info-tint: rgba(86,148,159,0.08); --p-success: #286983; --p-success-tint: rgba(40,105,131,0.08);
+    --p-accent2-tint: rgba(215,130,126,0.08); --p-warning: #ea9d34; --p-warning-tint: rgba(234,157,52,0.08);
+    --p-danger: #b4637a; --p-danger-tint: rgba(180,99,122,0.08); --p-selection: rgba(144,122,169,0.25);
+    --t-kw: #286983; --t-str: #56949f; --t-com: #9893a5; --t-fn: #907aa9; --t-num: #d7827e;
+    --t-head-font: Georgia, "Times New Roman", serif; --t-title-bg: transparent; --t-title-color: var(--p-accent); --t-title-rule: var(--p-accent);
+  }
+  :root:has(.rose-pine-dawn) body { font-family: Georgia, "Times New Roman", serif; }
+
+  /* — shared template structure (any .doc template) — */
+  :root:has(.doc) body { page: doc; padding-top: 0; padding-bottom: 0; }
+  :root:has(.doc) h1, :root:has(.doc) h2, :root:has(.doc) h3, :root:has(.doc) h4 { font-family: var(--t-head-font); }
+  :root:has(.doc) h1:first-of-type {
+    background: var(--t-title-bg); color: var(--t-title-color);
+    border-bottom: 2px solid var(--t-title-rule);
+    margin: 0 0 4px; padding: 14px 16px 10px; font-size: 28px; line-height: 1.2; letter-spacing: -.01em;
+  }
+  :root:has(.doc) h1:first-of-type + p {
+    color: var(--p-dim); font-size: 13px; margin: 8px 0 22px; padding: 0 16px;
+  }
+  :root:has(.doc) h2 { color: var(--p-accent); border-bottom: 1px solid var(--p-rule); padding-bottom: 4px; }
+  :root:has(.doc) h3, :root:has(.doc) h4 { color: var(--p-accent2); }
+
+  /* syntax tokens follow the template, not pandoc's tango / breezedark pick */
+  :root:has(.doc) code span.kw, :root:has(.doc) code span.cf, :root:has(.doc) code span.dt { color: var(--t-kw); }
+  :root:has(.doc) code span.st, :root:has(.doc) code span.ss, :root:has(.doc) code span.ch,
+  :root:has(.doc) code span.vs, :root:has(.doc) code span.sc { color: var(--t-str); }
+  :root:has(.doc) code span.co, :root:has(.doc) code span.do, :root:has(.doc) code span.an,
+  :root:has(.doc) code span.cv, :root:has(.doc) code span.in { color: var(--t-com); }
+  :root:has(.doc) code span.fu, :root:has(.doc) code span.bu, :root:has(.doc) code span.ex,
+  :root:has(.doc) code span.at { color: var(--t-fn); }
+  :root:has(.doc) code span.dv, :root:has(.doc) code span.bn, :root:has(.doc) code span.fl,
+  :root:has(.doc) code span.cn { color: var(--t-num); }
+  :root:has(.doc) code span.op, :root:has(.doc) code span.va, :root:has(.doc) code span.pp { color: var(--p-text); }
+
+  /* — page furniture: PDF only (@page is ignored on screen) —
+     page 1 has no running header (the title block is the header);
+     pages 2+: title left, subtitle right; footer: note left, "Page n of N" right */
+  @page doc {
+    size: letter; margin: 24mm 18mm 22mm; background-color: var(--p-bg);
+    @top-left { content: string(doc-title); font: 600 9pt var(--t-head-font); color: var(--p-accent);
+                border-bottom: .5pt solid var(--p-rule); padding-bottom: 3mm; vertical-align: bottom; width: 35%; }
+    @top-right { content: string(doc-sub); font: 9pt var(--t-head-font); color: var(--p-dim);
+                 border-bottom: .5pt solid var(--p-rule); padding-bottom: 3mm; vertical-align: bottom; width: 65%; text-align: right; }
+    @bottom-left { content: string(doc-foot); font: 8.5pt var(--t-head-font); color: var(--p-dim);
+                   border-top: .5pt solid var(--p-rule); padding-top: 3mm; vertical-align: top; width: 60%; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8.5pt var(--t-head-font); color: var(--p-dim);
+                    border-top: .5pt solid var(--p-rule); padding-top: 3mm; vertical-align: top; width: 40%; text-align: right; }
+    @bottom-center { content: none; }
+  }
+  @page doc:first {
+    margin-top: 18mm;
+    @top-left { content: none; border: none; } @top-right { content: none; border: none; }
+  }
+
+  /* — copy-friendly PDF: add `clean` to the marker (class="doc paper clean") and
+     the language / alert icons (private-use font glyphs, which copy as junk
+     characters) are dropped, so a copied snippet or sentence is only text — */
+  :root:has(.doc.clean) pre::before, :root:has(.doc.clean) pre.sourceCode::before,
+  :root:has(.doc.clean) div.note > div.title::before, :root:has(.doc.clean) div.tip > div.title::before,
+  :root:has(.doc.clean) div.important > div.title::before, :root:has(.doc.clean) div.warning > div.title::before,
+  :root:has(.doc.clean) div.caution > div.title::before { content: none !important; }
+  /* a forced page break: <div class="pagebreak"></div> */
+  .pagebreak { break-after: page; height: 0; margin: 0; }
+
+  /* — page breaks (PDF) — headings never strand at a page bottom, short blocks
+     stay whole, paragraphs keep ≥3 lines on each side of a break, long URLs wrap */
+  h1, h2, h3, h4, h5, h6 { break-after: avoid; break-inside: avoid; }
+  p, li, blockquote { orphans: 3; widows: 3; }
+  li, tr, table, figure, img, blockquote, dt, div.note, div.tip, div.important, div.warning, div.caution { break-inside: avoid; }
+  pre { break-inside: avoid; white-space: pre-wrap; overflow-wrap: anywhere; }   /* weasyprint still splits one taller than a page */
+  h2 + pre, h3 + pre, h2 + table, h3 + table, p:has(+ pre), p:has(+ table) { break-after: avoid; }
+  thead { display: table-header-group; }
+  a { overflow-wrap: anywhere; }
+
+  /* — tables never run off the page (PDF) — cells wrap anywhere (URLs, code),
+     and wide tables (6+ / 10+ columns) shrink their text and padding so they
+     still read. Mirrored in kitchen-sink pylib/prose_pdf.json "fit_css", which
+     the app appends to every export whatever CSS is configured. */
+  @media print {
+    table { max-width: 100% !important; }
+    th, td { overflow-wrap: anywhere !important; hyphens: manual !important; }
+    th code, td code { white-space: normal !important; overflow-wrap: anywhere !important; }
+    table:has(tr > :nth-child(6)) { font-size: .82em !important; }
+    table:has(tr > :nth-child(6)) th, table:has(tr > :nth-child(6)) td { padding: 5px 7px !important; }
+    table:has(tr > :nth-child(10)) { font-size: .66em !important; }
+    table:has(tr > :nth-child(10)) th, table:has(tr > :nth-child(10)) td { padding: 3px 4px !important; }
+  }
+
+  </style>
+  <style>
+  /* Copy-to-clipboard button beside each code block (copy_button.js adds the .codeblock
+     wrapper + .copy-btn). Screen only. Shared: the kitchen-sink reading view loads this
+     same file (beside [notes] pdf-css); colors come from the --p-* palette. */
+  .codeblock { display: flex; align-items: stretch; }
+  .codeblock pre { flex: 1 1 auto; min-width: 0; }
+  .copy-btn { flex: 0 0 auto; align-self: stretch; width: 34px; margin: .8em 8px .8em 0;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    border: none; border-radius: 8px; background: var(--p-s0); color: var(--p-dim);
+    cursor: pointer; transition: background .15s, color .15s; }
+  .copy-btn:hover { background: var(--p-s1); color: var(--p-text); }
+  .copy-btn:active { background: var(--p-s1); }
+  .copy-btn.copied { background: var(--p-success-tint); color: var(--p-success); }
+  .copy-btn:focus { outline: none; }
+  .copy-btn svg { width: 16px; height: 16px; }
+  </style>
+</head>
+<body>
+<h1 id="design-system-kitchen-sink">Design System: kitchen-sink</h1>
+<h2 id="overview">Overview</h2>
+<p><strong>Creative North Star: "The Terminal Card"</strong></p>
+<p>kitchen-sink is a floating card that wears your terminal theme.
+Surfaces are stacked like a tmux or Catppuccin port, deepest first: the
+header strip is the darkest band (crust), toolbars, tab strips and input
+wells sit one step in (mantle), the card is the base, and raised
+controls float just above it (surface). Nothing uses a system colour.
+Every pixel comes from the active theme preset, so switching from
+Macchiato to Tokyo Night or Paper recolours every view, the embedded
+shell's ANSI palette and the nvim pane together.</p>
+<p>The look is dense and quiet. Text is small (10.5–13 pt), rows are 30
+pt, and chrome is thin hairlines rather than boxes. Colour carries
+meaning, not decoration. The one accent marks what is <em>selected or
+active</em>: the active tab, the cursor row's edge, an "on" toggle, a
+focus ring. The five palette hues (accent2, success, warning, danger,
+info) mark <em>state</em>: links and fuzzy matches, Jira statuses, poll
+health, the ✕ hover. The card floats over a blurred desktop, so the
+system is translucent at the edges and solid where you read.</p>
+<p><strong>Key Characteristics:</strong></p>
+<ul>
+<li>Depth by tone, not shadow: crust &lt; mantle &lt; base &lt;
+surface.</li>
+<li>One accent marks selection; palette hues mark status.</li>
+<li>Every colour is derived from the theme, with contrast lifted in code
+(<code>readable</code>, <code>accentOn</code>, <code>onAccent</code>)
+instead of hand-picked per theme.</li>
+<li>Small, dense, system-font UI; monospace only where text is
+edited.</li>
+<li>Thin hairlines (text at 8–12% opacity) separate regions; boxes are
+rare.</li>
+</ul>
+<h2 id="colors">Colors</h2>
+<p>The default is Catppuccin Macchiato
+(<code>commands.toml [theme]</code>); 29 built-in presets plus
+<code>[themes]</code> entries swap the whole set live. The values in the
+frontmatter are the default theme. <code>mantle</code>,
+<code>crust</code>, <code>surface0</code>, <code>surface1</code> and
+<code>outline</code> are <strong>derived</strong> from base, text and
+accent in <code>extension PopupColors</code>. Never hard-code them.</p>
+<h3 id="primary">Primary</h3>
+<ul>
+<li><strong>Lavender Signal</strong> (accent): the active tab's solid
+pill, the 3 pt cursor edge on selected rows, "on" button text and tint,
+focus rings, header-style accents. <code>accentOn</code> lifts it toward
+text until it reaches 2.2:1 on the card.</li>
+</ul>
+<h3 id="secondary">Secondary</h3>
+<ul>
+<li><strong>Periwinkle Link</strong> (accent2): keys, links, fuzzy-match
+highlights, folder marks, and the second stop in the Stripe and Aurora
+header gradients.</li>
+</ul>
+<h3 id="tertiary">Tertiary</h3>
+<ul>
+<li><strong>Status hues</strong>: Sage Success, Wheat Warning, Coral
+Danger, Seafoam Info. These cover Jira statuses and priorities, tab
+freshness badges (green fresh, yellow stale, red stale and failed), the
+✕ hover, the toast's check glyph and the terminal's ANSI palette. They
+are always passed through <code>readable()</code> (3:1 on the card)
+before drawing.</li>
+</ul>
+<h3 id="neutral">Neutral</h3>
+<ul>
+<li><strong>Macchiato Base</strong> (base): the card fill under the blur
+(<code>tintAlpha</code> 0.78).</li>
+<li><strong>Mantle Well</strong> (mantle): tab strips, toolbars, table
+headers, recessed text inputs.</li>
+<li><strong>Crust Band</strong> (crust / header): the drag header,
+status line, toast pill, and the text drawn on the accent pill.</li>
+<li><strong>Surface 0 / 1</strong>: base blended 9% / 16% toward text.
+Raised ghost buttons and hover fills.</li>
+<li><strong>Highlight Slate</strong> (highlight): the selected-row pill
+and the text selection colour (lifted to 1.7:1 against the card if
+needed).</li>
+<li><strong>Moonlit Text / Dusk Dim</strong>: primary and secondary
+text. Idle button labels are dim; hover brightens them to text at
+92%.</li>
+<li><strong>Accent Outline</strong> (outline): the card's border, the
+accent sunk 45% into the base at 85% opacity, so every theme frames
+itself in its own hue.</li>
+<li><strong>Browser / Terminal panes</strong>: the file browser and
+terminal drawer fills (translucent slate, <code>[theme] browser</code> /
+<code>terminal</code>).</li>
+</ul>
+<h3 id="named-rules">Named Rules</h3>
+<p><strong>The Theme-Only Rule.</strong> No
+<code>NSColor.systemX</code>, <code>controlAccentColor</code> or default
+selection colours. Draw with <code>PopupColors</code> tokens or a
+<code>tone(_:)</code>, because the machine's accent colour once made
+selections unreadable.</p>
+<p><strong>The One Accent Rule.</strong> The accent means "this is the
+selected or active one". Status never borrows it; selection never
+borrows a status hue.</p>
+<p><strong>The Contrast-in-Code Rule.</strong> A new themed colour goes
+through <code>readable</code>, <code>accentOn</code> or
+<code>onAccent</code>. Text drawn on a tint goes through
+<code>ensure(fg, on: over(tint, alpha, on: base))</code>, which measures
+it against the opaque colour it actually sits on: 4.5:1 for text, 3:1
+for marks. It must survive all 29 presets, including Paper and Solarized
+Light.</p>
+<h2 id="typography">Typography</h2>
+<p><strong>Body Font:</strong> SF Pro (the system font) for all chrome,
+lists and labels. <strong>Mono Font:</strong> SF Mono by default, or the
+user's <code>font</code> per section, for the notes editor, Compare
+panes, previews and AI output. The terminal drawer uses
+<code>terminal-font</code> (a Nerd Font for glyphs).</p>
+<p><strong>Character:</strong> quiet system UI with a monospace work
+surface. The chrome gets out of the way so the text you edit stands
+out.</p>
+<h3 id="hierarchy">Hierarchy</h3>
+<ul>
+<li><strong>Editor</strong> (400, 13 pt, mono): the notes, Compare and
+AI panes. Each is user-sized (<code>font-size</code>, Cmd+Opt+±).</li>
+<li><strong>Toast</strong> (500, 12.5 pt): the bottom-centre
+confirmation pill.</li>
+<li><strong>Input</strong> (400, 12 pt): filter bars and search
+fields.</li>
+<li><strong>Row</strong> (400, 11 pt): list, table and file rows.</li>
+<li><strong>Button / Tab</strong> (500, 10.5 pt; 600 when on): chips,
+tabs and header segments. Weight, not size, marks the active one.</li>
+<li><strong>Meta</strong> (400, 9 pt, dim): header item counts and
+last-write times.</li>
+</ul>
+<h3 id="named-rules-1">Named Rules</h3>
+<p><strong>The Zoom Rule.</strong> Every size multiplies by
+<code>zoom</code> (Cmd+±). Never place a fixed point size in chrome
+without <code>* zoom</code>.</p>
+<p><strong>The Weight-Marks-State Rule.</strong> Active means semibold
+plus accent, never a bigger size. Sizes stay on the scale above.</p>
+<h2 id="layout">Layout</h2>
+<p>A card of a fixed, shared frame (<code>PopupWindow.baseFrame</code>).
+Every view of the shared window uses the same rect, so switching views
+never resizes the window; only the notes drawers grow it. From top to
+bottom: a 30 pt drag header (✕, kitchen-sink icon, view-switcher icons
+at 26 pt with 2 pt gaps, a centred title, and right-hand buttons), then
+a mantle tab strip or toolbar, then the content. Content is lists of 30
+pt rows inset 4 × 1 pt, master–detail splits (Jira Config, AI, Compare),
+or a filter box over a list (the palette, /paths). Window padding is 8
+pt. Density is high on purpose: Jira tabs hold 5k–20k rows.</p>
+<p>Tool panels (/screenshot, /paths, /filefast) are separate borderless
+cards placed on the mouse's screen, top at 20%. Overlays inside a window
+(the Cmd+/ shortcuts card, the Cmd+K action picker, sheets) are centred
+cards above a dimmed backdrop.</p>
+<h2 id="elevation--depth">Elevation &amp; Depth</h2>
+<p>Inside the card the system is <strong>tonal</strong>: depth is the
+crust → mantle → base → surface ladder, and inputs are <em>recessed</em>
+(mantle well with a hairline) while buttons are <em>raised</em> (a ghost
+fill of the text colour). Real shadows appear only on things that float
+above the card.</p>
+<h3 id="shadow-vocabulary">Shadow Vocabulary</h3>
+<ul>
+<li><strong>Window</strong> (the system window shadow,
+<code>hasShadow</code>): the card itself over the desktop.</li>
+<li><strong>Toast</strong> (<code>0 -2 8 rgba(0,0,0,0.25)</code>): the
+confirmation pill.</li>
+<li><strong>Action picker</strong>
+(<code>radius 14, opacity 0.35</code>): the Cmd+K list.</li>
+<li><strong>Overlay card</strong>
+(<code>radius 18, opacity 0.40</code>): the shortcuts card and in-window
+overlays.</li>
+</ul>
+<h3 id="named-rules-2">Named Rules</h3>
+<p><strong>The Recessed-Field Rule.</strong> Text inputs sink (mantle
+with a hairline) and buttons rise (a ghost fill). A field never looks
+like a button. Focus swaps the hairline for the accent.</p>
+<h2 id="shapes">Shapes</h2>
+<p>Gently rounded and never pill-shaped, except for the toast. The card
+has a 9 pt corner, and <code>_cornerRadius</code> overrides keep macOS
+26's 16 pt frame from showing around it. Chips, tabs, row pills and
+buttons use 4 pt. Fields and image wells use 6 pt, the terminal drawer 8
+pt, and floating overlays 10–12 pt, so bigger floats get rounder
+corners. The cursor mark is a 3 pt accent edge clipped inside the row
+pill's left curve. Lines are 1 pt hairlines; the only 2 pt lines are the
+active-chip indicator and the Accent Edge header.</p>
+<h2 id="components">Components</h2>
+<h3 id="buttons">Buttons</h3>
+<ul>
+<li><strong>Shape:</strong> squared-off chips (4 pt).</li>
+<li><strong>Ghost (idle):</strong> text at 6% fill, dim label, 500
+weight. Hover 11%, pressed 16%, label brightens. No stroke.</li>
+<li><strong>On:</strong> accent-tinted fill (22% dark, 18% light),
+accent label at 4:1, 600 weight. On-hover deepens to 30% / 25%.</li>
+<li><strong>AppKit forms:</strong> <code>ThemedPushButton</code>
+(<code>role</code> .primary / .danger) and
+<code>ThemedPopUpButton</code>, never stock bezels.</li>
+</ul>
+<h3 id="tabs">Tabs</h3>
+<ul>
+<li><strong>Strip:</strong> mantle band under the header.</li>
+<li><strong>Active:</strong> a SOLID accent pill with
+<code>onAccent</code> text (crust when it contrasts, else black or
+white). It is the loudest element on screen.</li>
+<li><strong>Badges:</strong> a 7 pt freshness dot plus age text inside
+the pill.</li>
+</ul>
+<h3 id="inputs--fields">Inputs / Fields</h3>
+<ul>
+<li><strong>Style:</strong> a recessed mantle well (60% dark, 55% light)
+with a hairline (text at 12%), 6 pt corners.</li>
+<li><strong>Focus:</strong> the hairline becomes the accent. The file
+browser's active part gets a 2 pt accent <code>partRing</code>.</li>
+<li><strong>Selection:</strong> pinned to the theme highlight with a
+contrast-picked foreground.</li>
+</ul>
+<h3 id="rows-list-file-list-table-switcher">Rows (list, file list,
+table, switcher)</h3>
+<ul>
+<li><strong>Cursor:</strong> a highlight pill (4 pt) with a 3 pt accent
+edge on the left.</li>
+<li><strong>Multi-select:</strong> the same pill without the edge on
+marked rows.</li>
+<li><strong>Hover:</strong> a ghost hover fill.</li>
+<li><strong>Tables:</strong> hairline row separators, mantle header,
+<code>jiraCellTone</code> cells.</li>
+</ul>
+<h3 id="header-signature">Header (signature)</h3>
+<ul>
+<li>The crust band with ✕, the kitchen-sink app icon, view-switcher
+icons (the current one on an accent chip), dim 9 pt meta, and a centred
+title.</li>
+<li><strong>Header Style</strong> (<code>[app] header-style</code>),
+app-wide, is built only from header, accent and accent2: Flat
+(hairline), Accent Edge (2 pt accent rule), Accent Stripe (3 pt accent →
+accent2 top ribbon), Tinted (20% accent wash), Glow (accent light
+falling from the top), Aurora (accent → accent2 → header, left to
+right).</li>
+</ul>
+<h3 id="toast">Toast</h3>
+<ul>
+<li>A crust pill (94%) with a hairline (text at 10%), a soft shadow, a
+success SF Symbol and 12.5 pt medium text. Bottom centre, fades and
+rises in 0.18 s, leaves after 0.25 s, holds 1.4 s.</li>
+</ul>
+<h3 id="overlay-cards-shortcuts-questions">Overlay Cards (shortcuts,
+questions)</h3>
+<ul>
+<li><strong>Shortcuts card</strong> (<code>ShortcutsOverlay</code>,
+Cmd+/): the same card in every view, popup and card window alike. Key
+caps in a mantle well with a hairline, the descriptions in a single
+column, group titles in the accent.</li>
+<li><strong>Confirm card</strong>
+(<code>CardWindowController.confirm</code> / <code>prompt</code>): a
+question asked inside the window, never a system alert. 12 pt corners
+over a 30% black backdrop. The default button is the accent-filled one
+and carries the focus ring. A risky choice is a danger button, and
+Cancel is the default for anything that can trash or overwrite. An
+optional recessed input (<code>JiraInputBox</code>) sits under the text.
+A click outside does nothing.</li>
+</ul>
+<h3 id="theme-swatch-signature">Theme Swatch (signature)</h3>
+<ul>
+<li>Each Theme ▸ preset is drawn as a 58 × 20 miniature window: a crust
+header, the solid accent tab, a text line, a selected row with its edge,
+and four palette dots. Hovering a preset previews it live.</li>
+</ul>
+<h2 id="dos-and-donts">Do's and Don'ts</h2>
+<h3 id="do">Do:</h3>
+<ul>
+<li><strong>Do</strong> draw with <code>PopupColors</code> tokens and
+<code>tone(_:)</code>, and push live changes through
+<code>PopupThemeable</code> / <code>pushColors()</code>.</li>
+<li><strong>Do</strong> layer surfaces crust &lt; mantle &lt; base &lt;
+surface0/1, and keep inputs recessed and buttons raised.</li>
+<li><strong>Do</strong> mark the cursor row with the highlight pill plus
+a 3 pt accent edge, and the active tab with the solid accent pill.</li>
+<li><strong>Do</strong> scale every chrome size by
+<code>zoom</code>.</li>
+<li><strong>Do</strong> check a new colour against light presets (Paper,
+Latte, Solarized Light) as well as dark ones.</li>
+</ul>
+<h3 id="dont">Don't:</h3>
+<ul>
+<li><strong>Don't</strong> use system colours, the macOS accent colour,
+or AppKit default selection and bezel styles.</li>
+<li><strong>Don't</strong> use the accent for status, or a status hue
+for selection.</li>
+<li><strong>Don't</strong> add shadows to elements inside the card.
+Depth there is tonal.</li>
+<li><strong>Don't</strong> resize the shared window when switching
+views.</li>
+<li><strong>Don't</strong> ask with an <code>NSAlert</code> /
+<code>jiraFormSheet</code> in a card window. Use the confirm card,
+because a system sheet ignores the theme.</li>
+<li><strong>Don't</strong> use capsule chips (the toast is the only
+pill) or corners above 4 pt on in-card controls.</li>
+</ul>
+<script>
+(function () {
+  var COPY_ICON =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  var CHECK_ICON =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+  function addCopyButtons() {
+    var pres = document.querySelectorAll("pre");
+    pres.forEach(function (pre) {
+      if (pre.parentElement && pre.parentElement.classList.contains("codeblock")) return;
+      var code = pre.querySelector("code") || pre;
+      var btn = document.createElement("button");
+      btn.className = "copy-btn";
+      btn.type = "button";
+      btn.innerHTML = COPY_ICON;
+      btn.setAttribute("aria-label", "Copy code to clipboard");
+      btn.addEventListener("click", function () {
+        var text = code.innerText;
+        function done(ok) {
+          btn.classList.toggle("copied", ok);
+          btn.innerHTML = ok ? CHECK_ICON : COPY_ICON;
+          setTimeout(function () {
+            btn.innerHTML = COPY_ICON;
+            btn.classList.remove("copied");
+          }, 1500);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(
+            function () { done(true); },
+            function () { done(false); }
+          );
+        } else {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); done(true); }
+          catch (e) { done(false); }
+          document.body.removeChild(ta);
+        }
+      });
+      var wrap = document.createElement("div");
+      wrap.className = "codeblock";
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(btn);
+      wrap.appendChild(pre);
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", addCopyButtons);
+  } else {
+    addCopyButtons();
+  }
+})();
+</script>
+</body>
+</html>
