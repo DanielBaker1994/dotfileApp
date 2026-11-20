@@ -1146,6 +1146,7 @@ impl SwitcherController {
                 self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
             }
             "terminal" => self.toggle_terminal_panel(),
+            "find-window" => self.find_window(),
 "window" | "show" | "files" | "jira" | "confluence" | "ai"
             | "prettyprint" | "filefast" | "health" | "health-checks"
             | "text-table" => {
@@ -1159,6 +1160,38 @@ impl SwitcherController {
                     .push(format!("palette: '{name}' has no Rust handler yet"));
             }
         }
+    }
+
+    /// `[find-window]` palette command: wait `delay` seconds (so the user can
+    /// focus the window in question), run `script` (prints one line), toast it.
+    /// Never activates the app; the work is off the main thread.
+    fn find_window(&self) {
+        let path = self.inner.lock().unwrap().settings.commands_conf_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let vars = crate::views::tools::section_vars(&text, "find-window");
+        let delay: u64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(5);
+        let script = vars.get("script").cloned().unwrap_or_default();
+        let script = match script.strip_prefix("~/") {
+            Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+            None => script,
+        };
+        let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else { return };
+        let toast = |q: &std::sync::Arc<std::sync::Mutex<Vec<UiCommand>>>, t: String, sym: &'static str| {
+            q.lock().unwrap().push(UiCommand::Toast(t, sym));
+        };
+        toast(&queue, format!("Focus the window — reading pid in {delay}s"), "scope");
+        self.log(&format!("find-window: sampling in {delay}s via {script}"));
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            let out = std::process::Command::new("/bin/bash").arg("-c").arg(&script).output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    let line = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    toast(&queue, line, "scope");
+                }
+                _ => toast(&queue, "find-window: script failed".into(), "exclamationmark.triangle.fill"),
+            }
+        });
     }
 
     /// The Hyper+S palette's `(id, title)` rows (`[app] palette`).

@@ -33,7 +33,7 @@ switcher-name = "kitchen-sink"
 palette-first = "paths, filefast, text-table, prettyprint"
 # The Hyper+S palette: these commands, in this order, then your AeroSpace
 # workspaces + their apps — one list. Empty = every in-palette command.
-palette = "paths, filefast, text-table, prettyprint"
+palette = "paths, filefast, text-table, prettyprint, find-window"
 switcher-width = 760
 detail-name = "jira-detail"
 
@@ -109,6 +109,16 @@ save-dir = "/tmp/filefast"
 script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
 aliases = "quickfiles, quick files"
 
+
+[find-window]
+enabled = true
+type = "shell"
+label = "Find Window PID"
+icon = "scope"
+# seconds to wait after picking it (focus the stray window), then run script
+delay = 5
+script = "~/.dotfiles/bin/winwatch --once"
+aliases = "pid, window pid, stray window"
 
 [pane-find]
 rows = 12
