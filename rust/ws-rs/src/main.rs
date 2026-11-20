@@ -188,6 +188,15 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         }
 
         app::logging::ws_log(&format!("kitchen-sink (rust) daemon: socket {sock}"));
+        // Check the config paths at launch: log what is read, and warn on
+        // screen if an old ~/.config/jira or ~/.config/confluence is back.
+        let (lines, warn) = app::config::startup_config_report();
+        for l in &lines {
+            app::logging::ws_log(l);
+        }
+        if let Some(w) = warn {
+            crate::ui::toast::show(&w, "exclamationmark.triangle");
+        }
         app.run();
     }
 }

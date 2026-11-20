@@ -1649,6 +1649,39 @@ pub fn read_config_text() -> Option<String> {
     read_config_text_at(&commands_conf_path()).map(|t| apply_override(&t))
 }
 
+/// The launch-time check of the config paths (same report as
+/// `bin/check-overrides.sh`): one log line per file, plus a warning when an
+/// old `~/.config/jira` / `~/.config/confluence` folder exists (no longer read).
+pub fn startup_config_report() -> (Vec<String>, Option<String>) {
+    let dir = config_dir();
+    let mark = |p: &Path| if p.exists() { "found" } else { "not created yet" };
+    let mut lines = vec![
+        format!("config: defaults/backup {}", tilde(&commands_conf_path())),
+        format!("config: folder {} ({})", tilde(&dir), mark(&dir)),
+    ];
+    if let Some(o) = commands_override_path() {
+        lines.push(format!("config: override {} ({})", tilde(&o), mark(&o)));
+    }
+    for rel in ["files-favorites.json", "jira/config.json", "jira/team.json", "confluence/config.json"] {
+        let p = dir.join(rel);
+        lines.push(format!("config: {} ({})", tilde(&p), mark(&p)));
+    }
+    let home = home_dir();
+    let stale: Vec<String> = [".config/jira", ".config/confluence"]
+        .iter()
+        .map(|r| PathBuf::from(format!("{home}/{r}")))
+        .filter(|p| p.exists())
+        .map(|p| tilde(&p))
+        .collect();
+    let warn = (!stale.is_empty()).then(|| {
+        format!("{} is no longer read — move its files into {}", stale.join(" and "), tilde(&dir))
+    });
+    if let Some(w) = &warn {
+        lines.push(format!("config: WARNING {w}"));
+    }
+    (lines, warn)
+}
+
 /// `~`-spelled path for menu titles.
 pub fn tilde(p: &Path) -> String {
     crate::app::pathfmt::tilde_path(&p.to_string_lossy(), &home_dir())

@@ -516,12 +516,14 @@ mod appkit {
         let status_item = bar.statusItemWithLength(NSSquareStatusItemLength);
         if let Some(button) = status_item.button(mtm) {
             button.setToolTip(Some(ns_string!("kitchen-sink")));
-            // A small template symbol (tints with the menu bar, light/dark);
-            // the old "☰" title is the fallback if the symbol is missing.
-            let img = objc2_app_kit::NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                ns_string!("square.grid.2x2"),
-                Some(ns_string!("kitchen-sink")),
-            );
+            // The kitchen-sink stencil (`menubar_icon.png`, 36px = 18pt @2x,
+            // made by bin/make-menubar-icon.py) as a template image, so it
+            // tints with the menu bar in light/dark; "☰" if it is missing.
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            let img = crate::ui::style::image_file(&format!("{assets}/menubar_icon.png"));
+            if let Some(img) = &img {
+                img.setSize(objc2_foundation::NSSize::new(18.0, 18.0));
+            }
             match img {
                 Some(img) => {
                     img.setTemplate(true);

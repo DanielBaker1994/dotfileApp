@@ -158,8 +158,11 @@ STEP="installing configs"
 step "3/6 configs (symlinked into the repo)"
 ensure_sym_links || die "a real file is in the way of a config link (see ✘ above)"
 ok "configs linked to the repo ($CONFIG_DIRS)"
-warn "kitchen-sink checks and uses these settings files:"
-"$ROOT/bin/check-overrides.sh" | while IFS= read -r l; do info "$l"; done
+step "3b/6 your config folder (personal settings, kept outside the repo)"
+info "kitchen-sink checks and uses ONE folder for your own settings: the"
+info "commands.toml override, pinned folders, Jira + Confluence credentials."
+info "Set its location in pylib/paths.json (configDir)."
+"$ROOT/bin/check-overrides.sh" --offer
 
 STEP="building the app"
 step "4/6 building kitchen-sink.app (cargo build of rust/)"

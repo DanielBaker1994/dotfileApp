@@ -458,8 +458,14 @@ Python resolves it in `jira_paths.CONFIG_DIR`; Rust in `config::config_dir()`
 override sets back to the override (`WS_COMMANDS_OVERRIDE` moves the file,
 empty = off). Rust only: Python readers still see the repo commands.toml.
 Both commands.toml paths show in the status item menu and the view menu.
+`check-overrides.sh --offer` (INSTALL.sh step 3b) creates the folder + a
+starter override and offers to move/copy files still in the old places; the
+app logs the same report at launch (`config::startup_config_report`) and
+toasts if `~/.config/jira` / `~/.config/confluence` reappear.
 **Menu-bar only:** Accessory activation policy + `LSUIElement`; `[app]
-dock-icon = true` (or `WS_DOCK_ICON=1`) brings the Dock icon back.
+dock-icon = true` (or `WS_DOCK_ICON=1`) brings the Dock icon back. The status
+item shows `menubar_icon.png` (kitchen-sink stencil, template image; redraw
+with `bin/make-menubar-icon.py`, shipped via `RESOURCE_FILES`).
 
 ## Common tasks
 
