@@ -3396,7 +3396,12 @@ mod daemon_ui {
             return;
         };
         let _ = dispatch2::DispatchQueue::main().after(when, move || {
-            if CLICK_RENAME_GEN.with(|g| g.get()) == gen {
+            // Still holding the button: a press-and-hold that is about to
+            // become a drag, not a click — opening the rename field now
+            // would sit under the pointer and swallow the drag (Finder only
+            // renames after a click is released).
+            let held = objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0;
+            if !held && CLICK_RENAME_GEN.with(|g| g.get()) == gen {
                 let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
                 if let Some(ui) = ui {
                     f(&ui);

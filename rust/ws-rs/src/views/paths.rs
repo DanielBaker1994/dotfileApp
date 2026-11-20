@@ -454,6 +454,9 @@ impl PathsWindow {
 
     pub fn set_query(&mut self, q: &str) {
         self.query = q.trim().to_string();
+        // The rows change under the pointer: a click on the old row N is not
+        // a second click on the new row N (that would arm click-to-rename).
+        self.last_clicked = None;
         if self.shown {
             self.reload(false);
         }
