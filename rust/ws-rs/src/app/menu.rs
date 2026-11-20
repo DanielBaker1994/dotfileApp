@@ -24,6 +24,12 @@ pub enum MenuAction {
     Quit,
     /// App ▸ Settings… (Cmd+,): opens `ws-settings`, as Hyper+/ does.
     Settings,
+    /// Status item "Open kitchen-sink": there is no Dock icon to click.
+    Open,
+    /// Open the repo commands.toml (title shows its path).
+    OpenConfig,
+    /// Open (creating if missing) the personal override file.
+    OpenOverrides,
 }
 
 impl MenuAction {
@@ -36,6 +42,9 @@ impl MenuAction {
             MenuAction::CloseWindow => 3,
             MenuAction::Quit => 4,
             MenuAction::Settings => 5,
+            MenuAction::Open => 6,
+            MenuAction::OpenConfig => 7,
+            MenuAction::OpenOverrides => 8,
             MenuAction::SetHeaderStyle(style) => {
                 let idx = HeaderStyle::ALL.iter().position(|s| *s == style).unwrap_or(0);
                 Self::HEADER_STYLE_BASE + idx as i64
@@ -51,6 +60,9 @@ impl MenuAction {
             3 => MenuAction::CloseWindow,
             4 => MenuAction::Quit,
             5 => MenuAction::Settings,
+            6 => MenuAction::Open,
+            7 => MenuAction::OpenConfig,
+            8 => MenuAction::OpenOverrides,
             i if i >= Self::HEADER_STYLE_BASE => {
                 let idx = (i - Self::HEADER_STYLE_BASE) as usize;
                 MenuAction::SetHeaderStyle(*HeaderStyle::ALL.get(idx)?)
@@ -222,12 +234,17 @@ impl MenuSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuSettings {
     pub header_style: HeaderStyle,
+    /// `~`-spelled config paths shown in the status menu (empty = no row).
+    pub config_path: String,
+    pub override_path: String,
 }
 
 impl Default for MenuSettings {
     fn default() -> Self {
         MenuSettings {
             header_style: HeaderStyle::Flat,
+            config_path: String::new(),
+            override_path: String::new(),
         }
     }
 }
@@ -264,6 +281,23 @@ fn header_style_submenu(current: HeaderStyle) -> SubmenuSpec {
 pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
     let mut items = Vec::new();
 
+    items.push(MenuNode::Item(MenuItemSpec::action(MenuAction::Open, "Open kitchen-sink")));
+    items.push(MenuNode::Separator);
+    if !settings.config_path.is_empty() {
+        items.push(MenuNode::Item(MenuItemSpec::action(
+            MenuAction::OpenConfig,
+            format!("Open commands.toml — {}", settings.config_path),
+        )));
+    }
+    if !settings.override_path.is_empty() {
+        items.push(MenuNode::Item(MenuItemSpec::action(
+            MenuAction::OpenOverrides,
+            format!("Open Overrides — {}", settings.override_path),
+        )));
+    }
+    if !settings.config_path.is_empty() || !settings.override_path.is_empty() {
+        items.push(MenuNode::Separator);
+    }
     items.push(MenuNode::Submenu(header_style_submenu(settings.header_style)));
     items.push(MenuNode::Separator);
 
@@ -482,7 +516,19 @@ mod appkit {
         let status_item = bar.statusItemWithLength(NSSquareStatusItemLength);
         if let Some(button) = status_item.button(mtm) {
             button.setToolTip(Some(ns_string!("kitchen-sink")));
-            button.setTitle(ns_string!("☰"));
+            // A small template symbol (tints with the menu bar, light/dark);
+            // the old "☰" title is the fallback if the symbol is missing.
+            let img = objc2_app_kit::NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                ns_string!("square.grid.2x2"),
+                Some(ns_string!("kitchen-sink")),
+            );
+            match img {
+                Some(img) => {
+                    img.setTemplate(true);
+                    button.setImage(Some(&img));
+                }
+                None => button.setTitle(ns_string!("☰")),
+            }
         }
         status_item.setMenu(Some(&menu));
         STATUS_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
@@ -609,6 +655,9 @@ mod tests {
             MenuAction::CloseWindow,
             MenuAction::Quit,
             MenuAction::Settings,
+            MenuAction::Open,
+            MenuAction::OpenConfig,
+            MenuAction::OpenOverrides,
         ];
         let mut seen = std::collections::HashSet::new();
         for action in actions {
@@ -636,11 +685,11 @@ mod tests {
         let spec = build_menu_spec(&MenuSettings::default());
         assert_eq!(
             spec.top_titles(),
-            vec!["Header Bar Style", "—", "Close Window", "—", "Quit"]
+            vec!["Open kitchen-sink", "—", "Header Bar Style", "—", "Close Window", "—", "Quit"]
         );
         // The header-style submenu is a direct top-level node now that the
         // single-child "Global Window Options" wrapper is gone.
-        assert!(matches!(spec.items[0], MenuNode::Submenu(_)));
+        assert!(matches!(spec.items[2], MenuNode::Submenu(_)));
 
         // Every row is actionable and wired to a handler in `main.rs`.
         let actions: Vec<MenuAction> = spec.flatten().iter().map(|item| item.action).collect();

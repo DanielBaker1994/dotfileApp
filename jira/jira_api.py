@@ -7,7 +7,7 @@ Usage: jira_api.py [OPTIONS] [ISSUE-KEY]
   With no arguments, starts the interactive wizard.
 
 Discovery / setup:
-  --init            interactively write ~/.config/jira/config.json (chmod 600)
+  --init            interactively write ~/.config/kitchen-sink-local/jira/config.json (chmod 600)
   --myself          connectivity test: GET /rest/api/2/myself (prints JSON)
   --site/--email/--token VALUE   override the config for this run
   --auth bearer|basic            override the auth mode for this run
@@ -28,7 +28,7 @@ curl (every request is a plain curl - see and re-run it yourself):
   --mask            with --curl: write $JIRA_TOKEN instead of the real token
   On any HTTP failure the failing request is printed as a runnable curl.
 
-team.json (~/.config/jira/team.json, example: jira/team.example.json):
+team.json (~/.config/kitchen-sink-local/jira/team.json, example: jira/team.example.json):
   --jobs                  list jobs + JQL templates (and their args)
   --job KEY, --template KEY   run a job / jql_templates entry as the query
   --arg NAME=VALUE        fill a job/template {placeholder} (repeatable);
@@ -1692,7 +1692,7 @@ def parse_args(argv: list):
         elif name == "--config":
             val()   # consume the value before answering
             die("--config is not a jira_api.py option: the config is always "
-                "~/.config/jira/config.json (edit it with jira_config.py or "
+                "~/.config/kitchen-sink-local/jira/config.json (edit it with jira_config.py or "
                 "the setup sheet); use --site / --email / --token to override "
                 "single values")
         elif name == "--jobs":

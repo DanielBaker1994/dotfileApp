@@ -155,8 +155,8 @@ read-only, the sandbox entry is disabled until wanted.
 | What | Where |
 | --- | --- |
 | On/off switch | `commands.toml [jira] enabled` (menu **Enable Jira** / **Disable Jira**; `poll-when-disabled = true` keeps the poller running while disabled; or `bin/kitchen_sink.sh jira-poll on\|off\|toggle\|setup`) |
-| Credentials + **poll jobs** (schedules) | `~/.config/jira/config.json` → `endpoints` (chmod 600; edited by the **Jira Config** window) |
-| Team schema (custom fields, JQL templates, …) | `~/.config/jira/team.json` (optional; example `jira/team.example.json`) |
+| Credentials + **poll jobs** (schedules) | `~/.config/kitchen-sink-local/jira/config.json` → `endpoints` (chmod 600; edited by the **Jira Config** window) |
+| Team schema (custom fields, JQL templates, …) | `~/.config/kitchen-sink-local/jira/team.json` (optional; example `jira/team.example.json`) |
 | Live state (last/next run, errors, lock) | `~/.cache/jira/status.json` · `jira/jira_status.py` · `jira-doctor.sh` |
 | Logs (poll summary, debug, every HTTP request) | `logs/YYYY_MM_DD/jira-{poll,debug}.log` · `logs/YYYY_MM_DD/jira-curl.log` (chmod 600 — contains the basic-auth token) · `bin/ws-logs` |
 | Window data | `~/.cache/kitchen-sink/jira_json/<endpoint file>.json` |
@@ -164,7 +164,7 @@ read-only, the sandbox entry is disabled until wanted.
 ### Where the poll jobs (and their JSON files) come from
 
 Every tab in the Jira window is a JSON file written by one **poll job**, and
-every poll job is one entry of `endpoints` in `~/.config/jira/config.json`:
+every poll job is one entry of `endpoints` in `~/.config/kitchen-sink-local/jira/config.json`:
 
 ```jsonc
 {
@@ -186,7 +186,7 @@ every poll job is one entry of `endpoints` in `~/.config/jira/config.json`:
   its `columns`.
 - **Who creates them:** `jira/jira_config.py`. A fresh config gets the
   defaults (`all`, `releases`, `directory` — `DEFAULT_ENDPOINTS`). Configs
-  migrated from the old env-style `~/.config/jira/config` got one extra job
+  migrated from the old env-style `~/.config/kitchen-sink-local/jira/config` got one extra job
   per project (`KAN`, `SAM1`, …). After that the file is yours: add / edit /
   delete jobs in **Jira Config** (each job page shows *Defined in
   `config.json › endpoints › NAME`* and an **Open config.json** button), or

@@ -9,7 +9,8 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     || { printf 'jira-doctor: cannot read %s/install.conf\n' "$WS_ROOT" >&2; exit 1; }
 WS_APP="$WS_ROOT/kitchen-sink.app"
 WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
-CONF_JSON="$HOME/.config/jira/config.json"
+CONF_JSON="$(python3 "$WS_ROOT/jira/jira_config.py" --path 2>/dev/null)"
+[ -n "$CONF_JSON" ] || CONF_JSON="$HOME/.config/kitchen-sink-local/jira/config.json"
 CACHE="$HOME/.cache/jira"
 STATUS="$CACHE/status.json"
 # The curl log moved to the unified date-based logs/ directory (pylib/log_hub.py).

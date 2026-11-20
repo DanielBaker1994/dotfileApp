@@ -1494,6 +1494,9 @@ impl SwitcherController {
             })
             .collect();
         let commands = count_commands(&text);
+        // Lay the personal override over the repo file (before taking `inner`:
+        // the merge goes through the python helper). Only used once valid.
+        let merged = config::apply_override(&text);
         let mut inner = self.inner.lock().unwrap();
         if issues.iter().any(|i| i["fatal"] == json!(true)) {
             let parked = config::park_broken_config(&path, text.as_bytes());
@@ -1512,6 +1515,7 @@ impl SwitcherController {
                 "parked": parked.map(|p| p.display().to_string()),
             });
         }
+        let text = merged;
         // Parse into fresh defaults so a key deleted from the file does not
         // keep its previous (stale) value — `reload` matches a restart.
         let mut settings = AppSettings::default();
@@ -5998,10 +6002,28 @@ mod daemon_ui {
                     }
                 }),
                 MenuEntry::Separator,
-                MenuEntry::item("Open commands.toml", move || {
-                    let _ = &c;
-                    open_path(&conf.to_string_lossy());
-                }),
+                // Show exactly which files are read: the repo default and the
+                // personal override laid over it (keys there win).
+                MenuEntry::item(
+                    &format!("Open commands.toml — {}", crate::app::config::tilde(&conf)),
+                    move || {
+                        let _ = &c;
+                        open_path(&conf.to_string_lossy());
+                    },
+                ),
+            ]);
+            if let Some(over) = crate::app::config::commands_override_path() {
+                let verb = if over.exists() { "Open Overrides" } else { "Create Overrides" };
+                entries.push(MenuEntry::item(
+                    &format!("{verb} — {}", crate::app::config::tilde(&over)),
+                    move || {
+                        if let Some(p) = crate::app::config::ensure_override_file() {
+                            open_path(&p.to_string_lossy());
+                        }
+                    },
+                ));
+            }
+            entries.extend(vec![
                 MenuEntry::item("Keyboard Shortcuts  ⌘/", move || {
                     if let Some(ui) = w3.load() {
                         ui.show_shortcuts();

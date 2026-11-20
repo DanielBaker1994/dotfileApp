@@ -1,8 +1,10 @@
 {
-  "_comment": "Where the Jira poller (python) and the app (Swift JiraPoll) keep their files. ONE source for both: jira_paths.py and JiraPoll.paths read this. Env overrides: JIRA_CONFIG_JSON, JIRA_TEAM_JSON, JIRA_CONFIG_FILE, JIRA_CACHE_DIR.",
-  "configJson": "~/.config/jira/config.json",
-  "teamJson": "~/.config/jira/team.json",
-  "legacyConfig": "~/.config/jira/config",
+  "_comment": "Where kitchen-sink keeps its files. ONE source for python (jira_paths.py), the app (config.rs reads configDir; jira paths via the helper) and bin/check-overrides.sh. configDir = THE one folder for personal config: commands.toml override, pinned folders, jira/ (token + team), confluence/. Change it here (or WS_CONFIG_DIR). {configDir} expands in the values below. Env overrides: WS_CONFIG_DIR, JIRA_CONFIG_JSON, JIRA_TEAM_JSON, JIRA_CONFIG_FILE, JIRA_CACHE_DIR.",
+  "configDir": "~/.config/kitchen-sink-local",
+  "configJson": "{configDir}/jira/config.json",
+  "teamJson": "{configDir}/jira/team.json",
+  "legacyConfig": "{configDir}/jira/config",
+  "confluenceConfig": "{configDir}/confluence/config.json",
   "cacheDir": "~/.cache/jira",
   "outDir": "~/.cache/kitchen-sink/jira_json",
   "cache": {

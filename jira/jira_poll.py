@@ -4,7 +4,7 @@ refreshes the shared cache, publishes the json files the jira window reads,
 and records everything in ~/.cache/jira/status.json.
 
 launchd fires this every 60s (StartInterval, survives sleep/wake). Each
-endpoint in ~/.config/jira/config.json has its own `window` (10m, 1h, ...):
+endpoint in ~/.config/kitchen-sink-local/jira/config.json has its own `window` (10m, 1h, ...):
 an endpoint is DUE when its window has elapsed since its last run. A tick
 where nothing is due is a cheap no-op (still refreshes status.json).
 

@@ -445,6 +445,21 @@ codec); writes through `config.line`/`config.setting` with a validation gate
 refreshed; atomic write). Repo build → **this repo's** `commands.toml`;
 installed app → `~/.config/kitchen-sink/commands.toml` (`WS_COMMANDS_CONF` is
 exported for Python readers).
+**One personal config folder** (`configDir` in `pylib/paths.json`, or
+`$WS_CONFIG_DIR`; default `~/.config/kitchen-sink-local`, a sibling of the repo,
+which *is* `~/.config/kitchen-sink`). It holds everything machine-local:
+`commands.toml` (override), `files-favorites.json` (Files pins),
+`jira/config.json` + `jira/team.json` (token, chmod 600), `confluence/config.json`.
+Python resolves it in `jira_paths.CONFIG_DIR`; Rust in `config::config_dir()`
+(reads paths.json); `bin/check-overrides.sh` reports it at install/setup.
+`~/.config/jira` and `~/.config/confluence` are no longer read.
+`config::read_config_text()` lays the override's keys over the repo file (per
+`[section] key`, via `merge_override`); `save_config_values` writes a key the
+override sets back to the override (`WS_COMMANDS_OVERRIDE` moves the file,
+empty = off). Rust only: Python readers still see the repo commands.toml.
+Both commands.toml paths show in the status item menu and the view menu.
+**Menu-bar only:** Accessory activation policy + `LSUIElement`; `[app]
+dock-icon = true` (or `WS_DOCK_ICON=1`) brings the Dock icon back.
 
 ## Common tasks
 

@@ -260,7 +260,9 @@ ws_fake_confluence() {
     local RUN_DIR="$HOME/.cache/confluence"
     local PID_FILE="$RUN_DIR/fake.pid"
     local LOG_FILE="$RUN_DIR/fake.log"
-    local FAKE_CFG="$HOME/.config/confluence/fake.json"
+    local CFG_DIR
+    CFG_DIR="$(python3 -c "import sys; sys.path.insert(0, '$ROOT/pylib'); import jira_paths; print(jira_paths.CONFIG_DIR)")"
+    local FAKE_CFG="$CFG_DIR/confluence/fake.json"
 
     _fc_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
     _fc_set_conf() {
@@ -303,7 +305,7 @@ PY
             echo "fake Confluence: http://127.0.0.1:$PORT/wiki (pid $(cat "$PID_FILE"), log $LOG_FILE)"
         fi
         _fc_write_cfg || ws_die "could not write the fake config"
-        _fc_set_conf "~/.config/confluence/fake.json" || ws_die "could not point [confluence] config at the fake site"
+        _fc_set_conf "$FAKE_CFG" || ws_die "could not point [confluence] config at the fake site"
         echo "app now uses $FAKE_CFG ([confluence] config); 'ws fake confluence stop' switches back"
         ;;
     stop)
@@ -314,7 +316,7 @@ PY
         fi
         rm -f "$PID_FILE"
         _fc_set_conf "" || ws_die "could not reset [confluence] config"
-        echo "app uses ~/.config/confluence/config.json again"
+        echo "app uses $CFG_DIR/confluence/config.json again"
         ;;
     status)
         if _fc_running; then echo "running: http://127.0.0.1:$PORT/wiki (pid $(cat "$PID_FILE"))"; else echo "not running"; fi

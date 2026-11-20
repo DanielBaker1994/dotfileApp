@@ -1553,8 +1553,126 @@ pub fn read_config_text_at(path: &Path) -> Option<String> {
     })
 }
 
+/// The personal overrides file, kept outside the repo in a sibling folder
+/// (`~/.config/kitchen-sink-local/commands.toml` — `~/.config/kitchen-sink`
+/// is the repo itself; `WS_COMMANDS_OVERRIDE` moves it, an empty value turns
+/// it off). `bin/check-overrides.sh` (install / setup) reports the same path. Any key it sets wins over the same `[section]` key in
+/// the repo's commands.toml, which stays the full default/backup copy.
+pub fn commands_override_path() -> Option<PathBuf> {
+    match std::env::var("WS_COMMANDS_OVERRIDE") {
+        Ok(p) if p.is_empty() => None,
+        Ok(p) => Some(PathBuf::from(p)),
+        Err(_) => Some(config_dir().join("commands.toml")),
+    }
+}
+
+/// THE folder for personal config: the commands.toml override, the Files
+/// pins, `jira/` (token + team) and `confluence/`. `$WS_CONFIG_DIR`, else
+/// `pylib/paths.json` `configDir` (the one place to change it), else
+/// `~/.config/kitchen-sink-local`.
+pub fn config_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("WS_CONFIG_DIR") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = home_dir();
+    let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+    let from_json = std::fs::read_to_string(format!("{assets}/pylib/paths.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("configDir").and_then(|s| s.as_str()).map(str::to_string));
+    let raw = from_json.unwrap_or_else(|| "~/.config/kitchen-sink-local".to_string());
+    match raw.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(format!("{home}/{rest}")),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// `[section] -> [(key, value)]` of a config text, in file order (decoded
+/// values, so they can be fed straight back to `config_setting_text`).
+fn override_entries(text: &str) -> Vec<(String, Vec<(String, Option<String>)>)> {
+    let mut out: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
+    for line in config_text::config_decoded_lines(text) {
+        if let Some(h) = line.header {
+            if !out.iter().any(|(s, _)| *s == h) {
+                out.push((h, Vec::new()));
+            }
+        } else if let (Some(k), Some(v)) = (line.key, line.value) {
+            if let Some((_, kv)) = out.last_mut() {
+                kv.retain(|(key, _)| *key != k);
+                kv.push((k, Some(v)));
+            }
+        }
+    }
+    out
+}
+
+/// Lay the override file's keys over `base` (memoised on both texts: every
+/// view re-reads the config). A broken or unreadable override is ignored.
+pub fn apply_override(base: &str) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<Option<(String, String, String)>>> = OnceLock::new();
+    let Some(over) = commands_override_path().and_then(|p| read_config_text_at(&p)) else {
+        return base.to_string();
+    };
+    if over.trim().is_empty() || validate_config(&over).iter().any(|i| i.fatal) {
+        return base.to_string();
+    }
+    let memo = MEMO.get_or_init(|| Mutex::new(None));
+    if let Some((b, o, merged)) = memo.lock().unwrap().as_ref() {
+        if b == base && *o == over {
+            return merged.clone();
+        }
+    }
+    // Helper not up yet: use the repo text, and don't memoise.
+    let Some(text) = merge_override(base, &over) else {
+        return base.to_string();
+    };
+    *memo.lock().unwrap() = Some((base.to_string(), over, text.clone()));
+    text
+}
+
+/// `base` with every `[section] key` from `over` set (added when missing).
+/// `None` = the codec call failed.
+pub fn merge_override(base: &str, over: &str) -> Option<String> {
+    let mut text = base.to_string();
+    for (section, kv) in override_entries(over) {
+        if !kv.is_empty() {
+            text = config_text::config_setting_text(&text, &section, &kv)?;
+        }
+    }
+    Some(text)
+}
+
 pub fn read_config_text() -> Option<String> {
-    read_config_text_at(&commands_conf_path())
+    read_config_text_at(&commands_conf_path()).map(|t| apply_override(&t))
+}
+
+/// `~`-spelled path for menu titles.
+pub fn tilde(p: &Path) -> String {
+    crate::app::pathfmt::tilde_path(&p.to_string_lossy(), &home_dir())
+}
+
+/// Create the override file with a commented stub if it is missing (so the
+/// menu's "Open Overrides" always has something to open). Returns its path.
+pub fn ensure_override_file() -> Option<PathBuf> {
+    let p = commands_override_path()?;
+    if !p.exists() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let stub = format!(
+            "# Personal overrides for kitchen-sink (machine-local, not in the repo).\n\
+             # Any [section] key set here wins over the same key in\n\
+             # {}, which stays the full default/backup.\n\
+             # Example — the Files sidebar's pinned folders:\n\
+             #\n# [files]\n# favorites = \"~/notes, ~/Desktop\"\n",
+            tilde(&commands_conf_path())
+        );
+        let _ = std::fs::write(&p, stub);
+    }
+    Some(p)
 }
 
 pub fn write_config_text_at(path: &Path, text: &str) -> bool {
@@ -1612,7 +1730,30 @@ pub fn save_config_values_at(
 /// config, codec timeout under helper load — the documented silent-no-op
 /// footgun): callers that claim success to the user must check.
 pub fn save_config_values(section: &str, kv: &[(String, Option<String>)]) -> bool {
-    save_config_values_at(&commands_conf_path(), section, kv)
+    // A key the override file sets is saved there (else the change would be
+    // shadowed by it); everything else goes to the repo's commands.toml.
+    let over_path = commands_override_path();
+    let overridden: Vec<String> = over_path
+        .as_deref()
+        .and_then(read_config_text_at)
+        .map(|t| {
+            override_entries(&t)
+                .into_iter()
+                .filter(|(s, _)| s == section)
+                .flat_map(|(_, kv)| kv.into_iter().map(|(k, _)| k))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (to_over, to_base): (Vec<_>, Vec<_>) =
+        kv.iter().cloned().partition(|(k, _)| overridden.contains(k));
+    let mut ok = true;
+    if !to_over.is_empty() {
+        ok &= save_config_values_at(over_path.as_deref().unwrap(), section, &to_over);
+    }
+    if !to_base.is_empty() {
+        ok &= save_config_values_at(&commands_conf_path(), section, &to_base);
+    }
+    ok
 }
 
 pub fn save_config_value(section: &str, key: &str, value: &str) {
@@ -2079,6 +2220,28 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&bak);
+    }
+
+    #[test]
+    fn override_keys_win_and_new_keys_are_added() {
+        if !helper_ready() {
+            eprintln!("skipping: no python helper");
+            return;
+        }
+        let base = "[app]\nshell = \"/bin/zsh\"\n\n[files]\nfavorites = \"~/notes, /tmp\"\nsort = \"name\"\n";
+        let over = "[files]\nfavorites = \"~/work, ~/Desktop\"\n\n[jira]\nenabled = true\n";
+        let merged = merge_override(base, over).unwrap();
+        let entries = override_entries(&merged);
+        let get = |sec: &str, key: &str| {
+            entries.iter().find(|(s, _)| s == sec).and_then(|(_, kv)| {
+                kv.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.clone())
+            })
+        };
+        assert_eq!(get("files", "favorites").as_deref(), Some("~/work, ~/Desktop"));
+        assert_eq!(get("files", "sort").as_deref(), Some("name"));
+        assert_eq!(get("app", "shell").as_deref(), Some("/bin/zsh"));
+        assert_eq!(get("jira", "enabled").as_deref(), Some("true"));
+        assert!(!merged.contains("~/notes"), "got: {merged}");
     }
 
     #[test]

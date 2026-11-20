@@ -3,15 +3,15 @@
 
 Single source of truth for everything the python poller reads:
 
-  ~/.config/jira/config.json     site, auth, token, poll endpoints (chmod 600)
-  ~/.config/jira/team.json       team schema - custom_fields, field_mappings,
+  ~/.config/kitchen-sink-local/jira/config.json     site, auth, token, poll endpoints (chmod 600)
+  ~/.config/kitchen-sink-local/jira/team.json       team schema - custom_fields, field_mappings,
                                  project_keys, jobs, api_endpoints, boards,
                                  search_defaults, jql_templates (no secrets,
                                  shareable; example: jira/team.example.json)
   commands.toml [jira]           enabled (THE SWITCH) + columns (render
                                  fields AND the API fields= param)
 
-The legacy env-style ~/.config/jira/config (JIRA_SITE=... lines, written by
+The legacy env-style ~/.config/kitchen-sink-local/jira/config (JIRA_SITE=... lines, written by
 the old jira-api.sh --init) is migrated to config.json on first load; the old
 file is left untouched.
 

@@ -321,7 +321,7 @@ fn project_keys_native(raw: &str) -> (Vec<String>, Vec<String>) {
 /// `JiraPoll.configPath`.
 pub fn config_path() -> String {
     std::env::var("JIRA_CONFIG_JSON").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| {
-        format!("{}/.config/jira/config.json", std::env::var("HOME").unwrap_or_default())
+        crate::app::config::config_dir().join("jira/config.json").to_string_lossy().into_owned()
     })
 }
 

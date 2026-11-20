@@ -24,6 +24,12 @@ owner() {
     echo none
 }
 
+# Tell the user which commands.toml files are read (stderr: stdout is parsed).
+report_overrides() {
+    printf 'setup-home: kitchen-sink checks and uses these settings files:\n' >&2
+    WS_COMMANDS_CONF="$WS_HOME/commands.toml" "$ROOT/bin/check-overrides.sh" | sed 's/^/  /' >&2
+}
+
 sha() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
 
 SEEDS=""
@@ -129,6 +135,7 @@ cmd_app() {
         printf '%s\n' "$SEEDS" | grep '^seed '
     } > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"
     mkdir -p "$HOME/.cache/$APP_NAME"
+    report_overrides
     say "result=ok"
 }
 
@@ -140,6 +147,7 @@ cmd_repo() {
         die "$WS_HOME belongs to the installed app — run its UNINSTALL.sh (or remove the folder) first"
     fi
     printf 'mode=repo\nroot=%s\n' "$ROOT" > "$ROOT/.install"
+    report_overrides
     say "result=ok"
 }
 

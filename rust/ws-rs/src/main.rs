@@ -143,9 +143,18 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
         let mtm = MainThreadMarker::new().expect("main thread");
         let app = NSApplication::sharedApplication(mtm);
-        // The Swift app is a regular app (menu bar + status item), not an
-        // accessory — mirror that so the shared window is launchable.
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        // Menu-bar-only: no Dock icon or Cmd+Tab entry; the status item (and
+        // the hotkeys / `ws` CLI) open the window. `[app] dock-icon = true`
+        // brings the Dock icon back.
+        let dock = std::env::var("WS_DOCK_ICON").map_or(false, |v| v == "1")
+            || app::config::read_config_text()
+                .map(|t| dock_icon_enabled(&t))
+                .unwrap_or(false);
+        app.setActivationPolicy(if dock {
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        });
         // The main menu's File ▸ "Reset Window Size" row routes through the
         // same click handler as the status item; File ▸ "Close Window" (⌘W)
         // stays on the responder chain. The target is leaked on purpose:
@@ -214,7 +223,10 @@ fn install_status_item(mtm: objc2::MainThreadMarker, controller: &Arc<SwitcherCo
     let menu_settings = MenuSettings {
         header_style: crate::ui::theme::HeaderStyle::from_raw(settings.header_style.raw())
             .unwrap_or_default(),
-        ..MenuSettings::default()
+        config_path: app::config::tilde(&app::config::commands_conf_path()),
+        override_path: app::config::commands_override_path()
+            .map(|p| app::config::tilde(&p))
+            .unwrap_or_default(),
     };
     let spec = build_menu_spec(&menu_settings);
     let c = controller.clone();
@@ -227,6 +239,15 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
     use app::menu::MenuAction;
     match action {
         MenuAction::CloseWindow => controller.hide("menu"),
+        MenuAction::Open => controller.open(app::host::DEFAULT_VIEW),
+        MenuAction::OpenConfig => {
+            platform::open_path(&app::config::commands_conf_path());
+        }
+        MenuAction::OpenOverrides => {
+            if let Some(p) = app::config::ensure_override_file() {
+                platform::open_path(&p);
+            }
+        }
         MenuAction::ResetWindowSize => {
             let _ = controller.do_action("reset-size");
         }
@@ -365,4 +386,24 @@ mod tests {
         );
         assert_eq!(enums["header-style"].as_array().unwrap().len(), 7);
     }
+}
+
+/// `[app] dock-icon = true` — show the Dock icon (default: menu bar only).
+#[cfg(target_os = "macos")]
+fn dock_icon_enabled(text: &str) -> bool {
+    let mut in_app = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_app = t == "[app]";
+        } else if in_app {
+            if let Some((k, v)) = t.split_once('=') {
+                if k.trim().trim_matches('"') == "dock-icon" {
+                    let v = v.split('#').next().unwrap_or("").trim().trim_matches('"');
+                    return matches!(v.to_lowercase().as_str(), "true" | "yes" | "on" | "1");
+                }
+            }
+        }
+    }
+    false
 }

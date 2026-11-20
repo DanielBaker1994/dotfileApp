@@ -10,15 +10,20 @@ import jsonmgr
 
 _P = jsonmgr.load("pylib/paths")
 
+# THE folder for personal config (commands.toml override, pins, jira/,
+# confluence/): paths.json `configDir`, or $WS_CONFIG_DIR.
+CONFIG_DIR = os.environ.get("WS_CONFIG_DIR") or os.path.expanduser(_P["configDir"])
+
 
 def _path(env: str, key: str) -> str:
-    return os.environ.get(env) or os.path.expanduser(_P[key])
+    return os.environ.get(env) or os.path.expanduser(_P[key].replace("{configDir}", CONFIG_DIR))
 
 
 CONFIG_JSON = _path("JIRA_CONFIG_JSON", "configJson")
 TEAM_JSON = _path("JIRA_TEAM_JSON", "teamJson")
 LEGACY_CONFIG = _path("JIRA_CONFIG_FILE", "legacyConfig")
 CACHE_DIR = _path("JIRA_CACHE_DIR", "cacheDir")
+CONFLUENCE_CONFIG = _path("CONFLUENCE_CONFIG_JSON", "confluenceConfig")
 OUT_DIR_DEFAULT = os.path.expanduser(_P["outDir"])
 
 CACHE = _P["cache"]       # file names inside CACHE_DIR

@@ -3,6 +3,8 @@ margin-top = 10
 margin-top-builtin = 10
 margin-bottom = 10
 header-style = "quiet"
+# false = menu bar icon only (no Dock icon / Cmd+Tab entry); restart to apply
+dock-icon = false
 
 shell = "/opt/homebrew/bin/bash"
 

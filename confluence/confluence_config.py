@@ -2,7 +2,7 @@
 
 config.json (chmod 600; its own site + token - Confluence is NOT the Jira
 site): $CONFLUENCE_CONFIG_JSON, else commands.toml `[confluence] config`,
-else ~/.config/confluence/config.json.
+else <configDir>/confluence/config.json (pylib/paths.json).
 
   site       full base URL incl. the context path: https://x.atlassian.net/wiki
              (added for *.atlassian.net when missing) or https://conf.corp/confluence
@@ -36,9 +36,10 @@ import jira_config  # type: ignore  # noqa: E402  (write_json_600, ConfigError)
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 import config_text  # type: ignore  # noqa: E402  (the commands.toml codec)
 import jsonmgr  # noqa: E402
+import jira_paths  # noqa: E402  (configDir lives in pylib/paths.json)
 
 HOME = os.path.expanduser("~")
-DEFAULT_CONFIG = os.path.join(HOME, ".config/confluence/config.json")
+DEFAULT_CONFIG = jira_paths.CONFLUENCE_CONFIG
 CACHE_DIR = os.environ.get("CONFLUENCE_CACHE_DIR") or os.path.join(HOME, ".cache/confluence")
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.toml")
 

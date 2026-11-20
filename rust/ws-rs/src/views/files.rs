@@ -1753,10 +1753,7 @@ impl FileBrowser {
             view: None,
             static_favorites: Vec::new(),
             pinned_favorites: Vec::new(),
-            favorites_file: format!(
-                "{}/.cache/kitchen-sink/files-favorites.json",
-                std::env::var("HOME").unwrap_or_default()
-            ),
+            favorites_file: favorites_file_path(),
             recent_everywhere: true,
             status_note: None,
         }
@@ -3948,4 +3945,24 @@ mod tests {
         b.handle(FilesEvent::Sidebar(SidebarEvent::Select(0)));
         assert!(b.in_recent());
     }
+}
+
+/// Where the sidebar's pinned folders are kept: beside the personal
+/// commands.toml override (`<configDir>/files-favorites.json`), so pins
+/// live with the other machine-local settings, not in the repo or a cache.
+/// The old `~/.cache/kitchen-sink/files-favorites.json` is copied over once.
+fn favorites_file_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let legacy = format!("{home}/.cache/kitchen-sink/files-favorites.json");
+    let Some(dir) = crate::app::config::commands_override_path()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    else {
+        return legacy;
+    };
+    let path = dir.join("files-favorites.json");
+    if !path.exists() && Path::new(&legacy).exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::copy(&legacy, &path);
+    }
+    path.to_string_lossy().into_owned()
 }
