@@ -1728,6 +1728,8 @@ pub struct ShotSession {
     pub finished: bool,
     pub outcome: Option<ShotOutcome>,
     pub recent_requested: bool,
+    /// V: record the selection as a video once the overlay closes.
+    pub record_requested: bool,
     /// The recents grid is open (the pill's third stop). Kept in sync by the
     /// controller's `toggle_recent` / `close_recent`.
     pub recent_open: bool,
@@ -1778,6 +1780,7 @@ impl ShotSession {
             finished: false,
             outcome: None,
             recent_requested: false,
+            record_requested: false,
             recent_open: false,
             chrome_rects: std::cell::Cell::new(None),
             chrome_press: None,
@@ -2822,6 +2825,14 @@ impl ShotSession {
                 Some('w') => {
                     let wins = on_screen_windows();
                     self.select_window_under_mouse(&wins);
+                    return true;
+                }
+                // V: record the selection as a video (Hyper+X stops it).
+                Some('v') => {
+                    if self.selection.is_some() {
+                        self.record_requested = true;
+                        self.finish(ShotOutcome::Abort);
+                    }
                     return true;
                 }
                 _ => {}
@@ -7170,6 +7181,9 @@ pub struct ScreenshotController {
     key_monitor: KeyMonitor,
     #[cfg(target_os = "macos")]
     recent_panel: RecentPanelSlot,
+    /// A live screen recording (V): the `screencapture -v` child and the
+    /// .mov it writes. The next Hyper+X stops it.
+    recording: Option<(std::process::Child, String)>,
 }
 
 impl Default for ScreenshotController {
@@ -7216,6 +7230,79 @@ impl ScreenshotController {
             key_monitor: KeyMonitor::default(),
             #[cfg(target_os = "macos")]
             recent_panel: RecentPanelSlot::default(),
+            recording: None,
+        }
+    }
+
+    /// Whether a screen recording is running (Hyper+X then stops it).
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Start recording `rect` (global, top-left points) with
+    /// `screencapture -v` into the save folder.
+    fn start_recording(&mut self, rect: Rect, cfg: &ScreenshotConfig) {
+        let dir = expand_tilde(&cfg.save_path);
+        let _ = std::fs::create_dir_all(&dir);
+        let target = ShotFiles::target(&dir, &cfg.filename_pattern, "mov");
+        let r = format!("-R{},{},{},{}", rect.x.round(), rect.y.round(), rect.w.round(), rect.h.round());
+        match std::process::Command::new("/usr/sbin/screencapture")
+            .args(["-v", "-x", "-k", &r, &target])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                self.note(format!("screenshot: recording {r} -> {target}"));
+                self.recording = Some((child, target));
+                ScreenToast::show(&mut self.toast, "Recording \u{2014} press Hyper+X to stop", "record.circle");
+            }
+            Err(e) => {
+                self.note(format!("screenshot: recording failed: {e}"));
+                ScreenToast::show(&mut self.toast, format!("Couldn't start recording: {e}"), "exclamationmark.triangle.fill");
+            }
+        }
+    }
+
+    /// Stop the recording (SIGINT, as Ctrl+C in Terminal), wait for the
+    /// .mov to be finalised, then copy its path and add it to Recent Files.
+    pub fn stop_recording(&mut self) -> Option<String> {
+        let (mut child, target) = self.recording.take()?;
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGINT);
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if start.elapsed() < std::time::Duration::from_secs(8) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+        if std::path::Path::new(&target).exists() {
+            self.note(format!("screenshot: recording saved {target}"));
+            // Not under `cargo test`: the clipboard and the Recent shelf are the user's.
+            #[cfg(not(test))]
+            {
+                crate::platform::set_text(&target);
+                #[cfg(target_os = "macos")]
+                crate::app::host::screenshot_saved_to_path_shelf(&target);
+            }
+            let shown = abbreviate_tilde(&target);
+            ScreenToast::show(&mut self.toast, format!("Saved recording {shown} \u{b7} path copied"), "checkmark.circle.fill");
+            self.last_output = json!({"outcome": "record", "path": target});
+            Some(target)
+        } else {
+            ScreenToast::show(&mut self.toast, "The recording wasn't saved (Screen Recording permission?)", "exclamationmark.triangle.fill");
+            None
         }
     }
 
@@ -7418,6 +7505,11 @@ impl ScreenshotController {
     }
 
     pub fn trigger(&mut self, args: &ShotArgs) -> Result<(), String> {
+        // Hyper+X while recording stops the recording instead of capturing.
+        if self.recording.is_some() {
+            self.stop_recording();
+            return Ok(());
+        }
         #[cfg(target_os = "macos")]
         {
             // The screen list is read fresh per capture (displays come and go).
@@ -8117,6 +8209,11 @@ impl ScreenshotController {
         // Swift clears `forcedSavePath` in `finish` regardless of outcome.
         let forced_save_path = self.forced_save_path.take();
         let global_frame = self.global_frame();
+        let record_rect = self
+            .session
+            .as_ref()
+            .filter(|s| s.record_requested)
+            .and_then(|s| s.global_selection());
         if cfg.save_last_region && outcome != ShotOutcome::Abort {
             if let Some(s) = self.session.as_ref() {
                 if let (Some(a), Some(r)) = (s.active, s.selection) {
@@ -8138,6 +8235,11 @@ impl ScreenshotController {
         self.session = None;
         #[cfg(target_os = "macos")]
         self.drop_key_monitor_if_idle();
+        if let Some(r) = record_rect {
+            self.reply = None;
+            self.start_recording(r, &cfg);
+            return;
+        }
         if outcome == ShotOutcome::Abort || img.is_none() {
             self.last_output = json!({"outcome": "abort"});
             self.note("screenshot: aborted");
@@ -8856,6 +8958,24 @@ mod tests {
 
     fn ws_words(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn hyper_x_while_recording_stops_the_recording() {
+        let mut c = ScreenshotController::default();
+        let dir = std::env::temp_dir().join(format!("ks-rec-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("rec.mov").to_string_lossy().into_owned();
+        std::fs::write(&target, b"mov").unwrap();
+        // A stand-in for `screencapture -v`: SIGINT ends it, as it does the real one.
+        let child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        c.recording = Some((child, target.clone()));
+        assert!(c.is_recording());
+        assert!(c.trigger(&ShotArgs::default()).is_ok());
+        assert!(!c.is_recording(), "the second Hyper+X stops, it does not capture");
+        assert!(c.session.is_none());
+        assert_eq!(c.last_output["path"], json!(target));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

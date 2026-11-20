@@ -44,6 +44,10 @@ pub struct Entry {
     pub created: f64,
     pub modified: f64,
     pub trailing_text: String,
+    /// Nesting below the listed folder (Opt+→ expands a folder in place).
+    pub depth: u16,
+    /// A folder whose children are shown under it.
+    pub expanded: bool,
 }
 
 impl Entry {
@@ -56,6 +60,8 @@ impl Entry {
             created: 0.0,
             modified: 0.0,
             trailing_text: String::new(),
+            depth: 0,
+            expanded: false,
         }
     }
 
@@ -1663,6 +1669,18 @@ struct Place {
     dir: String,
 }
 
+/// One Files tab (Cmd+T): everything that differs per tab. The live tab's
+/// state is in the browser's own fields; the others wait here.
+#[derive(Clone, Debug, PartialEq)]
+struct TabState {
+    place: Place,
+    query: String,
+    selection: usize,
+    expanded: BTreeSet<String>,
+    back: Vec<Place>,
+    forward: Vec<Place>,
+}
+
 /// The `PopupFileBrowser` browsing model (drawing / Quick Look / preview are
 /// out of scope for this cut).
 #[derive(Clone)]
@@ -1670,6 +1688,8 @@ pub struct FileBrowser {
     pub cwd: String,
     pub query: String,
     pub show_hidden: bool,
+    /// Folders expanded in place (Opt+→), by path; cleared on navigation.
+    pub expanded: BTreeSet<String>,
     pub mode: QueryMode,
     pub all: Vec<Entry>,
     pub list: FileList,
@@ -1680,6 +1700,10 @@ pub struct FileBrowser {
     back: Vec<Place>,
     forward: Vec<Place>,
     travelling: bool,
+    /// Every tab (Cmd+T); `tabs[tab]` is stale while live — the browser's
+    /// fields hold that one.
+    tabs: Vec<TabState>,
+    pub tab: usize,
     /// The Quick Look preview-panel bridge (Swift `QLPreviewPanelDataSource`).
     pub quick_look: QuickLook,
     /// `InlineRename` target: (old path, in-progress text).
@@ -1707,6 +1731,7 @@ impl FileBrowser {
             cwd: standardize(start_dir),
             query: String::new(),
             show_hidden: false,
+            expanded: BTreeSet::new(),
             mode: QueryMode::All,
             all: Vec::new(),
             list: FileList::default(),
@@ -1716,6 +1741,8 @@ impl FileBrowser {
             sort_descending: false,
             back: Vec::new(),
             forward: Vec::new(),
+            tabs: Vec::new(),
+            tab: 0,
             travelling: false,
             quick_look: QuickLook::new(),
             rename: None,
@@ -2047,6 +2074,8 @@ impl FileBrowser {
             field_text: if in_recent { String::new() } else { self.cwd.clone() },
             preview,
             preview_key,
+            tabs: self.tab_titles(),
+            tab: self.tab,
         }
     }
 
@@ -2136,6 +2165,9 @@ impl FileBrowser {
             }
             E::Move(d) => self.list.move_selection(d),
             E::DragEnded => self.reload(),
+            E::Tab(i) => {
+                self.select_tab(i);
+            }
             E::Escape => {
                 if !self.query.is_empty() {
                     self.set_query("");
@@ -2261,6 +2293,7 @@ impl FileBrowser {
     pub fn refilter(&mut self) {
         self.mode = parse_query(&self.query, &self.cwd, &self.terminal_words);
         let rows: Vec<Entry> = match &self.mode {
+            QueryMode::All if !self.in_recent() => self.with_expanded(self.all.clone()),
             QueryMode::All | QueryMode::Terminal(_) => self.all.clone(),
             QueryMode::Local(pat) => {
                 let mut source = self.all.clone();
@@ -2345,6 +2378,120 @@ impl FileBrowser {
         }
     }
 
+    fn tab_state(&self) -> TabState {
+        TabState {
+            place: self.place(),
+            query: self.query.clone(),
+            selection: self.list.selection,
+            expanded: self.expanded.clone(),
+            back: self.back.clone(),
+            forward: self.forward.clone(),
+        }
+    }
+
+    fn load_tab(&mut self, t: TabState) {
+        self.travelling = true;
+        match t.place.virtual_index {
+            Some(v) => self.show_virtual(v),
+            None => self.cd(&t.place.dir),
+        }
+        self.travelling = false;
+        self.back = t.back;
+        self.forward = t.forward;
+        self.expanded = t.expanded;
+        if !t.query.is_empty() {
+            self.set_query(&t.query);
+        } else {
+            self.refilter();
+        }
+        self.list.selection = t.selection.min(self.list.rows.len().saturating_sub(1));
+        self.list.anchor = self.list.selection;
+    }
+
+    /// How many tabs (1 when tabs were never used).
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len().max(1)
+    }
+
+    /// Tab titles (folder names), for the tab bar.
+    pub fn tab_titles(&self) -> Vec<String> {
+        if self.tabs.len() < 2 {
+            return Vec::new();
+        }
+        let title = |p: &Place| match p.virtual_index {
+            Some(v) => default_virtual_lists().get(v).map(|x| x.0.clone()).unwrap_or_default(),
+            None => Path::new(&p.dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.dir.clone()),
+        };
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| if i == self.tab { title(&self.place()) } else { title(&t.place) })
+            .collect()
+    }
+
+    /// Cmd+T: a new tab on the current folder, made current.
+    pub fn new_tab(&mut self) {
+        let cur = self.tab_state();
+        if self.tabs.is_empty() {
+            self.tabs.push(cur.clone());
+            self.tab = 0;
+        } else {
+            self.tabs[self.tab] = cur.clone();
+        }
+        let fresh = TabState { back: Vec::new(), forward: Vec::new(), query: String::new(), ..cur };
+        self.tabs.insert(self.tab + 1, fresh);
+        self.tab += 1;
+        self.back.clear();
+        self.forward.clear();
+        if !self.query.is_empty() {
+            self.set_query("");
+        }
+    }
+
+    /// Switch to tab `i`.
+    pub fn select_tab(&mut self, i: usize) -> bool {
+        if self.tabs.len() < 2 || i >= self.tabs.len() || i == self.tab {
+            return false;
+        }
+        self.tabs[self.tab] = self.tab_state();
+        self.tab = i;
+        let t = self.tabs[i].clone();
+        self.load_tab(t);
+        true
+    }
+
+    /// Cmd+Shift+] / Cmd+Shift+[: the next / previous tab, wrapping.
+    pub fn cycle_tab(&mut self, d: i64) -> bool {
+        let n = self.tabs.len();
+        if n < 2 {
+            return false;
+        }
+        let i = (self.tab as i64 + d).rem_euclid(n as i64) as usize;
+        self.select_tab(i)
+    }
+
+    /// Cmd+W with several tabs: close this one (false = the last tab, so
+    /// Cmd+W keeps hiding the window).
+    pub fn close_tab(&mut self) -> bool {
+        if self.tabs.len() < 2 {
+            return false;
+        }
+        self.tabs.remove(self.tab);
+        if self.tab >= self.tabs.len() {
+            self.tab = self.tabs.len() - 1;
+        }
+        let t = self.tabs[self.tab].clone();
+        self.load_tab(t);
+        if self.tabs.len() == 1 {
+            self.tabs.clear();
+            self.tab = 0;
+        }
+        true
+    }
+
     fn place(&self) -> Place {
         Place {
             virtual_index: self.virtual_index,
@@ -2374,8 +2521,74 @@ impl FileBrowser {
         self.virtual_index = None;
         self.cwd = dest;
         self.query.clear();
+        self.expanded.clear();
         self.list.selection = 0;
         self.reload();
+    }
+
+    /// The listing with every expanded folder's children inserted under it
+    /// (recursively, one level of indent each).
+    fn with_expanded(&self, rows: Vec<Entry>) -> Vec<Entry> {
+        if self.expanded.is_empty() {
+            return rows;
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        self.push_tree(rows, 0, &mut out);
+        out
+    }
+
+    fn push_tree(&self, rows: Vec<Entry>, depth: u16, out: &mut Vec<Entry>) {
+        for mut e in rows {
+            e.depth = depth;
+            let open = e.is_dir && !e.is_parent() && self.expanded.contains(&e.path) && depth < 12;
+            e.expanded = open;
+            let path = e.path.clone();
+            out.push(e);
+            if open {
+                let kids: Vec<Entry> =
+                    self.list_dir(&path, self.show_hidden).into_iter().filter(|k| !k.is_parent()).collect();
+                self.push_tree(kids, depth + 1, out);
+            }
+        }
+    }
+
+    /// Opt+→: show the selected folder's contents under it (Finder list view).
+    pub fn expand_selected(&mut self) -> bool {
+        let Some(e) = self.list.rows.get(self.list.selection).cloned() else { return false };
+        if !e.is_dir || e.is_parent() || self.expanded.contains(&e.path) {
+            return false;
+        }
+        self.expanded.insert(e.path.clone());
+        self.relist_keeping(&e.path);
+        true
+    }
+
+    /// Opt+←: collapse the selected folder; on a child row, collapse its
+    /// parent and select it.
+    pub fn collapse_selected(&mut self) -> bool {
+        let Some(e) = self.list.rows.get(self.list.selection).cloned() else { return false };
+        let target = if e.expanded {
+            e.path.clone()
+        } else if e.depth > 0 {
+            Path::new(&e.path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            return false;
+        };
+        let before = self.expanded.len();
+        self.expanded.retain(|p| p != &target && !p.starts_with(&format!("{target}/")));
+        if self.expanded.len() == before {
+            return false;
+        }
+        self.relist_keeping(&target);
+        true
+    }
+
+    fn relist_keeping(&mut self, path: &str) {
+        self.refilter();
+        if let Some(i) = self.list.rows.iter().position(|r| r.path == path) {
+            self.list.selection = i;
+            self.list.anchor = i;
+        }
     }
 
     pub fn cd_parent(&mut self) {
@@ -2534,6 +2747,8 @@ impl FileBrowser {
             "marked": self.list.marked.iter().copied().collect::<Vec<_>>(),
             "quickLook": self.quick_look.state(),
             "sortKey": self.sort_key.raw(),
+            "tabs": self.tab_titles(),
+            "tab": self.tab,
             "pinned": self.pinned_favorites,
             "status": self.status_text(),
             "rows": self.list.rows.iter().map(|e| json!({
@@ -3107,6 +3322,67 @@ mod tests {
         assert!(get(&rows, "Size").contains("(2 files)"));
         assert_eq!(mode_string(0o755, true, false), "drwxr-xr-x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opt_right_expands_a_folder_in_place_and_opt_left_collapses() {
+        let root = std::env::temp_dir().join(format!("ks-expand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/inner")).unwrap();
+        std::fs::write(root.join("a/one.txt"), "1").unwrap();
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        let r = root.to_string_lossy().into_owned();
+        let mut b = FileBrowser::new(&r);
+        b.cd(&r);
+        let names = |b: &FileBrowser| b.list.rows.iter().filter(|e| !e.is_parent()).map(|e| (e.name.clone(), e.depth)).collect::<Vec<_>>();
+        let a = b.list.rows.iter().position(|e| e.name == "a").unwrap();
+        b.list.selection = a;
+        assert!(b.expand_selected());
+        assert_eq!(names(&b), vec![("a".into(), 0), ("inner".into(), 1), ("one.txt".into(), 1), ("b.txt".into(), 0)]);
+        assert_eq!(b.list.rows[b.list.selection].name, "a", "the folder stays selected");
+        // Expand the nested one, then collapse from a child row.
+        b.list.selection = b.list.rows.iter().position(|e| e.name == "inner").unwrap();
+        assert!(b.expand_selected());
+        b.list.selection = b.list.rows.iter().position(|e| e.name == "one.txt").unwrap();
+        assert!(b.collapse_selected(), "a child collapses its parent");
+        assert_eq!(names(&b), vec![("a".into(), 0), ("b.txt".into(), 0)]);
+        assert_eq!(b.list.rows[b.list.selection].name, "a");
+        assert!(b.expanded.is_empty(), "nested expansions go with it");
+        assert!(!b.collapse_selected());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tabs_keep_their_own_folder_and_close_back_to_one() {
+        let root = std::env::temp_dir().join(format!("ks-tabs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("x")).unwrap();
+        std::fs::create_dir_all(root.join("y")).unwrap();
+        let r = root.to_string_lossy().into_owned();
+        let mut b = FileBrowser::new(&r);
+        b.cd(&r);
+        assert_eq!(b.tab_count(), 1);
+        assert!(b.tab_titles().is_empty(), "no tab bar with one tab");
+        assert!(!b.close_tab(), "Cmd+W on the only tab hides the window instead");
+        b.new_tab();
+        b.cd(&format!("{r}/x"));
+        b.new_tab();
+        b.cd(&format!("{r}/y"));
+        assert_eq!(b.tab_titles(), vec![root.file_name().unwrap().to_string_lossy().into_owned(), "x".into(), "y".into()]);
+        assert!(b.cycle_tab(1), "wraps to the first");
+        assert_eq!(b.cwd, r);
+        assert!(b.cycle_tab(-1));
+        assert_eq!(b.cwd, format!("{r}/y"));
+        b.go_back();
+        assert_eq!(b.cwd, format!("{r}/x"), "each tab has its own history (y's tab began on x)");
+        assert!(b.select_tab(1));
+        assert_eq!(b.cwd, format!("{r}/x"));
+        assert!(b.close_tab());
+        assert_eq!(b.tab_count(), 2);
+        assert!(b.close_tab());
+        assert_eq!(b.tab_count(), 1);
+        assert!(b.tab_titles().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

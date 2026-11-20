@@ -5849,6 +5849,10 @@ mod daemon_ui {
                 E::Move(d) => {
                     self.files_surface(|b| b.list.move_selection(d));
                 }
+                E::Tab(i) => {
+                    self.files_surface(|b| b.select_tab(i));
+                    self.files_relayout();
+                }
                 E::DragEnded => {
                     self.files_surface(|b| b.reload());
                 }
@@ -9242,6 +9246,14 @@ mod daemon_ui {
             });
         }
 
+        /// The tab bar came or went: re-lay the panes (list moves down/up).
+        fn files_relayout(&self) {
+            if let Some(Some(v)) = self.files_surface(|b| b.view.clone()) {
+                v.layout_panes();
+                v.setNeedsDisplay(true);
+            }
+        }
+
         /// Cmd+Shift+P: show / hide the preview pane (remembered).
         fn files_toggle_preview(&self) {
             let Some(Some(view)) = self.files_surface(|b| b.view.clone()) else { return };
@@ -9442,6 +9454,35 @@ mod daemon_ui {
                 // Cmd+Shift+P: show / hide the preview pane.
                 35 if cmd_shift => {
                     self.files_toggle_preview();
+                    return true;
+                }
+                // Tabs (Finder): Cmd+T new, Cmd+W closes a tab while there are
+                // several (the last one: Cmd+W hides as before), Cmd+Shift+[ / ].
+                17 if cmd_only => {
+                    self.files_surface(|b| b.new_tab());
+                    self.files_relayout();
+                    return true;
+                }
+                13 if cmd_only && self.files_surface(|b| b.tab_count()).unwrap_or(1) > 1 => {
+                    self.files_surface(|b| b.close_tab());
+                    self.files_relayout();
+                    return true;
+                }
+                30 | 33 if cmd_shift => {
+                    let d = if key.key_code == 30 { 1 } else { -1 };
+                    if self.files_surface(|b| b.cycle_tab(d)).unwrap_or(false) {
+                        return true;
+                    }
+                    return false;
+                }
+                // Opt+→ / Opt+←: expand / collapse the selected folder in
+                // place (Finder's list-view disclosure triangles).
+                124 if opt && !cmd && !ctrl && !shift && in_list => {
+                    self.files_surface(|b| b.expand_selected());
+                    return true;
+                }
+                123 if opt && !cmd && !ctrl && !shift && in_list => {
+                    self.files_surface(|b| b.collapse_selected());
                     return true;
                 }
                 // Cmd+Opt+S: show / hide the sidebar (Cmd+\'s Finder twin).
@@ -10107,7 +10148,7 @@ mod daemon_ui {
         /// The name column of list row `i` in `list`'s coordinates.
         fn rename_rect(list: &crate::views::files_view::FileListView, i: usize) -> NSRect {
             let r = list.row_rect(i);
-            let x = r.x + 30.0;
+            let x = r.x + 30.0 + list.row_indent(i);
             // A 22pt field centred on the row (rows grow with the list zoom).
             NSRect::new(NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()), NSSize::new((r.width * 0.55 - x).max(120.0), 22.0))
         }

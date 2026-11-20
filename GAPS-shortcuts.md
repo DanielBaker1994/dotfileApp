@@ -47,11 +47,19 @@ without the extension; Opt/Cmd drag modifiers; Opt/Cmd+arrows and
 Opt+Delete in fields (the router passes them through); Cmd+M / Cmd+H (menu);
 Cmd+Shift+V (our text boxes are plain text, so every paste is plain).
 
-**Left, by size (not done):** Files tabs (Cmd+T), column / expand-in-place
-views (Cmd+1–4, Opt+→), batch rename of several files; Jira write actions
+**Built in the second pass:** Files tabs (Cmd+T, Cmd+W closes a tab,
+Cmd+Shift+[ / ], a tab bar with two or more tabs), Opt+→ / Opt+← expand /
+collapse folders in place, Rename N Items (Cmd+R / F2 / right-click with
+several selected: find & replace, add before / after, number; one undo
+step), screenshot V = screen recording of the selection (`screencapture -v`;
+Hyper+X stops it, the .mov path is copied and lands in Recent Files).
+Also fixed on the way: Return in a form sheet's text field (Rename N Items,
+Jira / Confluence setup, New Rule) now presses OK; it used to do nothing.
+
+**Left, by size (not done):** Files column / gallery views (Cmd+1–4);
+screenshot scrolling capture; Jira write actions
 (assign to me, change status, comment: need Jira API write support);
-Confluence Cmd+[ / ] page history; screenshot scrolling capture and screen
-recording; palette Cmd+K / Cmd+Return / Cmd+C (palette rows are commands and
+Confluence Cmd+[ / ] page history; palette Cmd+K / Cmd+Return / Cmd+C (palette rows are commands and
 workspaces, not files, so Raycast's file actions don't map).
 
 ---

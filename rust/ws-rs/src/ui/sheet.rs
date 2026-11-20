@@ -92,6 +92,17 @@ mod appkit {
         for w in fields.windows(2) {
             unsafe { w[0].setNextKeyView(Some(&w[1])) };
         }
+        // Return in a field presses the default button (OK). The field
+        // editor otherwise takes Return for itself and the sheet sat there
+        // (Rename N Items, Jira / Confluence setup, New Rule).
+        if let Some(ok_button) = alert.buttons().firstObject() {
+            for f in &fields {
+                unsafe {
+                    f.setTarget(Some(&ok_button));
+                    f.setAction(Some(objc2::sel!(performClick:)));
+                }
+            }
+        }
         alert.setAccessoryView(Some(&acc));
         alert.layout();
         if let Some(first) = fields.first() {

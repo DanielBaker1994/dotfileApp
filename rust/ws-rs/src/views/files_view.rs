@@ -46,6 +46,9 @@ pub struct FilesSnapshot {
     pub field_text: String,
     pub preview: Preview,
     pub preview_key: String,
+    /// Tab titles when there are several tabs (Cmd+T); empty = no tab bar.
+    pub tabs: Vec<String>,
+    pub tab: usize,
 }
 
 /// Clicks / typing reported to the owner.
@@ -71,6 +74,8 @@ pub enum FilesEvent {
     /// A drag that started in the list ended (the target may have moved the
     /// files away), so the listing needs a reload.
     DragEnded,
+    /// A tab in the tab bar was clicked.
+    Tab(usize),
 }
 
 /// Toolbar hit ids.
@@ -78,6 +83,10 @@ pub const TB_PARENT: i32 = 1;
 pub const TB_PIN: i32 = 2;
 pub const TB_SORT: i32 = 3;
 pub const TB_ORDER: i32 = 4;
+/// Tab-bar hit ids: `TB_TAB + index`.
+pub const TB_TAB: i32 = 100;
+/// The tab bar's height (shown only with two or more tabs).
+pub const TABS_H: f64 = 22.0;
 
 pub const TOOLBAR_Y: f64 = 4.0;
 pub const TOOLBAR_H: f64 = 24.0;
@@ -106,8 +115,13 @@ pub fn path_text_is_stale(cur: &str, old: &str, new: &str) -> bool {
 }
 
 pub fn files_layout(width: f64, height: f64, sidebar_w: f64, split_fraction: f64) -> FilesLayout {
+    files_layout_tabs(width, height, sidebar_w, split_fraction, false)
+}
+
+/// [`files_layout`] with room for the tab bar under the toolbar.
+pub fn files_layout_tabs(width: f64, height: f64, sidebar_w: f64, split_fraction: f64, tabs: bool) -> FilesLayout {
     let left = if sidebar_w > 0.0 { sidebar_w + 4.0 } else { 0.0 };
-    let list_y = TOOLBAR_Y + TOOLBAR_H + 5.0 + 4.0;
+    let list_y = TOOLBAR_Y + TOOLBAR_H + 5.0 + 4.0 + if tabs { TABS_H + 4.0 } else { 0.0 };
     // `split_fraction >= 1` = the preview pane is hidden (Cmd+Shift+P): the
     // list takes the whole width.
     let split_x = if split_fraction >= 1.0 {
@@ -154,6 +168,10 @@ mod appkit {
     use crate::ui::view_base::{self, as_any};
 
     use crate::ui::style::ns;
+
+    fn indent_for(depth: u16, zoom: f64) -> f64 {
+        (depth as f64 * 18.0 * zoom).round()
+    }
 
     thread_local! {
         /// `PopupFileBrowser.iconCache` — Finder icons per path.
@@ -597,6 +615,12 @@ mod appkit {
             self.setNeedsDisplay(true);
         }
 
+        /// How far row `i` is indented (expanded-in-place children).
+        pub fn row_indent(&self, i: usize) -> f64 {
+            let z = self.ivars().zoom.get();
+            self.ivars().rows.borrow().get(i).map(|e| indent_for(e.depth, z)).unwrap_or(0.0)
+        }
+
         pub fn row_count(&self) -> usize {
             self.ivars().rows.borrow().len()
         }
@@ -643,10 +667,18 @@ mod appkit {
             let trail_f = style::system_font(10.0 * z, Weight::Regular);
             for i in first..=last {
                 let e = &rows[i];
-                let r = self.row_rect(i);
-                let pill = r.inset_by(4.0, 1.0);
+                let full = self.row_rect(i);
+                let pill = full.inset_by(4.0, 1.0);
                 let on = i == sel || marked.contains(&i);
                 style::row_pill(pill, radius, on, i == sel, hover == Some(i), &c, style::RowAccent::Clipped);
+                // Expanded-in-place rows (Opt+→): indent one step per level,
+                // ▾ on an open folder.
+                let indent = indent_for(e.depth, z);
+                if e.expanded {
+                    let (_, gh) = style::text_size("\u{25be}", &trail_f);
+                    style::draw_text("\u{25be}", full.x + indent + 1.0, full.mid_y() - gh / 2.0, &trail_f, c.dim);
+                }
+                let r = Rect::new(full.x + indent, full.y, (full.width - indent).max(0.0), full.height);
                 let ir = Rect::new(r.x + 10.0, r.y, isz, rh).inset_by(1.0, (rh - isz) / 2.0);
                 let icon = if e.is_parent() {
                     style::symbol_image("arrow.turn.left.up", 11.0, Weight::Semibold, c.dim)
@@ -669,7 +701,7 @@ mod appkit {
                 } else {
                     style::text_size(&e.trailing_text, &trail_f).0
                 };
-                let avail = w - tx - 8.0 - if trail_w > 0.0 { trail_w + 16.0 + 4.0 } else { 0.0 };
+                let avail = full.max_x().min(w) - tx - 8.0 - if trail_w > 0.0 { trail_w + 16.0 + 4.0 } else { 0.0 };
                 let name_color = if on { c.text } else { c.text.with_alpha(0.85) };
                 let drawn = style::draw_text_left(&e.name, Rect::new(tx, r.y, avail.max(20.0), rh), &name_f, name_color);
                 if is_dir {
@@ -761,6 +793,7 @@ mod appkit {
                 }
                 let rects = self.toolbar_rects();
                 let ev = match h.unwrap() {
+                    id if id >= TB_TAB => FilesEvent::Tab((id - TB_TAB) as usize),
                     TB_PARENT => FilesEvent::Parent,
                     TB_PIN => FilesEvent::TogglePin,
                     TB_SORT => {
@@ -1019,7 +1052,8 @@ mod appkit {
         pub fn layout_panes(&self) {
             let b = self.bounds();
             let iv = self.ivars();
-            let lay = files_layout(b.size.width, b.size.height, self.sidebar_w(), self.split_fraction());
+            let tabs = iv.snap.borrow().tabs.len() > 1;
+            let lay = files_layout_tabs(b.size.width, b.size.height, self.sidebar_w(), self.split_fraction(), tabs);
             iv.sidebar.setFrame(ns(lay.sidebar));
             let rects = self.toolbar_rects();
             let order_max = rects.iter().find(|(id, _)| *id == TB_ORDER).map(|(_, r)| r.max_x()).unwrap_or(0.0);
@@ -1138,7 +1172,18 @@ mod appkit {
             let sort = Rect::new(pin.max_x() + TB_GAP, TOOLBAR_Y, sort_w, TOOLBAR_H);
             let order_w = cw("Asc", true, false).max(cw("Desc", true, false));
             let order = Rect::new(sort.max_x() + TB_GAP, TOOLBAR_Y, order_w, TOOLBAR_H);
-            vec![(TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)]
+            let mut out = vec![(TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)];
+            // The tab bar (two or more tabs): equal capsules under the toolbar.
+            let n = self.ivars().snap.borrow().tabs.len();
+            if n > 1 {
+                let span = (self.bounds().size.width - x0 - 8.0).max(0.0);
+                let w = ((span - TB_GAP * (n as f64 - 1.0)) / n as f64).clamp(40.0, 200.0);
+                let y = TOOLBAR_Y + TOOLBAR_H + 5.0;
+                for i in 0..n {
+                    out.push((TB_TAB + i as i32, Rect::new(x0 + i as f64 * (w + TB_GAP), y, w, TABS_H)));
+                }
+            }
+            out
         }
 
         fn toolbar_hit(&self, x: f64, y: f64) -> Option<i32> {
@@ -1152,6 +1197,12 @@ mod appkit {
             let pressed = self.ivars().pressed.get();
             let rects = self.toolbar_rects();
             for (id, r) in &rects {
+                if *id >= TB_TAB {
+                    let i = (*id - TB_TAB) as usize;
+                    let title = snap.tabs.get(i).cloned().unwrap_or_default();
+                    draw_toolbar_button(*r, &c, i == snap.tab, hover == Some(*id), pressed == Some(*id), &title, "folder", false);
+                    continue;
+                }
                 let (title, sym, chev, toggled) = match *id {
                     TB_PIN => (
                         if snap.pinned_on { "Pinned" } else { "Pin" }.to_string(),
