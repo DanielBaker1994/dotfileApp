@@ -862,6 +862,11 @@ impl PathsWindow {
         if let Some(l) = &self.empty_label {
             let t = if self.rows.is_empty() { self.is_empty_text() } else { String::new() };
             l.setStringValue(&NSString::from_str(&t));
+            // The hint sits over row 0 (48–66pt from the top vs the row's
+            // 42–64pt) and an empty-text label still takes the mouse-down,
+            // so the top row could never be pressed or dragged. Hidden views
+            // are skipped by hit-testing.
+            l.setHidden(!self.rows.is_empty());
         }
         let rh = list.row_h();
         let body = if self.rows.is_empty() { 40.0 } else { self.rows.len() as f64 * rh + 12.0 };
@@ -952,7 +957,17 @@ impl PathsWindow {
                 PATHS_DEFAULT_WIDTH,
                 PATHS_MAX_HEIGHT,
             );
-            panel.setFrameOrigin(NSPoint::new(x, y));
+            // Place at full height, then let `sync_view` shrink it from the
+            // top. Setting only the origin left a panel still shrunk from
+            // the last query (say 100pt) with its top ~500pt below where
+            // it belongs.
+            panel.setFrame_display(
+                objc2_foundation::NSRect::new(
+                    NSPoint::new(x, y),
+                    objc2_foundation::NSSize::new(panel.frame().size.width, PATHS_MAX_HEIGHT),
+                ),
+                false,
+            );
             self.sync_view();
             panel.makeKeyAndOrderFront(None);
             if let Some(search) = &self.search {
