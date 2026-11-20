@@ -27,6 +27,7 @@ use app::socket::{CommandHandler, CommandServer, DaemonLock};
 
 fn main() {
     std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
+    app::logging::install_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).cloned();

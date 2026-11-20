@@ -50,3 +50,25 @@ pub fn ws_log(msg: &str) {
     eprintln!("{line}");
     append_to_file(&line);
 }
+
+/// Send panics to `daemon.log` too. The app is launched by LaunchServices, so
+/// its stderr goes nowhere: without this a panic on the main thread quits the
+/// app (exit 101, no crash report) and leaves no trace of where it happened.
+/// The default hook still runs afterwards, so stderr output is unchanged.
+pub fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bt = std::backtrace::Backtrace::force_capture();
+        append_to_file(&format!(
+            "ws: PANIC (unix time {secs}, pid {}, thread '{name}'): {info}\n{bt}",
+            std::process::id()
+        ));
+        default_hook(info);
+    }));
+}
