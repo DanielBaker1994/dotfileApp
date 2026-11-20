@@ -4940,10 +4940,44 @@ mod daemon_ui {
         /// handler, scaled to the shared host): route the ported
         /// [`popup::route_key`] decision, execute Esc-hide and edit keys, and
         /// consume only what is acted on (everything else passes through).
+        /// Cmd+F / Cmd+G / Cmd+Shift+G in a text view that has the standard
+        /// find bar (the AI text, the Files text preview): show it / next /
+        /// previous match, as in Notes / TextEdit. Field editors and views
+        /// without a find bar are left to the view's own Cmd+F.
+        fn text_find_key(&self, event: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let Some(mtm) = MainThreadMarker::new() else { return false };
+            let flags = event.modifierFlags();
+            if !flags.contains(F::Command) || flags.intersects(F::Control | F::Option) {
+                let _ = mtm;
+                return false;
+            }
+            let shift = flags.contains(F::Shift);
+            let tag: isize = match (event.keyCode(), shift) {
+                (3, false) => 1, // NSTextFinderActionShowFindInterface
+                (5, false) => 2, // next
+                (5, true) => 3,  // previous
+                _ => return false,
+            };
+            let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else { return false };
+            let Some(r) = window.firstResponder() else { return false };
+            let Some(tv) = as_any(&*r).downcast_ref::<objc2_app_kit::NSTextView>() else { return false };
+            if tv.isFieldEditor() || !tv.usesFindBar() {
+                return false;
+            }
+            let sender = objc2_app_kit::NSMenuItem::new(mtm);
+            sender.setTag(tag);
+            let _: () = unsafe { msg_send![tv, performTextFinderAction: &*sender] };
+            true
+        }
+
         fn route_key_event(&self, event: &NSEvent) -> bool {
             // Ctrl+W deletes the previous word in every text input (window
             // fields, panel search boxes, sheets, inline rename).
             if self.kill_word_in_text_input(event) {
+                return true;
+            }
+            if self.text_find_key(event) {
                 return true;
             }
             if self.cmd_edit_in_popup(event) {
@@ -5136,7 +5170,10 @@ mod daemon_ui {
             let cfg = PopupConfig {
                 has_cycle_view_hook: current.is_some(),
                 has_file_browser: current == Some(SlotView::Files),
-                browser_has_focus: current == Some(SlotView::Files),
+                // Only the LIST counts: with the caret in the filter /
+                // address bar, Cmd+A/C/X/V/Z are text edits (rule 1) — they
+                // used to select / copy / paste / undo FILES while you typed.
+                browser_has_focus: current == Some(SlotView::Files) && !self.key_in_text(),
                 esc_close_count: current
                     .map(|v| self.ivars().controller.esc_hide_count(v) as i32)
                     .unwrap_or_else(|| self.ivars().controller.settings().esc_close as i32),
@@ -5232,6 +5269,13 @@ mod daemon_ui {
                         self.jira_actions();
                         true
                     }
+                    // Files with the caret in the filter bar: Cmd+K still
+                    // copies the selected file's path (the list's own Cmd+K
+                    // goes through `file_browser_key`).
+                    Some(SlotView::Files) => {
+                        self.route_file_browser(popup::FileBrowserAction::CopyPath);
+                        true
+                    }
                     // Swift wires `onCommandK` only for list windows.
                     _ => false,
                 },
@@ -5293,11 +5337,19 @@ mod daemon_ui {
                                 p.clear_query();
                                 Out::Consumed
                             }
-                        } else if code == popup::KEY_RETURN || code == 76 {
+                        } else if code == popup::KEY_RETURN
+                            || code == 76
+                            || (cmd && !ctrl && !opt && !shift && crate::views::switcher::palette_digit(code).is_some())
+                        {
+                            // Return, or Cmd+1…9 (run the Nth row, Raycast style).
                             match p.key(code, ctrl, shift, cmd, opt) {
                                 Some(a) => Out::Palette(a),
                                 None => Out::Consumed,
                             }
+                        } else if cmd && !ctrl && !opt && !shift && matches!(code, popup::KEY_DOWN | popup::KEY_UP) {
+                            // Cmd+↑ / Cmd+↓: first / last row.
+                            p.key(code, ctrl, shift, cmd, opt);
+                            Out::Consumed
                         } else if matches!(
                             code,
                             popup::KEY_DOWN | popup::KEY_UP | popup::KEY_TAB
@@ -8849,7 +8901,9 @@ mod daemon_ui {
                     }
                 }
                 15 => self.conf_event(E::Search),
+                // Cmd+Return, and Cmd+O as in Jira / Paths / Finder: open in the browser.
                 36 | 76 => self.conf_event(E::Open),
+                31 if !key.shift => self.conf_event(E::Open),
                 8 => {
                     // Only from the results list: the search field keeps Cmd+C.
                     let on_results = self.focused_pane_id().as_deref() == Some("results");
@@ -8917,6 +8971,284 @@ mod daemon_ui {
             };
             ql.toggle(mtm, &paths);
             self.files_surface(|b| b.quick_look = ql);
+        }
+
+        /// Finder's Go menu (Cmd+Shift+H / D / O, Cmd+Opt+L).
+        fn files_go(&self, dir: &str) -> bool {
+            if !std::path::Path::new(dir).is_dir() {
+                crate::ui::toast::show(&format!("No folder at {}", crate::views::files::display_path(dir)), "exclamationmark.triangle.fill");
+                return true;
+            }
+            self.files_surface(|b| {
+                if !b.query.is_empty() {
+                    b.set_query("");
+                }
+                b.cd(dir);
+            });
+            true
+        }
+
+        /// Select the whole address-bar text so typing replaces it (Go to Folder).
+        fn files_select_filter_text(&self) {
+            let field = self.files_surface(|b| b.view.as_ref().map(|v| v.search_field())).flatten();
+            if let Some(ed) = field.and_then(|f| f.currentEditor()) {
+                let nil: Option<&AnyObject> = None;
+                let _: () = unsafe { msg_send![&*ed, selectAll: nil] };
+            }
+        }
+
+        fn files_window(&self) -> Option<Retained<SlotHostWindow>> {
+            self.ivars().state.borrow().as_ref().map(|st| st.window.clone())
+        }
+
+        /// Cmd+I: Finder's Get Info — kind, size (folders summed off the main
+        /// thread), where, dates, permissions — as a sheet.
+        fn files_get_info(&self) {
+            let paths = match self.files_surface(|b| (b.selected_paths(), b.cwd.clone())) {
+                Some((p, _)) if !p.is_empty() => p,
+                Some((_, cwd)) if !cwd.is_empty() => vec![cwd],
+                _ => return,
+            };
+            std::thread::spawn(move || {
+                let (title, rows) = crate::views::files::file_info_rows(&paths, std::time::Duration::from_secs(3));
+                let text = rows.iter().map(|(k, v)| format!("{k}:  {v}")).collect::<Vec<_>>().join("\n");
+                on_ui(move |ui| {
+                    let Some(window) = ui.files_window() else { return };
+                    let first = paths[0].clone();
+                    let all = paths.join("\n");
+                    crate::ui::sheet::alert_sheet(
+                        &window,
+                        &format!("{title} Info"),
+                        &text,
+                        &["OK", "Copy Path", "Show in Finder"],
+                        move |b| match b {
+                            1 => copy_text_to_pasteboard(&all),
+                            2 => {
+                                let _ = std::process::Command::new("open").args(["-R", &first]).spawn();
+                            }
+                            _ => {}
+                        },
+                    );
+                });
+            });
+        }
+
+        /// Finder's "Rename N Items…": find / replace, add before / after, or
+        /// number from a base name — one undo step.
+        fn files_batch_rename(&self) {
+            use crate::ui::sheet::{form_sheet, FormRow};
+            let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+            if paths.len() < 2 {
+                return;
+            }
+            let Some(window) = self.files_window() else { return };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            form_sheet(
+                &window,
+                &format!("Rename {} Items", paths.len()),
+                "Replace text, add text before or after the name, or give a name to number them (\u{201c}Name 1\u{201d}, \u{201c}Name 2\u{201d}, \u{2026}). Extensions are kept.",
+                vec![
+                    FormRow::new("Find", "", "text to replace"),
+                    FormRow::new("Replace", "", "replace it with"),
+                    FormRow::new("Before", "", "add before the name"),
+                    FormRow::new("After", "", "add after the name"),
+                    FormRow::new("Number", "", "name to number them, e.g. Photo"),
+                ],
+                "Rename",
+                move |vals| {
+                    let (Some(v), Some(ui)) = (vals, weak.load()) else { return };
+                    use crate::engines::file_ops::FileOps;
+                    use crate::views::files::{batch_rename_plan, BatchRename};
+                    let o = BatchRename {
+                        find: v[0].clone(),
+                        replace: v[1].clone(),
+                        prefix: v[2].clone(),
+                        suffix: v[3].clone(),
+                        base: v[4].clone(),
+                    };
+                    let is_dir = |p: &str| std::path::Path::new(p).is_dir();
+                    let exists = |p: &str| std::path::Path::new(p).symlink_metadata().is_ok();
+                    let plan = match batch_rename_plan(&paths, &o, &is_dir, &exists) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            crate::ui::toast::show(&format!("Not renamed: {e}"), "exclamationmark.triangle.fill");
+                            return;
+                        }
+                    };
+                    if plan.is_empty() {
+                        crate::ui::toast::show("Nothing to rename", "pencil");
+                        return;
+                    }
+                    let stack = FileOps::shared();
+                    let since = stack.count();
+                    let mut failed = None;
+                    let mut done = Vec::new();
+                    for (from, to) in &plan {
+                        match std::fs::rename(from, to) {
+                            Ok(()) => {
+                                FileOps::record_rename(from, to, stack);
+                                done.push(to.clone());
+                            }
+                            Err(e) => {
+                                failed.get_or_insert(format!("{}: {e}", std::path::Path::new(from).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                            }
+                        }
+                    }
+                    stack.collapse(since, &format!("rename of {} items", done.len()));
+                    ui.files_op_done(format!("Renamed {} item(s) \u{b7} \u{2318}Z undoes", done.len()), failed);
+                    ui.files_surface(|b| {
+                        let idx: Vec<usize> = done
+                            .iter()
+                            .filter_map(|p| b.list.rows.iter().position(|e| &e.path == p))
+                            .collect();
+                        if let Some(&first) = idx.first() {
+                            b.list.selection = first;
+                        }
+                        b.list.marked = idx.into_iter().collect();
+                    });
+                },
+            );
+        }
+
+        /// Cmd+Ctrl+N: Finder's New Folder with Selection — one undo step.
+        fn files_new_folder_with_selection(&self) {
+            use crate::engines::file_ops::FileOps;
+            let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+            if paths.is_empty() {
+                self.files_new_item(true);
+                return;
+            }
+            let Some(Some(dir)) = self.files_surface(|b| b.ops_directory()) else {
+                crate::ui::toast::show("Can't create here — open a folder first", "exclamationmark.triangle.fill");
+                return;
+            };
+            let stack = FileOps::shared();
+            let since = stack.count();
+            let made = FileOps::create("New Folder With Items", &dir, true, stack);
+            let Some(folder) = made.paths().into_iter().next() else {
+                self.files_op_done(String::new(), made.failed.or(Some("Couldn't create the folder".into())));
+                return;
+            };
+            let moved = FileOps::transfer(&paths, &folder, true, stack);
+            stack.collapse(since, "New Folder with Items");
+            if let Some(f) = moved.failed {
+                crate::ui::toast::show(&f, "exclamationmark.triangle.fill");
+            }
+            self.files_surface(|b| {
+                if !b.query.is_empty() {
+                    b.set_query("");
+                }
+                b.reload();
+                b.select_path(&folder);
+            });
+            self.focus_files_list();
+            self.files_begin_rename();
+        }
+
+        /// Cmd+Opt+Delete: Finder's Delete Immediately — asks first, no undo.
+        fn files_delete_now(&self) {
+            let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+            if paths.is_empty() {
+                return;
+            }
+            let Some(window) = self.files_window() else { return };
+            let what = if paths.len() == 1 {
+                format!("\u{201c}{}\u{201d}", std::path::Path::new(&paths[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+            } else {
+                format!("these {} items", paths.len())
+            };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            crate::ui::sheet::alert_sheet(
+                &window,
+                &format!("Are you sure you want to delete {what} immediately?"),
+                "You can't undo this action.",
+                &["Delete", "Cancel"],
+                move |b| {
+                    if b != 0 {
+                        return;
+                    }
+                    let mut failed = None;
+                    for p in &paths {
+                        let path = std::path::Path::new(p);
+                        let r = match path.symlink_metadata() {
+                            Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
+                            Ok(_) => std::fs::remove_file(path),
+                            Err(e) => Err(e),
+                        };
+                        if let Err(e) = r {
+                            failed.get_or_insert(format!("{}: {e}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                        }
+                    }
+                    if let Some(ui) = weak.load() {
+                        ui.files_op_done(format!("Deleted {} item(s)", paths.len()), failed);
+                    }
+                },
+            );
+        }
+
+        /// Cmd+Shift+Delete: Empty Trash — asks first, then Finder empties it.
+        fn files_empty_trash(&self) {
+            let Some(window) = self.files_window() else { return };
+            crate::ui::sheet::alert_sheet(
+                &window,
+                "Are you sure you want to permanently erase the items in the Trash?",
+                "You can't undo this action.",
+                &["Empty Trash", "Cancel"],
+                move |b| {
+                    if b != 0 {
+                        return;
+                    }
+                    std::thread::spawn(|| {
+                        let ok = std::process::Command::new("/usr/bin/osascript")
+                            .args(["-e", "tell application \"Finder\" to empty trash"])
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        on_ui(move |ui| {
+                            let msg = if ok { "Emptied the Trash".to_string() } else { "Couldn't empty the Trash (allow kitchen-sink to control Finder in System Settings \u{203a} Privacy)".to_string() };
+                            ui.files_op_done(String::new(), (!ok).then_some(msg.clone()));
+                            if ok {
+                                crate::ui::toast::show(&msg, "trash");
+                            }
+                        });
+                    });
+                },
+            );
+        }
+
+        /// Cmd+E: eject the volume the selection (or the folder) is on.
+        fn files_eject(&self) {
+            let Some((sel, cwd)) = self.files_surface(|b| (b.selected_paths(), b.cwd.clone())) else { return };
+            let p = sel.into_iter().next().unwrap_or(cwd);
+            let parts: Vec<&str> = p.trim_start_matches('/').split('/').collect();
+            if parts.first() != Some(&"Volumes") || parts.len() < 2 || parts[1].is_empty() {
+                crate::ui::toast::show("Not an ejectable volume (select something under /Volumes)", "eject");
+                return;
+            }
+            let vol = format!("/Volumes/{}", parts[1]);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            // Step out of the volume first so the listing doesn't hold it busy.
+            self.files_go(&home);
+            std::thread::spawn(move || {
+                let out = std::process::Command::new("/usr/sbin/diskutil").args(["eject", &vol]).output();
+                let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+                on_ui(move |_| {
+                    if ok {
+                        crate::ui::toast::show(&format!("Ejected {vol}"), "eject");
+                    } else {
+                        crate::ui::toast::show(&format!("Couldn't eject {vol} (in use?)"), "exclamationmark.triangle.fill");
+                    }
+                });
+            });
+        }
+
+        /// Cmd+Shift+P: show / hide the preview pane (remembered).
+        fn files_toggle_preview(&self) {
+            let Some(Some(view)) = self.files_surface(|b| b.view.clone()) else { return };
+            let on = !view.preview_shown();
+            view.set_preview_shown(on);
+            defaults_set_string("filesPreview", if on { "1" } else { "0" });
+            self.files_surface(|_| ());
         }
 
         fn files_trash(&self) {
@@ -9022,6 +9354,119 @@ mod daemon_ui {
             let in_list = self.focused_pane_id().as_deref() == Some("files-list");
             let (cmd, shift, opt, ctrl) = (key.cmd, key.shift, key.opt, key.ctrl);
             let plain = !cmd && !ctrl && !opt && !shift;
+            // Cmd alone / Cmd+Shift / Cmd+Opt / Cmd+Ctrl — exact chords, so a
+            // Finder key never fires for a neighbouring one.
+            let cmd_only = cmd && !shift && !opt && !ctrl;
+            let cmd_shift = cmd && shift && !opt && !ctrl;
+            let cmd_opt = cmd && opt && !shift && !ctrl;
+            let cmd_ctrl = cmd && ctrl && !shift && !opt;
+            let text = self.key_in_text();
+            let home = std::env::var("HOME").unwrap_or_default();
+            // Finder's Go menu and the other Finder keys first: several share
+            // a key code with an older, looser arm below (Cmd+Opt+C vs Cmd+C).
+            match key.key_code {
+                // Cmd+Shift+H / D / O, Cmd+Opt+L: Home, Desktop, Documents, Downloads.
+                4 if cmd_shift => return self.files_go(&home),
+                2 if cmd_shift => return self.files_go(&format!("{home}/Desktop")),
+                31 if cmd_shift => return self.files_go(&format!("{home}/Documents")),
+                37 if cmd_opt => return self.files_go(&format!("{home}/Downloads")),
+                // Cmd+Shift+G: Go to Folder — the address bar, its text selected.
+                5 if cmd_shift => {
+                    self.live_pane_focus("files-filter");
+                    self.files_select_filter_text();
+                    return true;
+                }
+                // Cmd+F: search (Finder) — the same filter box as Cmd+L.
+                3 if cmd_only => {
+                    self.live_pane_focus("files-filter");
+                    return true;
+                }
+                // Cmd+O: open the selection (Cmd+Down's twin).
+                31 if cmd_only => {
+                    self.files_accept_selected();
+                    return true;
+                }
+                // Cmd+Y: Quick Look (Space's twin); Cmd+Opt+Y: full screen.
+                16 if cmd_only || cmd_opt => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        self.files_quick_look(mtm);
+                        if cmd_opt {
+                            crate::views::files::quick_look_full_screen(mtm);
+                        }
+                    }
+                    return true;
+                }
+                // Cmd+I: Get Info.
+                34 if cmd_only => {
+                    self.files_get_info();
+                    return true;
+                }
+                // Cmd+Opt+C: Copy as Pathname (Cmd+K's Finder twin).
+                8 if cmd_opt => {
+                    return self.route_file_browser(popup::FileBrowserAction::CopyPath) || true;
+                }
+                // Cmd+Opt+A: Deselect All.
+                0 if cmd_opt => {
+                    self.files_surface(|b| b.list.deselect_all());
+                    return true;
+                }
+                // Cmd+Shift+Z: redo the last undone file operation (a text
+                // field keeps Cmd+Shift+Z for its own typing).
+                6 if cmd_shift && !text => {
+                    match FileOps::redo(FileOps::shared()) {
+                        Some((what, o)) => self.files_op_done(format!("Redid {what}"), o.failed),
+                        None => crate::ui::toast::show("Nothing to redo", "arrow.uturn.forward"),
+                    }
+                    return true;
+                }
+                // Cmd+Ctrl+N: New Folder with Selection.
+                45 if cmd_ctrl => {
+                    self.files_new_folder_with_selection();
+                    return true;
+                }
+                // Cmd+Opt+Delete: delete immediately (asks first).
+                51 if cmd_opt && !text => {
+                    self.files_delete_now();
+                    return true;
+                }
+                // Cmd+Shift+Delete: Empty Trash (asks first).
+                51 if cmd_shift && !text => {
+                    self.files_empty_trash();
+                    return true;
+                }
+                // Cmd+Ctrl+T: Add to Sidebar (pin the selected / current folder).
+                17 if cmd_ctrl => {
+                    self.files_surface(|b| b.pin_selection_or_cwd());
+                    return true;
+                }
+                // Cmd+Shift+P: show / hide the preview pane.
+                35 if cmd_shift => {
+                    self.files_toggle_preview();
+                    return true;
+                }
+                // Cmd+Opt+S: show / hide the sidebar (Cmd+\'s Finder twin).
+                1 if cmd_opt => return self.route_rail_toggle(),
+                // Cmd+E: eject the selected volume.
+                14 if cmd_only => {
+                    self.files_eject();
+                    return true;
+                }
+                // Cmd+Ctrl+Opt+1/2/5/6/7: sort by Name / Kind / Date Modified /
+                // Date Created / Size (Finder's View ▸ Sort By numbers).
+                18 | 19 | 23 | 22 | 26 if cmd && ctrl && opt && !shift => {
+                    use crate::views::files::SortKey;
+                    let k = match key.key_code {
+                        18 => SortKey::Name,
+                        19 => SortKey::Kind,
+                        23 => SortKey::Modified,
+                        22 => SortKey::Created,
+                        _ => SortKey::Size,
+                    };
+                    self.files_surface(|b| b.set_sort(k));
+                    return true;
+                }
+                _ => {}
+            }
             match key.key_code {
                 33 if cmd => {
                     self.files_surface(|b| b.go_back());
@@ -9060,11 +9505,11 @@ mod daemon_ui {
                 }
                 15 if cmd && !shift => self.files_begin_rename(),
                 120 if !cmd && !ctrl => self.files_begin_rename(),
-                51 if cmd && in_list => self.files_trash(),
-                2 if cmd && in_list => self.files_duplicate(),
-                8 if cmd && !shift && in_list => self.files_copy(),
-                7 if cmd && in_list => self.files_cut(),
-                9 if cmd && in_list => self.files_paste(opt),
+                51 if cmd_only && in_list => self.files_trash(),
+                2 if cmd_only && in_list => self.files_duplicate(),
+                8 if cmd_only && in_list => self.files_copy(),
+                7 if cmd_only && in_list => self.files_cut(),
+                9 if cmd && !shift && !ctrl && in_list => self.files_paste(opt),
                 // Type-ahead: a printable key with the list focused starts the
                 // filter with that character (the field's cwd text is selected
                 // on focus, so it is replaced).
@@ -9109,6 +9554,73 @@ mod daemon_ui {
         /// Page Down, Cmd+F live search.
         fn jira_key(&self, key: &popup::KeyInput) -> bool {
             let plain = !key.cmd && !key.ctrl && !key.opt;
+            let cmd_only = key.cmd && !key.ctrl && !key.opt && !key.shift;
+            let cmd_shift = key.cmd && key.shift && !key.ctrl && !key.opt;
+            let text = self.jira_text_focused();
+            // Linear / Jira web: act on the issue without opening Cmd+K.
+            match key.key_code {
+                // Cmd+C: copy (the `[jira] copy` fields); Cmd+Shift+C: URL + title.
+                8 if cmd_only && !text => {
+                    self.jira_direct_action("Copy to clipboard");
+                    return true;
+                }
+                8 if cmd_shift && !text => {
+                    self.jira_direct_action("Copy URL and title");
+                    return true;
+                }
+                // Cmd+Return / Cmd+O: open in the browser.
+                36 | 76 if cmd_only => {
+                    self.jira_direct_action("Open in browser");
+                    return true;
+                }
+                31 if cmd_only && !text => {
+                    self.jira_direct_action("Open in browser");
+                    return true;
+                }
+                // Cmd+R: sync now (kick the poller's LaunchAgent; the list
+                // reloads itself when the poll rewrites its file) and re-read.
+                15 if cmd_only => {
+                    self.jira_surface(|l| {
+                        l.shown_mtime = None;
+                        l.refresh();
+                    });
+                    std::thread::spawn(|| {
+                        let uid = unsafe { libc::getuid() };
+                        let ok = std::process::Command::new("/bin/launchctl")
+                            .args(["kickstart", &format!("gui/{uid}/com.jira.poll")])
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+                        on_ui(move |_| {
+                            if ok {
+                                crate::ui::toast::show("Syncing Jira\u{2026}", "arrow.clockwise");
+                            } else {
+                                crate::ui::toast::show("Jira sync is off (turn polling on in Jira Config)", "exclamationmark.triangle");
+                            }
+                        });
+                    });
+                    return true;
+                }
+                // Ctrl+Space ticks; Shift+↑↓ ticks while moving; Cmd+A ticks
+                // all; Cmd+Opt+A clears the ticks.
+                49 if key.ctrl && !key.cmd && !key.opt && !text => {
+                    self.jira_surface(|l| l.toggle_tick());
+                    return true;
+                }
+                125 | 126 if key.shift && !key.cmd && !key.ctrl && !key.opt && !text => {
+                    self.jira_surface(|l| l.tick_extend(if key.key_code == 125 { 1 } else { -1 }));
+                    return true;
+                }
+                0 if cmd_only && !text => {
+                    self.jira_surface(|l| l.tick_all());
+                    return true;
+                }
+                0 if key.cmd && key.opt && !key.ctrl && !key.shift && !text => {
+                    self.jira_surface(|l| l.ticked.clear());
+                    return true;
+                }
+                _ => {}
+            }
             match key.key_code {
                 34 if key.cmd && !key.ctrl => {
                     self.jira_toggle_inspector(None);
@@ -9165,6 +9677,17 @@ mod daemon_ui {
 
         /// `showActions()` for the Jira list: the highlighted row.
         fn jira_actions(&self) {
+            self.jira_actions_or(None);
+        }
+
+        /// Run one Cmd+K action straight from its own key (Cmd+C copy,
+        /// Cmd+Shift+C URL + title, Cmd+Return / Cmd+O open in the browser),
+        /// as Linear / Jira web do — no menu in between.
+        fn jira_direct_action(&self, title: &str) {
+            self.jira_actions_or(Some(title));
+        }
+
+        fn jira_actions_or(&self, direct: Option<&str>) {
             use crate::views::jira_view::{browse_url, is_release_row, issue_labels};
             let Some(mtm) = MainThreadMarker::new() else { return };
             struct Ctx {
@@ -9177,8 +9700,7 @@ mod daemon_ui {
                 copy_keys: Vec<String>,
             }
             let Some(Some(cx)) = self.jira_surface(|l| {
-                let keys: Vec<String> =
-                    l.selected().and_then(|r| r.get("key")).cloned().into_iter().collect();
+                let keys: Vec<String> = l.action_keys();
                 let rows: Vec<_> = keys
                     .iter()
                     .filter(|k| !k.is_empty())
@@ -9259,13 +9781,8 @@ mod daemon_ui {
             let colors = crate::ui::theme::section_colors("jira");
             let rows = cx.rows.clone();
             let copy_keys = cx.copy_keys.clone();
-            let picker = crate::ui::action_picker::ActionPicker::show(
-                mtm,
-                &root,
-                &format!("Actions for {what}"),
-                items,
-                colors,
-                Box::new(move |i| {
+            let picker_title = format!("Actions for {what}");
+            let run: Box<dyn Fn(usize)> = Box::new(move |i| {
                     let Some(ui) = weak.load() else { return };
                     let rs = if releases.len() == 1 { "release".to_string() } else { format!("{} releases", releases.len()) };
                     match titles.get(i).map(String::as_str) {
@@ -9326,7 +9843,21 @@ mod daemon_ui {
                         }
                         _ => {}
                     }
-                }),
+                });
+            if let Some(t) = direct {
+                match items.iter().position(|i| i.0 == t) {
+                    Some(i) => run(i),
+                    None => crate::ui::toast::show("Not available for this row", "exclamationmark.triangle"),
+                }
+                return;
+            }
+            let picker = crate::ui::action_picker::ActionPicker::show(
+                mtm,
+                &root,
+                &picker_title,
+                items,
+                colors,
+                run,
             );
             *self.ivars().action_picker.borrow_mut() = picker;
         }
@@ -9422,6 +9953,7 @@ mod daemon_ui {
                     entries.push(MenuEntry::item("Copy Absolute Paths", move || copy_text_to_pasteboard(&joined)));
                 }
                 entries.extend(clipboard);
+                entries.push(MenuEntry::item(&format!("Rename {} Items\u{2026}", paths.len()), call(Self::files_batch_rename)));
                 entries.push(MenuEntry::Separator);
                 {
                     let ps = paths.clone();
@@ -9594,6 +10126,11 @@ mod daemon_ui {
 
         /// `PopupFileBrowser.beginRename()` (Cmd+R / F2).
         fn files_begin_rename(&self) {
+            // Several selected: Finder's "Rename N Items…" sheet.
+            if self.files_surface(|b| b.list.marked.len()).unwrap_or(0) > 1 {
+                self.files_batch_rename();
+                return;
+            }
             let Some(Some((i, path, is_dir, list))) = self.files_surface(|b| {
                 b.begin_rename(None);
                 let (path, _) = b.rename.clone()?;
@@ -10456,6 +10993,11 @@ mod daemon_ui {
                                         defaults_string("textZoom.files").and_then(|z| z.parse::<f64>().ok()),
                                     ) {
                                         fv.list_view().set_zoom(z.clamp(0.6, 3.0));
+                                    }
+                                    if let Some(fv) = browser.view.as_ref() {
+                                        if defaults_string("filesPreview").as_deref() == Some("0") {
+                                            fv.set_preview_shown(false);
+                                        }
                                     }
                                     st.files = Some(browser);
                                     view

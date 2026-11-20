@@ -802,6 +802,11 @@ impl WorkspaceRow {
     }
 }
 
+/// Cmd+1…9 in the palette: the row index for a digit key code.
+pub fn palette_digit(code: u16) -> Option<usize> {
+    [18u16, 19, 20, 21, 23, 22, 26, 28, 25].iter().position(|&c| c == code)
+}
+
 /// What accepting a row does (`accept(_:)`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaletteAction {
@@ -938,6 +943,24 @@ impl PaletteModel {
     /// `switcherKey(_:_:)`: ↑ ↓ / Ctrl+N,P / Tab, Shift+Tab / Return.
     /// Returns the accept action when Return fires.
     pub fn key(&mut self, code: u16, ctrl: bool, shift: bool, cmd: bool, opt: bool) -> Option<PaletteAction> {
+        if cmd && !ctrl && !opt && !shift {
+            // Raycast / Alfred: Cmd+1…9 runs the Nth row, Cmd+↑ / Cmd+↓ jump
+            // to the first / last.
+            let n = self.rows().len();
+            if let Some(i) = palette_digit(code) {
+                if i < n {
+                    self.selection = i;
+                    return self.accept();
+                }
+                return None;
+            }
+            match code {
+                126 => self.selection = 0,
+                125 => self.selection = n.saturating_sub(1),
+                _ => {}
+            }
+            return None;
+        }
         if cmd || opt {
             return None;
         }
@@ -2227,6 +2250,18 @@ mod tests {
             p.key(36, false, false, false, false),
             Some(PaletteAction::Workspace("1".into()))
         );
+    }
+
+    #[test]
+    fn palette_cmd_digits_run_the_nth_row_and_cmd_arrows_jump() {
+        let mut p = palette();
+        assert_eq!(p.key(19, false, false, true, false), Some(PaletteAction::Command("jira".into())), "Cmd+2");
+        assert_eq!(p.key(20, false, false, true, false), Some(PaletteAction::Workspace("1".into())), "Cmd+3");
+        assert_eq!(p.key(25, false, false, true, false), None, "Cmd+9 past the end does nothing");
+        p.key(125, false, false, true, false);
+        assert_eq!(p.selection, 3, "Cmd+Down = last");
+        p.key(126, false, false, true, false);
+        assert_eq!(p.selection, 0, "Cmd+Up = first");
     }
 
     #[test]

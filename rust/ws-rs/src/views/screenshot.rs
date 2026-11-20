@@ -500,6 +500,76 @@ impl ScreenshotConfig {
     }
 }
 
+/// One on-screen window for the W (snap to window) key: its bounds in global
+/// top-left coordinates, its layer and its owner's pid, front-most first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenWindow {
+    pub bounds: Rect,
+    pub layer: i64,
+    pub pid: i32,
+}
+
+/// The front-most ordinary app window (layer 0, not ours, not a sliver)
+/// under the global point `at`.
+pub fn window_under(windows: &[ScreenWindow], at: Point, own_pid: i32) -> Option<Rect> {
+    windows
+        .iter()
+        .find(|w| {
+            w.layer == 0
+                && w.pid != own_pid
+                && w.bounds.w >= 40.0
+                && w.bounds.h >= 40.0
+                && at.x >= w.bounds.x
+                && at.x <= w.bounds.x + w.bounds.w
+                && at.y >= w.bounds.y
+                && at.y <= w.bounds.y + w.bounds.h
+        })
+        .map(|w| w.bounds)
+}
+
+/// `CGWindowListCopyWindowInfo(onScreenOnly | excludeDesktop)`, front to back.
+#[cfg(target_os = "macos")]
+pub fn on_screen_windows() -> Vec<ScreenWindow> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut core::ffi::c_void;
+    }
+    let raw = unsafe { CGWindowListCopyWindowInfo(1 | (1 << 4), 0) };
+    if raw.is_null() {
+        return Vec::new();
+    }
+    // CFArray of CFDictionary is toll-free bridged to NSArray<NSDictionary>;
+    // the Copy call returned it +1.
+    let Some(arr) = (unsafe { Retained::<NSArray<NSDictionary<NSString, AnyObject>>>::from_raw(raw.cast()) }) else {
+        return Vec::new();
+    };
+    let num = |d: &NSDictionary<NSString, AnyObject>, k: &str| -> Option<f64> {
+        let v = d.objectForKey(&NSString::from_str(k))?;
+        let n: &NSNumber = unsafe { &*(Retained::as_ptr(&v) as *const NSNumber) };
+        Some(n.doubleValue())
+    };
+    let mut out = Vec::new();
+    for d in arr.iter() {
+        let layer = num(&d, "kCGWindowLayer").unwrap_or(-1.0) as i64;
+        let pid = num(&d, "kCGWindowOwnerPID").unwrap_or(0.0) as i32;
+        let Some(b) = d.objectForKey(&NSString::from_str("kCGWindowBounds")) else { continue };
+        let bd: &NSDictionary<NSString, AnyObject> = unsafe { &*(Retained::as_ptr(&b) as *const NSDictionary<NSString, AnyObject>) };
+        let (Some(x), Some(y), Some(w), Some(h)) = (num(bd, "X"), num(bd, "Y"), num(bd, "Width"), num(bd, "Height")) else {
+            continue;
+        };
+        out.push(ScreenWindow { bounds: Rect::new(x, y, w, h), layer, pid });
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn on_screen_windows() -> Vec<ScreenWindow> {
+    Vec::new()
+}
+
 // __NEXT__
 
 // ---------------------------------------------------------------------------
@@ -1966,6 +2036,28 @@ impl ShotSession {
         }
     }
 
+    /// W: select the window under the pointer (macOS's Cmd+Shift+4 then
+    /// Space, CleanShot's window mode) — the frozen image is cropped to it.
+    pub fn select_window_under_mouse(&mut self, windows: &[ScreenWindow]) -> bool {
+        let Some((d, p)) = self.mouse else { return false };
+        let Some(disp) = self.displays.get(d).cloned() else { return false };
+        let o = self.global_origin(&disp);
+        let at = Point::new(p.x + o.x, p.y + o.y);
+        let Some(r) = window_under(windows, at, std::process::id() as i32) else { return false };
+        let local = Rect::new(r.x - o.x, r.y - o.y, r.w, r.h);
+        // Clip to the display the pointer is on.
+        let b = disp.bounds();
+        let x0 = local.x.max(b.x);
+        let y0 = local.y.max(b.y);
+        let x1 = (local.x + local.w).min(b.x + b.w);
+        let y1 = (local.y + local.h).min(b.y + b.h);
+        if x1 - x0 < 4.0 || y1 - y0 < 4.0 {
+            return false;
+        }
+        self.select(Some(Rect::new(x0, y0, x1 - x0, y1 - y0)), Some(d), true);
+        true
+    }
+
     pub fn test_select(&mut self, r: Rect, on: Option<usize>) {
         let Some(d) = on.or(self.mouse_display()) else {
             return;
@@ -2668,6 +2760,13 @@ impl ShotSession {
             self.toggle_move_mode();
             return true;
         }
+        // Cmd+P: pin the shot on the desktop (CleanShot / Shottr).
+        if k.cmd && !k.shift && ch == Some('p') {
+            if self.selection.is_some() {
+                self.finish(ShotOutcome::Pin);
+            }
+            return true;
+        }
         if k.cmd && ch == Some('z') {
             if k.shift {
                 self.redo();
@@ -2718,6 +2817,11 @@ impl ShotSession {
                 }
                 Some('o') => {
                     self.toggle_text_mode();
+                    return true;
+                }
+                Some('w') => {
+                    let wins = on_screen_windows();
+                    self.select_window_under_mouse(&wins);
                     return true;
                 }
                 _ => {}
@@ -8752,6 +8856,21 @@ mod tests {
 
     fn ws_words(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn w_key_picks_the_front_app_window_under_the_pointer() {
+        let w = |x, y, wd, h, layer, pid| ScreenWindow { bounds: Rect::new(x, y, wd, h), layer, pid };
+        let wins = [
+            w(0.0, 0.0, 2000.0, 24.0, 25, 1),     // menu bar layer
+            w(100.0, 100.0, 300.0, 200.0, 0, 42), // ours (skipped)
+            w(50.0, 50.0, 800.0, 600.0, 0, 7),    // the app window behind
+            w(0.0, 0.0, 10.0, 10.0, 0, 8),        // a sliver
+        ];
+        assert_eq!(window_under(&wins, Point::new(150.0, 150.0), 42), Some(Rect::new(50.0, 50.0, 800.0, 600.0)));
+        assert_eq!(window_under(&wins, Point::new(150.0, 150.0), 1), Some(Rect::new(100.0, 100.0, 300.0, 200.0)));
+        assert_eq!(window_under(&wins, Point::new(5.0, 5.0), 42), None, "menu bar / slivers never");
+        assert_eq!(window_under(&wins, Point::new(1900.0, 900.0), 42), None);
     }
 
     #[test]

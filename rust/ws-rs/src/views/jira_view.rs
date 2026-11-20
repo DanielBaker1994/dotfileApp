@@ -605,6 +605,9 @@ pub struct JiraList {
     /// Indices into `all`, filtered + sorted.
     pub rows: Vec<usize>,
     pub selection: usize,
+    /// Ticked issue keys (Ctrl+Space / Shift+↑↓ / Cmd+A): Cmd+K and the
+    /// direct action keys act on these when any are ticked.
+    pub ticked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
     pub rules: Option<StyleRules>,
     pub catalog: Vec<(String, String, String)>,
@@ -2169,6 +2172,7 @@ impl JiraList {
             columns,
             rows,
             selection,
+            ticked: BTreeSet::new(),
             favs: self.favs.clone(),
             pinned_boards: self.boards.iter().map(|(id, _)| id.clone()).collect(),
             sort: None,
@@ -2637,6 +2641,51 @@ impl JiraList {
 
     pub fn selected(&self) -> Option<&Record> {
         self.rows.get(self.selection).and_then(|&i| self.rec(i))
+    }
+
+    fn row_key(&self, i: usize) -> Option<String> {
+        self.row(i).and_then(|r| r.get("key")).filter(|k| !k.is_empty()).cloned()
+    }
+
+    /// Ctrl+Space: tick / untick the highlighted row.
+    pub fn toggle_tick(&mut self) {
+        if let Some(k) = self.row_key(self.selection) {
+            if !self.ticked.remove(&k) {
+                self.ticked.insert(k);
+            }
+        }
+    }
+
+    /// Shift+↑ / Shift+↓: tick the highlighted row, move, tick the next.
+    pub fn tick_extend(&mut self, delta: i64) {
+        let n = self.rows.len();
+        if n == 0 {
+            return;
+        }
+        if let Some(k) = self.row_key(self.selection) {
+            self.ticked.insert(k);
+        }
+        self.selection = (self.selection as i64 + delta).clamp(0, n as i64 - 1) as usize;
+        if let Some(k) = self.row_key(self.selection) {
+            self.ticked.insert(k);
+        }
+    }
+
+    /// Cmd+A: tick every visible row.
+    pub fn tick_all(&mut self) {
+        let keys: Vec<String> = (0..self.rows.len()).filter_map(|i| self.row_key(i)).collect();
+        self.ticked.extend(keys);
+    }
+
+    /// The keys an action applies to: the visible ticked rows, else the
+    /// highlighted row.
+    pub fn action_keys(&self) -> Vec<String> {
+        let visible: Vec<String> =
+            (0..self.rows.len()).filter_map(|i| self.row_key(i)).filter(|k| self.ticked.contains(k)).collect();
+        if !visible.is_empty() {
+            return visible;
+        }
+        self.selected().and_then(|r| r.get("key")).cloned().into_iter().collect()
     }
 
     pub fn row(&self, i: usize) -> Option<&Record> {
@@ -3273,6 +3322,8 @@ pub struct JiraSnapshot {
     pub columns: Vec<ListColumn>,
     pub rows: Vec<Record>,
     pub selection: usize,
+    /// Ticked issue keys (drawn like the selection).
+    pub ticked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
     /// Pinned board ids (`boards`): the "All boards" ☆ shows these, not
     /// favourites (a board key could never resolve as a favourite).
@@ -3327,6 +3378,7 @@ impl JiraList {
             columns: self.columns.clone(),
             rows,
             selection: self.selection,
+            ticked: self.ticked.clone(),
             favs: self
                 .favs
                 .iter()
@@ -3727,7 +3779,8 @@ mod appkit {
                 let r = &snap.rows[i];
                 let band = Rect::new(0.0, i as f64 * row_h(), w, row_h());
                 let pill = Rect::new(4.0, band.y + 1.0, w - 8.0 - 6.0, band.height - 2.0);
-                style::row_pill(pill, 5.0, i == snap.selection, i == snap.selection, hover == Some(i), &c, style::RowAccent::Clipped);
+                let ticked = r.get("key").is_some_and(|k| snap.ticked.contains(k));
+                style::row_pill(pill, 5.0, i == snap.selection || ticked, i == snap.selection, hover == Some(i), &c, style::RowAccent::Clipped);
                 if let Some(g) = r.get("__group") {
                     // `groupedRows` header: ▸/▾, the name, its row count.
                     let shut = r.contains_key("__collapsed");
@@ -5477,6 +5530,24 @@ mod tests {
 
     fn shown_keys(l: &JiraList) -> Vec<String> {
         (0..l.rows.len()).map(|i| l.row(i).unwrap()["key"].clone()).collect()
+    }
+
+    #[test]
+    fn ticks_drive_the_action_keys() {
+        let mut l = filter_list();
+        l.selection = 1;
+        assert_eq!(l.action_keys(), vec!["A-2"], "no ticks: the highlighted row");
+        l.toggle_tick();
+        l.tick_extend(1);
+        assert_eq!(l.selection, 2);
+        assert_eq!(l.action_keys(), vec!["A-2", "A-3"]);
+        l.toggle_tick();
+        assert_eq!(l.action_keys(), vec!["A-2"], "Ctrl+Space unticks");
+        l.tick_all();
+        assert_eq!(l.action_keys().len(), 5);
+        assert!(l.snapshot().ticked.contains("A-5"));
+        l.ticked.clear();
+        assert_eq!(l.action_keys(), vec!["A-3"]);
     }
 
     #[test]

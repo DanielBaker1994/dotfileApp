@@ -97,6 +97,46 @@ class CopyAndUndo(FileOpsBase):
         self.assertIsNone(fo.undo(stack))
 
 
+class Redo(FileOpsBase):
+    def test_redo_move_copy_trash_and_new_action_clears_redo(self):
+        stack = fo.stack_new()
+        self.write("r/a.txt", "a")
+        os.makedirs(self.root + "/r/sub")
+        fo.transfer([self.root + "/r/a.txt"], self.root + "/r/sub", True, stack)
+        self.assertTrue(self.exists("r/sub/a.txt"))
+        self.undo(stack)
+        self.assertTrue(self.exists("r/a.txt") and not self.exists("r/sub/a.txt"))
+        self.assertTrue(fo.stack_state(stack)["canRedo"])
+        r = fo.redo(stack)
+        self.assertIsNotNone(r)
+        self.assertTrue(self.exists("r/sub/a.txt") and not self.exists("r/a.txt"))
+        # Redone work is undoable again.
+        self.undo(stack)
+        self.assertTrue(self.exists("r/a.txt"))
+        fo.redo(stack)
+        self.assertTrue(self.exists("r/sub/a.txt"))
+        # Copy: undo trashes the copy, redo brings it back.
+        fo.duplicate([self.root + "/r/sub/a.txt"], stack)
+        self.assertTrue(self.exists("r/sub/a copy.txt"))
+        self.undo(stack)
+        self.assertFalse(self.exists("r/sub/a copy.txt"))
+        fo.redo(stack)
+        self.assertTrue(self.exists("r/sub/a copy.txt"))
+        # Trash: undo restores, redo trashes again.
+        t = fo.trash([self.root + "/r/sub/a copy.txt"], stack)
+        self.trashed += [c[1] for c in t["changes"]]
+        self.undo(stack)
+        self.assertTrue(self.exists("r/sub/a copy.txt"))
+        r = fo.redo(stack)
+        self.trashed += [c[1] for c in r["outcome"]["changes"]]
+        self.assertFalse(self.exists("r/sub/a copy.txt"))
+        # A fresh action drops the redo history.
+        self.undo(stack)
+        fo.create("new.txt", self.root + "/r", False, stack)
+        self.assertFalse(fo.stack_state(stack)["canRedo"])
+        self.assertIsNone(fo.redo(stack))
+
+
 class MoveAndUndo(FileOpsBase):
     def test_move_then_undo(self):
         stack = fo.stack_new()

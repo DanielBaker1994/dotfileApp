@@ -230,6 +230,16 @@ impl FileOps {
     }
 }
 
+impl FileOps {
+    /// Cmd+Shift+Z: re-do the last undone operation (`fileops.redo`).
+    pub fn redo(undo: &UndoStack) -> Option<(String, Outcome)> {
+        let boxed = fo_call("fileops.redo", json!({"stack": undo.handle()}))?;
+        let outcome_json = boxed.get("outcome")?;
+        let what = boxed.get("what").and_then(Value::as_str).unwrap_or("").to_string();
+        Some((what, Outcome::from_json(outcome_json)))
+    }
+}
+
 fn outcome(boxed: Option<Value>) -> Outcome {
     match boxed {
         Some(v) => Outcome::from_json(&v),

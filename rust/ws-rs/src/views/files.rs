@@ -212,6 +212,158 @@ pub fn human_size(bytes: i64) -> String {
     }
 }
 
+/// A local date/time, Finder style: "19 Nov 2026 at 14:05".
+pub fn long_date(epoch: f64) -> String {
+    #[cfg(unix)]
+    {
+        let t = epoch as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u8; 64];
+        let fmt = b"%e %b %Y at %H:%M\0";
+        let n = unsafe {
+            libc::strftime(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), fmt.as_ptr() as *const libc::c_char, &tm)
+        };
+        String::from_utf8_lossy(&buf[..n]).trim().to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        format!("{epoch:.0}")
+    }
+}
+
+/// `drwxr-xr-x`-style permissions from a mode.
+pub fn mode_string(mode: u32, is_dir: bool, is_link: bool) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(if is_link { 'l' } else if is_dir { 'd' } else { '-' });
+    for shift in [6u32, 3, 0] {
+        let b = (mode >> shift) & 7;
+        s.push(if b & 4 != 0 { 'r' } else { '-' });
+        s.push(if b & 2 != 0 { 'w' } else { '-' });
+        s.push(if b & 1 != 0 { 'x' } else { '-' });
+    }
+    s
+}
+
+/// The size of everything below `dir` (bytes, files counted), stopping
+/// after `budget` so a huge tree can't stall Get Info; `complete` is false
+/// when it stopped early.
+pub fn tree_size(dir: &Path, budget: std::time::Duration) -> (u64, u64, bool) {
+    let start = std::time::Instant::now();
+    let (mut bytes, mut files) = (0u64, 0u64);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if start.elapsed() > budget {
+            return (bytes, files, false);
+        }
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let Ok(m) = e.path().symlink_metadata() else { continue };
+            if m.is_dir() {
+                stack.push(e.path());
+            } else {
+                bytes += m.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files, true)
+}
+
+/// Finder's Get Info (Cmd+I) as label/value rows for one or more paths.
+pub fn file_info_rows(paths: &[String], budget: std::time::Duration) -> (String, Vec<(String, String)>) {
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if paths.len() > 1 {
+        let (mut bytes, mut files, mut complete) = (0u64, 0u64, true);
+        for p in paths {
+            let path = Path::new(p);
+            match path.symlink_metadata() {
+                Ok(m) if m.is_dir() => {
+                    let (b, f, c) = tree_size(path, budget);
+                    bytes += b;
+                    files += f;
+                    complete &= c;
+                }
+                Ok(m) => {
+                    bytes += m.len();
+                    files += 1;
+                }
+                Err(_) => {}
+            }
+        }
+        let more = if complete { "" } else { "+ (still counting when it stopped)" };
+        rows.push(("Size".into(), format!("{}{more} ({files} files)", human_size(bytes as i64))));
+        let dir = Path::new(&paths[0]).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        rows.push(("Where".into(), display_path(&dir)));
+        return (format!("{} items", paths.len()), rows);
+    }
+    let Some(p) = paths.first() else { return (String::new(), rows) };
+    let path = Path::new(p);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
+    let Ok(lm) = path.symlink_metadata() else {
+        rows.push(("Error".into(), "can't read it".into()));
+        return (name, rows);
+    };
+    let is_link = lm.file_type().is_symlink();
+    let m = std::fs::metadata(path).unwrap_or(lm.clone());
+    let kind = if is_link {
+        "Alias (symbolic link)".to_string()
+    } else if m.is_dir() {
+        if p.ends_with(".app") { "Application".into() } else { "Folder".into() }
+    } else {
+        match path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
+            Some(e) if !e.is_empty() => format!("{} file", e.to_uppercase()),
+            _ => "Document".into(),
+        }
+    };
+    rows.push(("Kind".into(), kind));
+    if m.is_dir() {
+        let (b, f, complete) = tree_size(path, budget);
+        let more = if complete { "" } else { "+ (still counting when it stopped)" };
+        rows.push(("Size".into(), format!("{}{more} for {f} files", human_size(b as i64))));
+        let n = std::fs::read_dir(path).map(|r| r.count()).unwrap_or(0);
+        rows.push(("Contains".into(), format!("{n} item{}", if n == 1 { "" } else { "s" })));
+    } else {
+        rows.push(("Size".into(), format!("{} ({} bytes)", human_size(m.len() as i64), m.len())));
+    }
+    let dir = path.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    rows.push(("Where".into(), display_path(&dir)));
+    if is_link {
+        if let Ok(t) = std::fs::read_link(path) {
+            rows.push(("Original".into(), t.to_string_lossy().into_owned()));
+        }
+    }
+    let secs = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64())
+    };
+    if let Some(c) = secs(m.created()) {
+        rows.push(("Created".into(), long_date(c)));
+    }
+    if let Some(c) = secs(m.modified()) {
+        rows.push(("Modified".into(), long_date(c)));
+    }
+    #[cfg(unix)]
+    {
+        let owner = unsafe {
+            let pw = libc::getpwuid(m.uid());
+            if pw.is_null() {
+                m.uid().to_string()
+            } else {
+                std::ffi::CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned()
+            }
+        };
+        rows.push((
+            "Permissions".into(),
+            format!("{} {owner}", mode_string(m.permissions().mode(), m.is_dir(), is_link)),
+        ));
+    }
+    (name, rows)
+}
+
 /// `PopupFileBrowser.ago(_:)` for Recent rows.
 pub fn ago(secs: f64) -> String {
     let s = secs.max(0.0) as i64;
@@ -724,6 +876,18 @@ impl FileList {
         self.anchor = all[0];
     }
 
+    #[cfg(test)]
+    fn clone_for_test(&self) -> FileList {
+        FileList { rows: self.rows.clone(), selection: self.selection, marked: self.marked.clone(), anchor: self.anchor }
+    }
+
+    /// Cmd+Opt+A (Finder's Deselect All): drop the multi-selection; the
+    /// keyboard cursor row stays (the list always has one).
+    pub fn deselect_all(&mut self) {
+        self.marked.clear();
+        self.anchor = self.selection;
+    }
+
     pub fn extend_selection(&mut self, to: usize) {
         if to >= self.rows.len() {
             return;
@@ -871,6 +1035,81 @@ pub fn open_index(rows: &[Entry], i: usize) -> OpenOutcome {
 }
 
 // --------------------------------------------------------------- file ops glue
+
+/// Finder's "Rename N Items…": replace text, add text before / after, or
+/// number the items from a base name. Extensions are kept.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BatchRename {
+    pub find: String,
+    pub replace: String,
+    pub prefix: String,
+    pub suffix: String,
+    /// Non-empty: name the items "<base> 1", "<base> 2", … (in the given order).
+    pub base: String,
+}
+
+fn split_name(name: &str, is_dir: bool) -> (String, String) {
+    if is_dir {
+        return (name.to_string(), String::new());
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
+        _ => (name.to_string(), String::new()),
+    }
+}
+
+/// The `(from, to)` moves a batch rename makes (unchanged names skipped), or
+/// why it is refused (an empty / slashed name, two items landing on one
+/// name, or a name that is already taken by something not being renamed).
+pub fn batch_rename_plan(
+    paths: &[String],
+    o: &BatchRename,
+    is_dir: &dyn Fn(&str) -> bool,
+    exists: &dyn Fn(&str) -> bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let sources: std::collections::HashSet<&String> = paths.iter().collect();
+    for (n, p) in paths.iter().enumerate() {
+        let path = Path::new(p);
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = path.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        let (mut stem, ext) = split_name(&name, is_dir(p));
+        if !o.base.trim().is_empty() {
+            stem = format!("{} {}", o.base.trim(), n + 1);
+        } else if !o.find.is_empty() {
+            stem = stem.replace(&o.find, &o.replace);
+        }
+        stem = format!("{}{}{}", o.prefix, stem, o.suffix);
+        let new = format!("{stem}{ext}");
+        if stem.trim().is_empty() {
+            return Err(format!("\u{201c}{name}\u{201d} would get an empty name"));
+        }
+        if new.contains('/') || new.contains(':') {
+            return Err(format!("names can't contain / or : (\u{201c}{new}\u{201d})"));
+        }
+        let to = format!("{dir}/{new}");
+        if !taken.insert(to.clone()) {
+            return Err(format!("two items would both be named \u{201c}{new}\u{201d}"));
+        }
+        if to == *p {
+            continue;
+        }
+        if exists(&to) && !sources.contains(&to) {
+            return Err(format!("\u{201c}{new}\u{201d} already exists"));
+        }
+        out.push((p.clone(), to));
+    }
+    // A rename onto another source's current name only works if that source
+    // moves first; refuse cycles/chains rather than order them.
+    for (_, to) in &out {
+        if out.iter().any(|(from, _)| from == to) {
+            let n = Path::new(to).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(format!("\u{201c}{n}\u{201d} is one of the items being renamed — rename in two steps"));
+        }
+    }
+    Ok(out)
+}
 
 /// `commitRename`'s validation + move (mirrors `PathsWindow.commitRename`).
 pub fn rename_into(old_path: &str, new_name: &str) -> Result<Option<String>, String> {
@@ -1319,6 +1558,20 @@ pub fn close_shared_quick_look(mtm: objc2::MainThreadMarker) -> bool {
     }
 }
 
+/// Cmd+Opt+Y: put the (just opened) Quick Look panel into full screen.
+#[cfg(target_os = "macos")]
+pub fn quick_look_full_screen(mtm: objc2::MainThreadMarker) {
+    if !unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+        return;
+    }
+    if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+        if panel.isVisible() {
+            let nil: Option<&AnyObject> = None;
+            let _: objc2::runtime::Bool = unsafe { msg_send![&*panel, enterFullScreenMode: nil, withOptions: nil] };
+        }
+    }
+}
+
 /// Cast any Objective-C object to `&AnyObject` (the identity cast used for the
 /// panel's unretained `delegate`).
 #[cfg(target_os = "macos")]
@@ -1534,6 +1787,21 @@ impl FileBrowser {
             return;
         }
         let cwd = self.cwd.clone();
+        self.toggle_pin_path(&cwd);
+    }
+
+    /// Finder's Add to Sidebar (Cmd+Ctrl+T): pin the selected folder, else
+    /// the current one.
+    pub fn pin_selection_or_cwd(&mut self) {
+        let sel = self.list.rows.get(self.list.selection).filter(|e| e.is_dir && !e.is_parent()).map(|e| e.path.clone());
+        match sel {
+            Some(p) => self.toggle_pin_path(&p),
+            None => self.toggle_pin(),
+        }
+    }
+
+    fn toggle_pin_path(&mut self, cwd: &str) {
+        let cwd = cwd.to_string();
         if self.merged_favorites().contains(&cwd) && self.pinned_favorites.contains(&cwd) {
             self.pinned_favorites.retain(|p| p != &cwd);
         } else if !self.merged_favorites().contains(&cwd) {
@@ -1618,7 +1886,13 @@ impl FileBrowser {
             return n.clone();
         }
         let items = self.list.rows.iter().filter(|e| !e.is_parent()).count();
-        let count = format!("{items} item{}", if items == 1 { "" } else { "s" });
+        let marked = self.list.marked.len();
+        let count = if marked > 1 {
+            // Finder's status bar: "3 of 12 selected".
+            format!("{marked} of {items} selected")
+        } else {
+            format!("{items} item{}", if items == 1 { "" } else { "s" })
+        };
         match &self.mode {
             QueryMode::All if self.in_recent() => {
                 let status = match self.virtual_index {
@@ -2259,6 +2533,9 @@ impl FileBrowser {
             "selection": self.list.selection,
             "marked": self.list.marked.iter().copied().collect::<Vec<_>>(),
             "quickLook": self.quick_look.state(),
+            "sortKey": self.sort_key.raw(),
+            "pinned": self.pinned_favorites,
+            "status": self.status_text(),
             "rows": self.list.rows.iter().map(|e| json!({
                 "name": e.name, "path": e.path, "isDir": e.is_dir
             })).collect::<Vec<_>>(),
@@ -2267,6 +2544,7 @@ impl FileBrowser {
         #[cfg(target_os = "macos")]
         if let Some(view) = &self.view {
             v["fieldText"] = json!(view.search_text());
+            v["previewShown"] = json!(view.preview_shown());
         }
         v
     }
@@ -2804,6 +3082,61 @@ mod tests {
     }
 
     #[test]
+    fn get_info_rows_for_a_file_and_a_folder() {
+        let dir = std::env::temp_dir().join(format!("ks-info-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("sub"));
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("sub/b.md"), "123").unwrap();
+        let budget = std::time::Duration::from_secs(2);
+        let (name, rows) = file_info_rows(&[dir.join("a.txt").to_string_lossy().into_owned()], budget);
+        let get = |rows: &[(String, String)], k: &str| rows.iter().find(|r| r.0 == k).map(|r| r.1.clone()).unwrap_or_default();
+        assert_eq!(name, "a.txt");
+        assert_eq!(get(&rows, "Kind"), "TXT file");
+        assert!(get(&rows, "Size").contains("5 bytes"));
+        assert!(get(&rows, "Permissions").starts_with("-rw"));
+        assert!(!get(&rows, "Modified").is_empty());
+        let (_, rows) = file_info_rows(&[dir.to_string_lossy().into_owned()], budget);
+        assert_eq!(get(&rows, "Kind"), "Folder");
+        assert!(get(&rows, "Size").contains("for 2 files"), "{rows:?}");
+        assert_eq!(get(&rows, "Contains"), "2 items");
+        let (title, rows) = file_info_rows(
+            &[dir.join("a.txt").to_string_lossy().into_owned(), dir.join("sub").to_string_lossy().into_owned()],
+            budget,
+        );
+        assert_eq!(title, "2 items");
+        assert!(get(&rows, "Size").contains("(2 files)"));
+        assert_eq!(mode_string(0o755, true, false), "drwxr-xr-x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_rename_replace_add_and_number() {
+        let ps = vec!["/d/IMG_1.jpg".to_string(), "/d/IMG_2.jpg".to_string(), "/d/folder".to_string()];
+        let dir = |p: &str| p.ends_with("folder");
+        let none = |_: &str| false;
+        let o = BatchRename { find: "IMG_".into(), replace: "Trip ".into(), ..Default::default() };
+        let plan = batch_rename_plan(&ps[..2], &o, &dir, &none).unwrap();
+        assert_eq!(plan, vec![("/d/IMG_1.jpg".into(), "/d/Trip 1.jpg".into()), ("/d/IMG_2.jpg".into(), "/d/Trip 2.jpg".into())]);
+        let o = BatchRename { prefix: "old-".into(), suffix: "-v2".into(), ..Default::default() };
+        let plan = batch_rename_plan(&ps, &o, &dir, &none).unwrap();
+        assert_eq!(plan[0].1, "/d/old-IMG_1-v2.jpg", "suffix goes before the extension");
+        assert_eq!(plan[2].1, "/d/old-folder-v2", "folders have no extension");
+        let o = BatchRename { base: "Photo".into(), ..Default::default() };
+        let plan = batch_rename_plan(&ps[..2], &o, &dir, &none).unwrap();
+        assert_eq!(plan[1].1, "/d/Photo 2.jpg");
+        // Refusals.
+        let o = BatchRename { find: "IMG_1".into(), replace: "IMG_2".into(), ..Default::default() };
+        assert!(batch_rename_plan(&ps[..2], &o, &dir, &none).unwrap_err().contains("both"));
+        let taken = |p: &str| p == "/d/Trip 1.jpg";
+        let o = BatchRename { find: "IMG_".into(), replace: "Trip ".into(), ..Default::default() };
+        assert!(batch_rename_plan(&ps[..2], &o, &dir, &taken).unwrap_err().contains("already exists"));
+        let o = BatchRename { find: "IMG_1".into(), replace: "".into(), ..Default::default() };
+        assert!(batch_rename_plan(&ps[..1], &o, &dir, &none).unwrap_err().contains("empty"));
+        let o = BatchRename { find: "x".into(), replace: "y".into(), ..Default::default() };
+        assert!(batch_rename_plan(&ps, &o, &dir, &none).unwrap().is_empty(), "no change = no moves");
+    }
+
+    #[test]
     fn mark_and_select() {
         let mut l = FileList::new(rows());
         assert_eq!(l.selected_rows(), vec![0]);
@@ -2814,6 +3147,10 @@ mod tests {
         assert_eq!(l.marked.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3], ".. is excluded");
         assert_eq!(l.selection, 1);
         assert_eq!(l.anchor, 1);
+        let mut d = l.clone_for_test();
+        d.deselect_all();
+        assert!(d.marked.is_empty(), "Cmd+Opt+A drops the multi-selection");
+        assert_eq!(d.selected_rows(), vec![1], "the cursor row stays");
 
         l.extend_selection(2);
         assert_eq!(l.marked.iter().copied().collect::<Vec<_>>(), vec![1, 2]);

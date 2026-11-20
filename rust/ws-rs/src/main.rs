@@ -230,6 +230,13 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
         MenuAction::ResetWindowSize => {
             let _ = controller.do_action("reset-size");
         }
+        MenuAction::Settings => {
+            let assets = app::paths::Paths::from_env().asset_dir().to_string();
+            let bin = format!("{assets}/bin/ws-settings");
+            if let Err(e) = std::process::Command::new(&bin).arg("open").spawn() {
+                controller.log(&format!("settings: couldn't start {bin}: {e}"));
+            }
+        }
         MenuAction::SetHeaderStyle(style) => {
             let _ = controller.do_action(&format!("header-style:{}", style.raw_value()));
         }

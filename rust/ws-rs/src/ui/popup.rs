@@ -557,7 +557,7 @@ fn file_browser_key(config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     }
     if config.browser_rename_active {
         let op = match key.key_code {
-            0 => FileBrowserAction::SelectAll,
+            0 if key.cmd => FileBrowserAction::SelectAll,
             8 => FileBrowserAction::Copy,
             9 => FileBrowserAction::Paste,
             7 => FileBrowserAction::Cut,
@@ -571,11 +571,13 @@ fn file_browser_key(config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
         45 if key.ctrl => FileBrowserAction::MoveDown,
         35 if key.ctrl => FileBrowserAction::MoveUp,
         40 if key.cmd => FileBrowserAction::CopyPath,
-        0 => FileBrowserAction::SelectAll,
-        8 => FileBrowserAction::Copy,
+        // Cmd+A only (Finder): Ctrl+A is never select-all on macOS, and
+        // Cmd+Opt+A is Deselect All (`files_key`).
+        0 if key.cmd && !key.opt => FileBrowserAction::SelectAll,
+        8 if !key.opt => FileBrowserAction::Copy,
         9 => FileBrowserAction::Paste,
         7 => FileBrowserAction::Cut,
-        6 => FileBrowserAction::Undo,
+        6 if key.cmd && !key.shift => FileBrowserAction::Undo,
         _ => return None,
     };
     Some(KeyAction::FileBrowser(op))
@@ -585,6 +587,9 @@ fn edit_key(config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     match key.key_code {
         // Cmd+A/X/C/V pass through to the Edit menu; only Ctrl+C/V and Cmd+Z
         // are routed here (see AGENT_CONTEXT "Edit keys").
+        // Ctrl+A is the field's own start-of-line (macOS emacs keys), never
+        // select-all.
+        0 if key.ctrl && !key.cmd => Some(KeyAction::Pass),
         0 | 8 | 9 | 7 => {
             if key.cmd && !key.ctrl {
                 Some(KeyAction::Pass)

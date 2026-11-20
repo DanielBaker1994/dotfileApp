@@ -94,6 +94,9 @@ pub fn key_action(
         36 | 76 => Some(PathsKey::RunDefault),
         8 if cmd && shift => Some(PathsKey::CopyFiles),
         8 if cmd && !text_selected => Some(PathsKey::CopyPaths),
+        // Cmd+K: copy the path, as in Files (and Cmd+Opt+C above, Finder's
+        // Copy as Pathname, rides the plain Cmd+C arm).
+        40 if cmd && !shift => Some(PathsKey::CopyPaths),
         16 if cmd => Some(PathsKey::QuickLook),
         49 if !cmd && !ctrl && (query_empty || list_focused) => Some(PathsKey::QuickLook),
         31 if cmd => Some(PathsKey::Open),

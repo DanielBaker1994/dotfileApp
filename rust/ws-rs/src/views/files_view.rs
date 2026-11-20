@@ -108,7 +108,13 @@ pub fn path_text_is_stale(cur: &str, old: &str, new: &str) -> bool {
 pub fn files_layout(width: f64, height: f64, sidebar_w: f64, split_fraction: f64) -> FilesLayout {
     let left = if sidebar_w > 0.0 { sidebar_w + 4.0 } else { 0.0 };
     let list_y = TOOLBAR_Y + TOOLBAR_H + 5.0 + 4.0;
-    let split_x = (split_fraction * width).max(left + 200.0).min((width - 200.0).max(left + 200.0));
+    // `split_fraction >= 1` = the preview pane is hidden (Cmd+Shift+P): the
+    // list takes the whole width.
+    let split_x = if split_fraction >= 1.0 {
+        width.max(left)
+    } else {
+        (split_fraction * width).max(left + 200.0).min((width - 200.0).max(left + 200.0))
+    };
     let content_h = (height - list_y - STATUS_H).max(0.0);
     FilesLayout {
         sidebar: Rect::new(0.0, 0.0, sidebar_w, height),
@@ -699,6 +705,8 @@ mod appkit {
         pressed: Cell<Option<i32>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
         shown_preview_key: RefCell<String>,
+        /// Cmd+Shift+P hid the preview pane (Finder's Show/Hide Preview).
+        no_preview: Cell<bool>,
     }
 
     define_class!(
@@ -834,6 +842,9 @@ mod appkit {
             let preview_text = NSTextView::new(mtm);
             preview_text.setEditable(false);
             preview_text.setSelectable(true);
+            // Cmd+F in the text preview: the standard find bar.
+            preview_text.setUsesFindBar(true);
+            preview_text.setIncrementalSearchingEnabled(true);
             preview_text.setDrawsBackground(false);
             preview_text.setTextContainerInset(NSSize::new(8.0, 8.0));
             preview_text.setFont(Some(&style::mono_font(12.0, Weight::Regular)));
@@ -872,6 +883,7 @@ mod appkit {
                 pressed: Cell::new(None),
                 tracking: RefCell::new(None),
                 shown_preview_key: RefCell::new(String::new()),
+                no_preview: Cell::new(false),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
@@ -983,10 +995,31 @@ mod appkit {
             self.ivars().sidebar.width(SIDEBAR_W)
         }
 
+        /// Show / hide the preview pane (Cmd+Shift+P).
+        pub fn set_preview_shown(&self, on: bool) {
+            self.ivars().no_preview.set(!on);
+            if !on {
+                self.show_preview(&Preview::None);
+            } else {
+                // Force the next `apply` to redraw the preview.
+                self.ivars().shown_preview_key.borrow_mut().clear();
+            }
+            self.layout_panes();
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn preview_shown(&self) -> bool {
+            !self.ivars().no_preview.get()
+        }
+
+        fn split_fraction(&self) -> f64 {
+            if self.ivars().no_preview.get() { 1.0 } else { 0.56 }
+        }
+
         pub fn layout_panes(&self) {
             let b = self.bounds();
             let iv = self.ivars();
-            let lay = files_layout(b.size.width, b.size.height, self.sidebar_w(), 0.56);
+            let lay = files_layout(b.size.width, b.size.height, self.sidebar_w(), self.split_fraction());
             iv.sidebar.setFrame(ns(lay.sidebar));
             let rects = self.toolbar_rects();
             let order_max = rects.iter().find(|(id, _)| *id == TB_ORDER).map(|(_, r)| r.max_x()).unwrap_or(0.0);
@@ -1046,6 +1079,9 @@ mod appkit {
             iv.preview_image.setHidden(true);
             iv.preview_list_scroll.setHidden(true);
             iv.preview_hint.setHidden(true);
+            if iv.no_preview.get() {
+                return;
+            }
             match p {
                 Preview::None => {}
                 Preview::Hint(h) => {
@@ -1144,7 +1180,7 @@ mod appkit {
             let c = self.ivars().colors.get();
             let snap = self.ivars().snap.borrow();
             let b = self.bounds();
-            let lay = files_layout(b.size.width, b.size.height, self.sidebar_w(), 0.56);
+            let lay = files_layout(b.size.width, b.size.height, self.sidebar_w(), self.split_fraction());
             let f = style::system_font(10.5, Weight::Regular);
             style::draw_text_left(&snap.status, lay.status, &f, c.dim);
         }

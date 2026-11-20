@@ -257,6 +257,12 @@ def _fileops_undo(params: dict) -> dict:
     return result if result is not None else {}
 
 
+@method("fileops.redo")
+def _fileops_redo(params: dict) -> dict:
+    result = fileops.redo(params.get("stack"))
+    return result if result is not None else {}
+
+
 @method("status.gather")
 def _status_gather(params: dict) -> dict:
     delay = params.get("delay")

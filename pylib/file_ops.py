@@ -13,7 +13,7 @@ def stack_new(limit: int = 50) -> int:
     with _ALLOC:
         handle = _NEXT[0]
         _NEXT[0] += 1
-    _STACKS[handle] = {"limit": limit, "stack": []}
+    _STACKS[handle] = {"limit": limit, "stack": [], "redo": []}
     return handle
 
 
@@ -23,13 +23,15 @@ def stack_drop(handle) -> None:
 
 def stack_state(handle) -> dict:
     s = _STACKS.get(handle)
-    return {"canUndo": bool(s and s["stack"]), "count": len(s["stack"]) if s else 0}
+    return {"canUndo": bool(s and s["stack"]), "count": len(s["stack"]) if s else 0,
+            "canRedo": bool(s and s.get("redo"))}
 
 
 def stack_forget(handle) -> None:
     s = _STACKS.get(handle)
     if s:
         s["stack"] = []
+        s["redo"] = []
 
 
 def stack_collapse(handle, since: int, what: str) -> None:
@@ -44,10 +46,13 @@ def stack_collapse(handle, since: int, what: str) -> None:
     stack.append({"kind": "group", "what": what, "records": tail})
 
 
-def _push(handle, record) -> None:
+def _push(handle, record, keep_redo: bool = False) -> None:
     s = _STACKS.get(handle)
     if not s:
         return
+    if not keep_redo:
+        # A new action makes the undone ones unreachable (Finder / every Mac app).
+        s["redo"] = []
     s["stack"].append(record)
     if len(s["stack"]) > s["limit"]:
         del s["stack"][:len(s["stack"]) - s["limit"]]
@@ -249,8 +254,51 @@ def undo(handle):
     s = _STACKS.get(handle)
     if not s or not s["stack"]:
         return None
-    what, outcome = _undo_record(s["stack"].pop())
+    what, outcome, redo_rec = _undo_record(s["stack"].pop())
+    if outcome["changes"]:
+        s.setdefault("redo", []).append(redo_rec)
     return {"what": what, "outcome": outcome}
+
+
+def redo(handle):
+    """Cmd+Shift+Z: re-do the last undone operation and make it undoable again."""
+    s = _STACKS.get(handle)
+    if not s or not s.get("redo"):
+        return None
+    what, outcome, undo_rec = _redo_record(s["redo"].pop())
+    if undo_rec is not None:
+        _push(handle, undo_rec, keep_redo=True)
+    return {"what": what, "outcome": outcome}
+
+
+def _redo_record(rec: dict):
+    """Returns (what, outcome, the undo record for what was re-done)."""
+    kind = rec.get("kind")
+    what = rec.get("what", "")
+    if kind == "group":
+        out = {"changes": [], "failed": None}
+        undo_recs = []
+        for sub in rec["records"]:
+            _, o, u = _redo_record(sub)
+            out["changes"] += o["changes"]
+            if out["failed"] is None:
+                out["failed"] = o["failed"]
+            if u is not None:
+                undo_recs.append(u)
+        return what, out, ({"kind": "group", "what": what, "records": undo_recs} if undo_recs else None)
+    if kind == "redo-move":
+        pairs = rec["pairs"]
+        out = _move_back([[to, frm] for frm, to in reversed(pairs)])
+        done = [[c[0], c[1]] for c in out["changes"]]
+        return what, out, ({"kind": "moved", "pairs": done} if done else None)
+    if kind == "redo-untrash":
+        out = _move_back(rec["pairs"])
+        back = [c[1] for c in out["changes"]]
+        return what, out, ({"kind": "created", "paths": back} if back else None)
+    # redo-trash
+    out = _trash([p for p in rec["paths"] if os.path.exists(p)])
+    pairs = [[c[0], c[1]] for c in out["changes"]]
+    return what, out, ({"kind": "trashed", "pairs": pairs} if pairs else None)
 
 
 def _n(c: int, one: str) -> str:
@@ -258,15 +306,18 @@ def _n(c: int, one: str) -> str:
 
 
 def _undo_record(record: dict):
+    """Returns (what, outcome, the record that re-does it)."""
     kind = record.get("kind")
     if kind == "group":
         out = {"changes": [], "failed": None}
+        redo_recs = []
         for rec in reversed(record["records"]):
-            _, u = _undo_record(rec)
+            _, u, r = _undo_record(rec)
             out["changes"] += u["changes"]
             if out["failed"] is None:
                 out["failed"] = u["failed"]
-        return record["what"], out
+            redo_recs.insert(0, r)
+        return record["what"], out, {"kind": "group", "what": record["what"], "records": redo_recs}
     if kind == "moved":
         pairs = record["pairs"]
         one = "move"
@@ -275,12 +326,20 @@ def _undo_record(record: dict):
             same = os.path.dirname(frm) == os.path.dirname(to)
             one = ("rename of " if same else "move of ") + os.path.basename(frm)
         what = one if len(pairs) == 1 else "move of %d items" % len(pairs)
-        return what, _move_back(pairs)
+        out = _move_back(pairs)
+        moved = {(c[1], c[0]) for c in out["changes"]}
+        return what, out, {"kind": "redo-move", "what": what,
+                           "pairs": [[f, t] for f, t in pairs if (f, t) in moved]}
     if kind == "created":
         paths = record["paths"]
         live = [p for p in paths if os.path.exists(p)]
         one = os.path.basename(paths[0]) if paths else ""
-        return "creating " + _n(len(paths), one), _trash(live)
+        what = "creating " + _n(len(paths), one)
+        out = _trash(live)
+        return what, out, {"kind": "redo-untrash", "what": what,
+                           "pairs": [[c[0], c[1]] for c in out["changes"]]}
     pairs = record["pairs"]
     one = os.path.basename(pairs[0][0]) if pairs else ""
-    return "trash of " + _n(len(pairs), one), _move_back(pairs)
+    what = "trash of " + _n(len(pairs), one)
+    out = _move_back(pairs)
+    return what, out, {"kind": "redo-trash", "what": what, "paths": [c[1] for c in out["changes"]]}

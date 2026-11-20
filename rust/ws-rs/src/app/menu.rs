@@ -22,6 +22,8 @@ pub enum MenuAction {
     ResetWindowSize,
     CloseWindow,
     Quit,
+    /// App ▸ Settings… (Cmd+,): opens `ws-settings`, as Hyper+/ does.
+    Settings,
 }
 
 impl MenuAction {
@@ -33,6 +35,7 @@ impl MenuAction {
             MenuAction::ResetWindowSize => 2,
             MenuAction::CloseWindow => 3,
             MenuAction::Quit => 4,
+            MenuAction::Settings => 5,
             MenuAction::SetHeaderStyle(style) => {
                 let idx = HeaderStyle::ALL.iter().position(|s| *s == style).unwrap_or(0);
                 Self::HEADER_STYLE_BASE + idx as i64
@@ -47,6 +50,7 @@ impl MenuAction {
             2 => MenuAction::ResetWindowSize,
             3 => MenuAction::CloseWindow,
             4 => MenuAction::Quit,
+            5 => MenuAction::Settings,
             i if i >= Self::HEADER_STYLE_BASE => {
                 let idx = (i - Self::HEADER_STYLE_BASE) as usize;
                 MenuAction::SetHeaderStyle(*HeaderStyle::ALL.get(idx)?)
@@ -532,6 +536,13 @@ mod appkit {
         let app_menu = NSMenu::new(mtm);
         add_leaf(mtm, &app_menu, "About kitchen-sink", Some(sel!(orderFrontStandardAboutPanel:)), "");
         app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        if let Some(target) = target {
+            // Every Mac app: Settings… on Cmd+, (opens ws-settings).
+            let item = add_leaf(mtm, &app_menu, "Settings\u{2026}", Some(sel!(menuAction:)), ",");
+            item.setTag(MenuAction::Settings.id() as isize);
+            unsafe { item.setTarget(Some(as_any(target))) };
+            app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
         add_leaf(mtm, &app_menu, "Hide", Some(sel!(hide:)), "h");
         add_leaf(mtm, &app_menu, "Hide Others", Some(sel!(hideOtherApplications:)), "h")
             .setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Option);
@@ -597,6 +608,7 @@ mod tests {
             MenuAction::ResetWindowSize,
             MenuAction::CloseWindow,
             MenuAction::Quit,
+            MenuAction::Settings,
         ];
         let mut seen = std::collections::HashSet::new();
         for action in actions {

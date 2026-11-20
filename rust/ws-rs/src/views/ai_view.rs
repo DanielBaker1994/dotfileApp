@@ -134,6 +134,9 @@ mod appkit {
             tv.setAutomaticQuoteSubstitutionEnabled(false);
             tv.setAutomaticDashSubstitutionEnabled(false);
         }
+        // Cmd+F / Cmd+G / Cmd+Shift+G: the standard find bar (Notes, TextEdit).
+        tv.setUsesFindBar(true);
+        tv.setIncrementalSearchingEnabled(true);
         if let Some(tc) = unsafe { tv.textContainer() } {
             tc.setWidthTracksTextView(true);
         }
