@@ -1181,20 +1181,93 @@ impl SwitcherController {
         };
         toast(&queue, format!("Focus the window — reading pid in {delay}s"), "scope");
         self.log(&format!("find-window: sampling in {delay}s via {script}"));
+        let secs: u64 = vars.get("dialog-seconds").and_then(|v| v.parse().ok()).unwrap_or(30);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(delay));
-            let out = std::process::Command::new("/bin/bash").arg("-c").arg(&script).output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    let line = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    toast(&queue, line, "scope");
-                }
+            let o = match std::process::Command::new("/bin/bash").arg("-c").arg(&script).output() {
+                Ok(o) if o.status.success() => o,
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
                     let why = err.lines().last().unwrap_or("non-zero exit").trim().to_string();
                     toast(&queue, format!("find-window failed: {why}"), "exclamationmark.triangle.fill");
+                    return;
                 }
-                Err(e) => toast(&queue, format!("find-window failed: {e}"), "exclamationmark.triangle.fill"),
+                Err(e) => {
+                    toast(&queue, format!("find-window failed: {e}"), "exclamationmark.triangle.fill");
+                    return;
+                }
+            };
+            // F<TAB>pid<TAB>name, then T<TAB>pid<TAB>owner<TAB>WxH per tiny window.
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            let me = std::process::id() as i64;
+            let mut focused: Option<(i64, String)> = None;
+            let mut tiny: Vec<(i64, String, String)> = Vec::new();
+            for line in text.lines() {
+                let f: Vec<&str> = line.split('\t').collect();
+                match f.as_slice() {
+                    ["F", pid, name] => focused = pid.parse().ok().map(|p| (p, name.to_string())),
+                    ["T", pid, owner, size] => {
+                        if let Ok(p) = pid.parse::<i64>() {
+                            if p != me && !tiny.iter().any(|t| t.0 == p) {
+                                tiny.push((p, owner.to_string(), size.to_string()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let mut msg = match &focused {
+                Some((p, n)) => format!("Focused: {n} (pid {p})"),
+                None => "Focused: unknown".to_string(),
+            };
+            let mut buttons: Vec<String> = vec!["Cancel".into()];
+            if let Some((p, n)) = &focused {
+                if *p != me && *p > 1 {
+                    buttons.push(format!("Kill focused {p}"));
+                    let _ = n;
+                }
+            }
+            if tiny.is_empty() {
+                msg.push_str("\n\nNo tiny windows found.");
+            } else {
+                msg.push_str("\n\nTiny windows:");
+                for (p, n, sz) in &tiny {
+                    msg.push_str(&format!("\n  {n} (pid {p}) {sz}"));
+                }
+                // The dialog fits three buttons: the first tiny window gets one.
+                buttons.push(format!("Kill tiny {}", tiny[0].0));
+            }
+            let list = buttons.iter().map(|b| format!("\"{}\"", esc(b))).collect::<Vec<_>>().join(", ");
+            let default = buttons.len();
+            let osa = format!(
+                "display dialog \"{}\" with title \"Find Window PID\" buttons {{{list}}} default button {default} cancel button 1 giving up after {secs}",
+                esc(&msg)
+            );
+            // Cancel makes osascript exit non-zero, so only a pick prints.
+            let Ok(r) = std::process::Command::new("/usr/bin/osascript").args(["-e", &osa]).output() else { return };
+            let reply = String::from_utf8_lossy(&r.stdout).to_string();
+            let pid = reply
+                .split("button returned:")
+                .nth(1)
+                .and_then(|s| s.split(',').next())
+                .filter(|b| b.contains("Kill"))
+                .and_then(|b| b.trim().rsplit(' ').next().map(str::to_string))
+                .and_then(|p| p.parse::<i64>().ok());
+            let Some(pid) = pid else { return };
+            if pid == me || pid <= 1 {
+                return;
+            }
+            // SIGTERM first; SIGKILL if it is still there a second later.
+            let ok = std::process::Command::new("/bin/bash")
+                .args(["-c", &format!("kill {pid} && sleep 1; kill -0 {pid} 2>/dev/null && kill -9 {pid}; ! kill -0 {pid} 2>/dev/null")])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                toast(&queue, format!("Killed pid {pid}"), "checkmark");
+            } else {
+                toast(&queue, format!("Couldn't kill pid {pid}"), "exclamationmark.triangle.fill");
             }
         });
     }

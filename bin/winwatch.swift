@@ -9,11 +9,12 @@ let a = CommandLine.arguments
 //   "focused: Ghostty pid 653 | tiny: Foo pid 123 28x40"
 // Full dump goes to /tmp/winwatch.log. "Tiny" = layer 0, under 200pt either way,
 // not the `borders` overlay.
-if a.count > 1 && a[1] == "--once" {
+if a.count > 1 && (a[1] == "--once" || a[1] == "--pids") {
     let front = NSWorkspace.shared.frontmostApplication
     var out = "focused: \(front?.localizedName ?? "?") pid \(front?.processIdentifier ?? -1)"
     var dump = ""
     var tiny: [String] = []
+    var tinyRows: [String] = []
     let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
     for w in list {
         let pid = w[kCGWindowOwnerPID as String] as? Int ?? -1
@@ -23,10 +24,16 @@ if a.count > 1 && a[1] == "--once" {
         let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
         let ww = Int(b["Width"] as? Double ?? 0), hh = Int(b["Height"] as? Double ?? 0)
         dump += "pid=\(pid) owner=\(owner) layer=\(layer) \(ww)x\(hh) title=\"\(title)\"\n"
-        if layer == 0 && (ww < 200 || hh < 200) && owner != "borders" { tiny.append("\(owner) pid \(pid) \(ww)x\(hh)") }
+        if layer == 0 && (ww < 200 || hh < 200) && owner != "borders" { tiny.append("\(owner) pid \(pid) \(ww)x\(hh)"); tinyRows.append("T\t\(pid)\t\(owner)\t\(ww)x\(hh)") }
     }
     try? dump.write(toFile: "/tmp/winwatch.log", atomically: true, encoding: .utf8)
     if !tiny.isEmpty { out += " | tiny: " + tiny.joined(separator: ", ") }
+    if a[1] == "--pids" {
+        // machine-readable (kitchen-sink's kill dialog): F<TAB>pid<TAB>name, then T<TAB>pid<TAB>owner<TAB>WxH per tiny window
+        print("F\t\(front?.processIdentifier ?? -1)\t\(front?.localizedName ?? "?")")
+        for r in tinyRows { print(r) }
+        exit(0)
+    }
     print(out)
     exit(0)
 }
