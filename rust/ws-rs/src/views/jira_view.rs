@@ -680,6 +680,19 @@ pub struct JiraList {
     /// The shown list file + its mtime (the `reloadWatcher`).
     pub shown_path: String,
     pub shown_mtime: Option<std::time::SystemTime>,
+    /// The builder of the shown pin view, keyed by its place
+    /// (`--release-view` / `--label-view` / `--my-work`). Those files are
+    /// derived from the issue cache and the poller never rewrites them, so
+    /// `refresh` re-runs the builder when the cache changes; without this a
+    /// label or release list froze at whatever it held when first built.
+    pub pin_builder: Option<(String, PollRun)>,
+    /// The issue cache's mtime when `pin_builder` last ran.
+    pub issues_mtime: Option<std::time::SystemTime>,
+}
+
+/// A file's mtime, `None` when it is missing.
+fn mtime_of(path: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl JiraList {
@@ -959,10 +972,14 @@ impl JiraList {
     /// file changed on disk, its rows (keeping the selected key).
     pub fn refresh(&mut self) {
         self.reload_meta();
+        self.rebuild_pin_if_stale();
         if self.shown_path.is_empty() {
             return;
         }
-        let m = std::fs::metadata(&self.shown_path).and_then(|m| m.modified()).ok();
+        // Stat BEFORE reading: a poll landing between the read and the stat
+        // would otherwise record the new mtime against the old rows, and the
+        // view would sit on them until the next poll changed the file again.
+        let m = mtime_of(&self.shown_path);
         if m == self.shown_mtime {
             return;
         }
@@ -974,6 +991,34 @@ impl JiraList {
             if let Some(i) = self.rows.iter().position(|&j| self.rec(j).and_then(|r| r.get("key")) == Some(&k)) {
                 self.selection = i;
             }
+        }
+        // A sprint-filtered board narrows to a key set fetched when the
+        // sprint was picked: a ticket the poll just added to the sprint is
+        // in the new rows but not in that set, so it stayed hidden. Re-fetch
+        // the keys whenever the board's rows change (the memo keeps the
+        // current filter on screen meanwhile; one fetch in flight at a time).
+        if let (Some(board), Some((b, sp, _))) = (self.on_board(), self.sprint_filter.clone()) {
+            if b == board {
+                self.request_sprint(&b, &sp);
+            }
+        }
+    }
+
+    /// Re-run the shown pin view's builder when the issue cache changed
+    /// since it last ran (see `pin_builder`).
+    fn rebuild_pin_if_stale(&mut self) {
+        let Some((key, run)) = self.pin_builder.clone() else { return };
+        if !matches!(&self.place, Some(JiraPlace::Pin(k)) if *k == key) {
+            return;
+        }
+        let Some(cache) = self.paths.as_ref().map(|p| p.cache_file("issues")) else { return };
+        let m = mtime_of(&cache);
+        if m.is_none() || m == self.issues_mtime {
+            return;
+        }
+        self.issues_mtime = m;
+        if !self.pending_runs.iter().any(|r| r.args == run.args) {
+            self.pending_runs.push(run);
         }
     }
 
@@ -1028,9 +1073,9 @@ impl JiraList {
         self.sprint_error = None;
         self.visible_offset = 0;
         self.columns = t.columns.clone();
+        self.shown_mtime = mtime_of(&t.path);
         self.all = load_records(&t.path);
         self.shown_path = t.path.clone();
-        self.shown_mtime = std::fs::metadata(&t.path).and_then(|m| m.modified()).ok();
         self.selection = 0;
         self.note = None;
         // Remember where the user was so a rebuild restores this tab
@@ -1049,9 +1094,9 @@ impl JiraList {
         self.sprint_error = None;
         self.visible_offset = 0;
         self.columns = columns;
+        self.shown_mtime = mtime_of(path);
         self.all = load_records(path);
         self.shown_path = path.to_string();
-        self.shown_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         self.selection = 0;
         self.refilter();
     }
@@ -2247,8 +2292,14 @@ impl JiraList {
                 self.show_pin_file(place_key, &p, cols);
                 if !exists {
                     self.status_line = Some((format!("{label}: building its view…"), PopupTone::Info));
-                    self.pending_runs.push(PollRun { args, kind });
                 }
+                // Always rebuild: an existing file shows instantly but may be
+                // days old (the poller never rewrites these views); the fresh
+                // build reloads in place (`finish_open_pin`).
+                let run = PollRun { args, kind };
+                self.issues_mtime = self.paths.as_ref().and_then(|p| mtime_of(&p.cache_file("issues")));
+                self.pin_builder = Some((place_key.to_string(), run.clone()));
+                self.pending_runs.push(run);
             }
             None => {
                 self.status_line = Some((format!("{label}: view directory unavailable"), PopupTone::Warning));
@@ -2328,8 +2379,8 @@ impl JiraList {
     /// selection by key like `refresh`).
     fn reload_shown(&mut self) {
         let keep = self.selected().and_then(|r| r.get("key")).cloned();
+        self.shown_mtime = mtime_of(&self.shown_path);
         self.all = load_records(&self.shown_path);
-        self.shown_mtime = std::fs::metadata(&self.shown_path).and_then(|m| m.modified()).ok();
         self.refilter();
         if let Some(k) = keep {
             if let Some(i) = self
@@ -6148,6 +6199,34 @@ mod tests {
             "the stale answer was memoized — the next pick applies it synchronously"
         );
 
+        // A poll adds DEMO-3 to the board file. The sprint key set predates
+        // it, so the refresh must re-fetch the keys (the ticket used to stay
+        // hidden until the sprint was re-picked by hand).
+        l.apply_sprint_keys("42", "7", Ok(vec!["DEMO-1".into(), "DEMO-2".into()]));
+        assert!(l.sprint_pending.is_none());
+        std::fs::write(
+            &board_file,
+            json!([
+                {"key": "DEMO-1", "title": "One", "status": "To Do"},
+                {"key": "DEMO-2", "title": "Two", "status": "In Progress"},
+                {"key": "DEMO-3", "title": "Three", "status": "To Do"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        l.shown_mtime = None; // the file changed (independent of mtime granularity)
+        l.refresh();
+        assert_eq!(l.all.len(), 3, "the new board rows are loaded");
+        assert!(
+            l.pending_runs.iter().any(|r| r.args == ["--board-sprint-keys", "42", "7"]),
+            "a board file change re-fetches the sprint keys"
+        );
+        assert!(!l.rows.iter().any(|&j| l.rec(j).and_then(|r| r.get("key")).map(String::as_str) == Some("DEMO-3")),
+            "still filtered by the old set until the answer lands");
+        l.apply_sprint_keys("42", "7", Ok(vec!["DEMO-1".into(), "DEMO-2".into(), "DEMO-3".into()]));
+        assert!(l.rows.iter().any(|&j| l.rec(j).and_then(|r| r.get("key")).map(String::as_str) == Some("DEMO-3")),
+            "the fresh keys show the new ticket");
+
         // list-star unpins the board; pin re-adds it.
         assert!(l.toggle_pin_board("42"));
         assert!(l.boards.iter().all(|(b, _)| b != "42"));
@@ -6159,6 +6238,58 @@ mod tests {
         assert_eq!(l.board_state()["sprint"], json!("current"));
         assert_eq!(l.board_state()["mode"], json!("columns"));
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pin_views_rebuild_on_open_and_when_the_issue_cache_changes() {
+        // Label / release / my-work lists are files derived from the issue
+        // cache that the poller never rewrites: opening an existing one must
+        // still rebuild it, and a cache change while it is shown rebuilds it
+        // again (they used to freeze at their first build).
+        let base = std::env::temp_dir().join(format!("ws-jira-pin-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cache = base.join("cache");
+        let labels = base.join("jira_labels");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&labels).unwrap();
+        std::fs::write(cache.join("issues.json"), "{}").unwrap();
+        let file = labels.join(view_file_name("label-urgent"));
+        std::fs::write(&file, json!([{"key": "OLD-1", "title": "old"}]).to_string()).unwrap();
+        let paths = JiraPaths {
+            config_json: base.join("config.json").to_string_lossy().into_owned(),
+            team_json: String::new(),
+            legacy_config: String::new(),
+            cache_dir: cache.to_string_lossy().into_owned(),
+            out_dir: base.join("jira_json").to_string_lossy().into_owned(),
+            cache: [("issues".to_string(), "issues.json".to_string())].into_iter().collect(),
+            tabs: BTreeMap::new(),
+            side_dirs: [("labels".to_string(), "jira_labels".to_string())].into_iter().collect(),
+        };
+        let mut l = JiraList::new(HashMap::new(), Some(paths));
+        let is_label_run = |r: &PollRun| r.args == ["--label-view", "urgent"];
+
+        l.open_label("urgent").unwrap();
+        assert_eq!(l.all.len(), 1, "the existing file shows instantly");
+        assert_eq!(l.pending_runs.iter().filter(|r| is_label_run(r)).count(), 1, "…and is rebuilt");
+        l.pending_runs.clear();
+
+        l.refresh();
+        assert!(!l.pending_runs.iter().any(is_label_run), "no cache change → no rebuild");
+
+        l.issues_mtime = None; // the poll rewrote the issue cache
+        l.refresh();
+        assert_eq!(l.pending_runs.iter().filter(|r| is_label_run(r)).count(), 1, "cache change → rebuild");
+        l.issues_mtime = None;
+        l.refresh();
+        assert_eq!(l.pending_runs.iter().filter(|r| is_label_run(r)).count(), 1, "one rebuild queued at a time");
+        l.pending_runs.clear();
+
+        // Moved on to a tab: the old pin's builder must not fire.
+        l.place = Some(JiraPlace::Tab(0));
+        l.issues_mtime = None;
+        l.refresh();
+        assert!(!l.pending_runs.iter().any(is_label_run));
         let _ = std::fs::remove_dir_all(&base);
     }
 
