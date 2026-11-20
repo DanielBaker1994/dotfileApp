@@ -44,3 +44,4 @@ commands.toml.broken-*
 
 # ws-settings ★ favorites (user data; the home is this checkout in repo mode)
 settings-hub.json
+bin/winwatch

@@ -117,7 +117,7 @@ label = "Find Window PID"
 icon = "scope"
 # seconds to wait after picking it (focus the stray window), then run script
 delay = 5
-script = "~/.dotfiles/bin/winwatch.sh --once"
+script = "~/.config/kitchen-sink/bin/winwatch.sh --once"
 aliases = "pid, window pid, stray window"
 
 [pane-find]
