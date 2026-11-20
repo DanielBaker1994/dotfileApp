@@ -115,9 +115,9 @@ enabled = true
 type = "shell"
 label = "Find Window PID"
 icon = "scope"
-# seconds to wait after picking it (focus the stray window), then run script
-delay = 5
-script = "~/.config/kitchen-sink/bin/winwatch.sh --pids"
+# seconds to wait after picking it (point the mouse at the stray window, or focus it), then run script; decimals ok
+delay = 2
+script = "~/.config/kitchen-sink/bin/winwatch.sh --pids2"
 # seconds the kill dialog stays up before giving up
 dialog-seconds = 30
 aliases = "pid, window pid, stray window"

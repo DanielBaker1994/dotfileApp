@@ -1163,13 +1163,14 @@ impl SwitcherController {
     }
 
     /// `[find-window]` palette command: wait `delay` seconds (so the user can
-    /// focus the window in question), run `script` (prints one line), toast it.
+    /// point at or focus the window in question), run `script` (winwatch
+    /// --pids2 candidate rows), then offer a kill picker.
     /// Never activates the app; the work is off the main thread.
     fn find_window(&self) {
         let path = self.inner.lock().unwrap().settings.commands_conf_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let vars = crate::views::tools::section_vars(&text, "find-window");
-        let delay: u64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(5);
+        let delay: f64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(2.0);
         let script = vars.get("script").cloned().unwrap_or_default();
         let script = match script.strip_prefix("~/") {
             Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
@@ -1179,12 +1180,18 @@ impl SwitcherController {
         let toast = |q: &std::sync::Arc<std::sync::Mutex<Vec<UiCommand>>>, t: String, sym: &'static str| {
             q.lock().unwrap().push(UiCommand::Toast(t, sym));
         };
-        toast(&queue, format!("Focus the window — reading pid in {delay}s"), "scope");
+        toast(&queue, format!("Point at (or focus) the window — reading in {delay}s"), "scope");
         self.log(&format!("find-window: sampling in {delay}s via {script}"));
         let secs: u64 = vars.get("dialog-seconds").and_then(|v| v.parse().ok()).unwrap_or(30);
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(delay));
-            let o = match std::process::Command::new("/bin/bash").arg("-c").arg(&script).output() {
+            std::thread::sleep(std::time::Duration::from_secs_f64(delay.max(0.0)));
+            let me = std::process::id() as i64;
+            let o = match std::process::Command::new("/bin/bash")
+                .arg("-c")
+                .arg(&script)
+                .env("KS_EXCLUDE_PID", me.to_string())
+                .output()
+            {
                 Ok(o) if o.status.success() => o,
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
@@ -1197,63 +1204,69 @@ impl SwitcherController {
                     return;
                 }
             };
-            // F<TAB>pid<TAB>name, then T<TAB>pid<TAB>owner<TAB>WxH per tiny window.
+            // winwatch --pids2: kind<TAB>pid<TAB>owner<TAB>WxH<TAB>note, kinds
+            // P (under pointer), A (AX focused), F (frontmost app), T (small window).
+            // One picker row per pid, labelled by the first (best) kind it showed up as.
             let text = String::from_utf8_lossy(&o.stdout).to_string();
-            let me = std::process::id() as i64;
-            let mut focused: Option<(i64, String)> = None;
-            let mut tiny: Vec<(i64, String, String)> = Vec::new();
+            let mut rows: Vec<(i64, String)> = Vec::new();
             for line in text.lines() {
                 let f: Vec<&str> = line.split('\t').collect();
-                match f.as_slice() {
-                    ["F", pid, name] => focused = pid.parse().ok().map(|p| (p, name.to_string())),
-                    ["T", pid, owner, size] => {
-                        if let Ok(p) = pid.parse::<i64>() {
-                            if p != me && !tiny.iter().any(|t| t.0 == p) {
-                                tiny.push((p, owner.to_string(), size.to_string()));
-                            }
-                        }
-                    }
-                    _ => {}
+                if f.len() < 3 {
+                    continue;
                 }
+                let Ok(p) = f[1].parse::<i64>() else { continue };
+                if p == me || p <= 1 || rows.iter().any(|r| r.0 == p) {
+                    continue;
+                }
+                let kind = match f[0] {
+                    "P" => "Under pointer",
+                    "A" => "Focused window",
+                    "F" => "Frontmost app",
+                    "T" => "Small window",
+                    _ => continue,
+                };
+                let size = f.get(3).filter(|s| **s != "-").map(|s| format!(" {s}")).unwrap_or_default();
+                let note = f.get(4).filter(|s| !s.is_empty()).map(|s| format!(" [{s}]")).unwrap_or_default();
+                rows.push((p, format!("{kind}: {} (pid {p}){size}{note}", f[2])));
+            }
+            if rows.is_empty() {
+                toast(&queue, "find-window: no candidate windows".into(), "scope");
+                return;
             }
             let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-            let mut msg = match &focused {
-                Some((p, n)) => format!("Focused: {n} (pid {p})"),
-                None => "Focused: unknown".to_string(),
-            };
-            let mut buttons: Vec<String> = vec!["Cancel".into()];
-            if let Some((p, n)) = &focused {
-                if *p != me && *p > 1 {
-                    buttons.push(format!("Kill focused {p}"));
-                    let _ = n;
-                }
-            }
-            if tiny.is_empty() {
-                msg.push_str("\n\nNo tiny windows found.");
-            } else {
-                msg.push_str("\n\nTiny windows:");
-                for (p, n, sz) in &tiny {
-                    msg.push_str(&format!("\n  {n} (pid {p}) {sz}"));
-                }
-                // The dialog fits three buttons: the first tiny window gets one.
-                buttons.push(format!("Kill tiny {}", tiny[0].0));
-            }
-            let list = buttons.iter().map(|b| format!("\"{}\"", esc(b))).collect::<Vec<_>>().join(", ");
-            let default = buttons.len();
+            let items = rows.iter().map(|r| format!("\"{}\"", esc(&r.1))).collect::<Vec<_>>().join(", ");
+            // `choose from list` takes any number of rows (display dialog caps at
+            // 3 buttons) but has no timeout, so the osascript is killed after `secs`.
+            let first = format!("\"{}\"", esc(&rows[0].1));
             let osa = format!(
-                "display dialog \"{}\" with title \"Find Window PID\" buttons {{{list}}} default button {default} cancel button 1 giving up after {secs}",
-                esc(&msg)
+                "choose from list {{{items}}} with title \"Find Window PID\" \
+                 with prompt \"Kill which process? (SIGTERM, then SIGKILL)\" default items {{{first}}} \
+                 OK button name \"Kill\" cancel button name \"Cancel\""
             );
-            // Cancel makes osascript exit non-zero, so only a pick prints.
-            let Ok(r) = std::process::Command::new("/usr/bin/osascript").args(["-e", &osa]).output() else { return };
-            let reply = String::from_utf8_lossy(&r.stdout).to_string();
-            let pid = reply
-                .split("button returned:")
-                .nth(1)
-                .and_then(|s| s.split(',').next())
-                .filter(|b| b.contains("Kill"))
-                .and_then(|b| b.trim().rsplit(' ').next().map(str::to_string))
-                .and_then(|p| p.parse::<i64>().ok());
+            let Ok(child) = std::process::Command::new("/usr/bin/osascript")
+                .args(["-e", &osa])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            else {
+                return;
+            };
+            let child_pid = child.id();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done2 = done.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                // Only while still waiting on it, so a recycled pid is never hit.
+                if !done2.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = std::process::Command::new("/bin/kill").arg(child_pid.to_string()).status();
+                }
+            });
+            let r = child.wait_with_output();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let Ok(r) = r else { return };
+            // Cancel prints "false"; a pick prints the row text.
+            let reply = String::from_utf8_lossy(&r.stdout).trim().to_string();
+            let pid = rows.iter().find(|row| row.1 == reply).map(|row| row.0);
             let Some(pid) = pid else { return };
             if pid == me || pid <= 1 {
                 return;
