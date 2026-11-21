@@ -814,7 +814,7 @@ impl SwitcherController {
 
     /// `SwitcherController.paletteCommands()` — the real palette: commands.toml
     /// rows (file order, `enabled = "true"` + `in-palette` gated, `jira-config`
-    /// only with jira), the enabled slot commands, and "Kitchen Sink"; ordered
+    /// only with jira), the enabled slot commands, and "Bansho"; ordered
     /// by `[app] palette-first`.
     fn build_palette(
         &self,
@@ -868,7 +868,7 @@ impl SwitcherController {
             all.push(PaletteCommand::new("ai", title, "views"));
         }
         if settings.shared_window {
-            all.push(PaletteCommand::new("window", "Kitchen Sink", "views"));
+            all.push(PaletteCommand::new("window", "Bansho", "views"));
         }
 
         let first: Vec<usize> = settings
@@ -3260,7 +3260,7 @@ mod daemon_ui {
         static PICK_RETURN: Cell<Option<(i32, std::time::Instant)>> = const { Cell::new(None) };
     }
 
-    /// Picks that are *meant* to bring kitchen-sink forward: "Kitchen Sink"
+    /// Picks that are *meant* to bring kitchen-sink forward: "Bansho"
     /// and the shared window's views. Every other pick — every popup (tool
     /// panels, terminal, paths, screenshot, the finders), all
     /// non-activating and taking the keyboard without activating us — and
@@ -12360,7 +12360,7 @@ mod tests {
             ("filefast", "Create File"),
             ("prettyprint", "Pretty Print"),
             ("text-table", "Text to Table"),
-            ("window", "Kitchen Sink"),
+            ("window", "Bansho"),
         ] {
             c.registry_mut().add_palette(PaletteCommand::new(id, title, "views"));
         }
@@ -12799,7 +12799,7 @@ enabled = true
                 "screenshot",
                 "Confluence",
                 "AI",
-                "Kitchen Sink",
+                "Bansho",
             ],
             "commands.toml rows, then the enabled slot commands and the window"
         );
@@ -12815,7 +12815,7 @@ enabled = true
         assert_eq!(ids, vec![64, 61], "confluence / ai stay hidden");
         let titles: Vec<String> =
             off.registry().palette_commands().iter().map(|p| p.title.clone()).collect();
-        assert_eq!(titles, vec!["Kitchen Sink"], "no commands -> just the window");
+        assert_eq!(titles, vec!["Bansho"], "no commands -> just the window");
     }
 
     #[test]
@@ -13068,7 +13068,7 @@ label = \"AI\"
                 "Health Checks",
                 "Confluence",
                 "AI",
-                "Kitchen Sink",
+                "Bansho",
             ]
         );
         // The dedicated `listed()` blocks are the only place a view could be

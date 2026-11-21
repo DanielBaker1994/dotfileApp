@@ -24,7 +24,7 @@ pub enum MenuAction {
     Quit,
     /// App ▸ Settings… (Cmd+,): opens `ws-settings`, as Hyper+/ does.
     Settings,
-    /// Status item "Open kitchen-sink": there is no Dock icon to click.
+    /// Status item "Open Bansho": there is no Dock icon to click.
     Open,
     /// Open the repo commands.toml (title shows its path).
     OpenConfig,
@@ -281,7 +281,7 @@ fn header_style_submenu(current: HeaderStyle) -> SubmenuSpec {
 pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
     let mut items = Vec::new();
 
-    items.push(MenuNode::Item(MenuItemSpec::action(MenuAction::Open, "Open kitchen-sink")));
+    items.push(MenuNode::Item(MenuItemSpec::action(MenuAction::Open, "Open Bansho")));
     items.push(MenuNode::Separator);
     if !settings.config_path.is_empty() {
         items.push(MenuNode::Item(MenuItemSpec::action(
@@ -515,7 +515,7 @@ mod appkit {
         let bar = NSStatusBar::systemStatusBar();
         let status_item = bar.statusItemWithLength(NSSquareStatusItemLength);
         if let Some(button) = status_item.button(mtm) {
-            button.setToolTip(Some(ns_string!("kitchen-sink")));
+            button.setToolTip(Some(ns_string!("Bansho")));
             // The bonsai silhouette (`menubar_icon.png`, 36px = 18pt @2x,
             // made by bin/make-menubar-icon.py) as a template image, so it
             // tints with the menu bar in light/dark; "☰" if it is missing.
@@ -582,7 +582,7 @@ mod appkit {
 
         let app_item = NSMenuItem::new(mtm);
         let app_menu = NSMenu::new(mtm);
-        add_leaf(mtm, &app_menu, "About kitchen-sink", Some(sel!(orderFrontStandardAboutPanel:)), "");
+        add_leaf(mtm, &app_menu, "About Bansho", Some(sel!(orderFrontStandardAboutPanel:)), "");
         app_menu.addItem(&NSMenuItem::separatorItem(mtm));
         if let Some(target) = target {
             // Every Mac app: Settings… on Cmd+, (opens ws-settings).
@@ -687,7 +687,7 @@ mod tests {
         let spec = build_menu_spec(&MenuSettings::default());
         assert_eq!(
             spec.top_titles(),
-            vec!["Open kitchen-sink", "—", "Header Bar Style", "—", "Close Window", "—", "Quit"]
+            vec!["Open Bansho", "—", "Header Bar Style", "—", "Close Window", "—", "Quit"]
         );
         // The header-style submenu is a direct top-level node now that the
         // single-child "Global Window Options" wrapper is gone.

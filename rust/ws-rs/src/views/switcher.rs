@@ -2090,7 +2090,7 @@ mod tests {
             ("notes".to_string(), "Open Notes".to_string()),
             ("files".to_string(), "File Browser".to_string()),
             ("jira".to_string(), "Jira Board".to_string()),
-            ("window".to_string(), "Kitchen Sink".to_string()),
+            ("window".to_string(), "Bansho".to_string()),
         ]
     }
 
@@ -2124,7 +2124,7 @@ mod tests {
         p.current_query = "/".into();
         assert_eq!(
             p.display_rows(),
-            vec!["Open Notes", "File Browser", "Jira Board", "Kitchen Sink"]
+            vec!["Open Notes", "File Browser", "Jira Board", "Bansho"]
         );
     }
 

@@ -6,8 +6,10 @@
 	<string>kitchen-sink</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.danielbaker.kitchen-sink</string>
+	<key>CFBundleDisplayName</key>
+	<string>Bansho</string>
 	<key>CFBundleName</key>
-	<string>kitchen-sink</string>
+	<string>Bansho</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSAppTransportSecurity</key>
