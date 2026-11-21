@@ -525,7 +525,11 @@ fn glob_class(pat: &[char], open: usize, c: char) -> Option<(bool, usize)> {
 
 fn in_scope(home: &str, everywhere: bool, p: &str) -> bool {
     if p.starts_with(&format!("{home}/")) {
-        return !p.starts_with(&format!("{home}/Library/"));
+        // ~/Files is the NFS/sshfs "Home Files" mount: a stat() on it can
+        // block forever when the server is unreachable, and publish() stats
+        // on the main thread, which froze the whole app.
+        return !p.starts_with(&format!("{home}/Library/"))
+            && !p.starts_with(&format!("{home}/Files/"));
     }
     if p.starts_with("/private/tmp/") {
         return true;
@@ -633,9 +637,18 @@ fn stamp(p: &str) -> Option<f64> {
 }
 
 fn run_lines(exe: &str, args: &[String]) -> Vec<String> {
-    crate::app::process_run::run_process(exe, args, None, None, false)
-        .map(|o| o.out.split('\n').map(str::to_string).collect())
-        .unwrap_or_default()
+    // Hard deadline: this runs on the main thread (RecentFiles::start), and
+    // mdfind -onlyin $HOME blocks indefinitely when ~/Files (NFS) is wedged.
+    // That froze the whole app, menu-bar icon included.
+    let t = std::time::Duration::from_secs(3);
+    match crate::app::process_run::run_process_deadline(exe, args, None, None, false, Some(t)) {
+        Ok(o) if o.code != -1 => o.out.split('\n').map(str::to_string).collect(),
+        Ok(_) => {
+            crate::app::logging::ws_log(&format!("recent-files: {exe} timed out after 3s (killed); skipping seed"));
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 fn scan_dir(
