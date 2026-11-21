@@ -5014,6 +5014,17 @@ mod daemon_ui {
             };
             let is_text = as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some();
             let is_terminal = window.title().to_string() == "terminal";
+            // Find Recent Files: Cmd+C with no text selected in the filter
+            // field copies the selected row's path (`paths_key`), without
+            // needing a click to activate the app first.
+            if selector == sel!(copy:) && window.title().to_string() == "paths" {
+                let has_sel = as_any(&*r)
+                    .downcast_ref::<objc2_app_kit::NSText>()
+                    .is_some_and(|t| t.selectedRange().length > 0);
+                if !has_sel {
+                    return false;
+                }
+            }
             let target: &AnyObject = as_any(&*r);
             let responds: bool = unsafe { msg_send![target, respondsToSelector: selector] };
             if !(is_text || is_terminal) || !responds {
