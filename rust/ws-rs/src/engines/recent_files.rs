@@ -651,6 +651,53 @@ fn run_lines(exe: &str, args: &[String]) -> Vec<String> {
     }
 }
 
+/// The slow, blocking half of `seed` (mdfind + a /private/tmp walk). Pure:
+/// safe to run on any thread.
+fn seed_scan(home: &str, everywhere: bool, excludes: &[String], days: i64) -> HashMap<String, f64> {
+        let since = now() - days as f64 * 86400.0;
+        let secs = days * 86400;
+        let mut found: HashMap<String, f64> = HashMap::new();
+        let changed = format!(
+            "kMDItemFSContentChangeDate >= $time.now(-{secs}) || kMDItemDateAdded >= $time.now(-{secs})"
+        );
+        for p in run_lines("/usr/bin/mdfind", &["-onlyin".into(), home.to_string(), changed]) {
+            if !keep(&home, everywhere, &excludes, &p) {
+                continue;
+            }
+            if let Some(t) = stamp(&p) {
+                if t >= since {
+                    found.insert(RecentFiles::canonical(&p), t);
+                }
+            }
+        }
+        if everywhere {
+            let downloaded =
+                format!("kMDItemDateAdded >= $time.now(-{secs}) && kMDItemWhereFroms == \"*\"");
+            for p in run_lines("/usr/bin/mdfind", &[downloaded]) {
+                if !in_scope(&home, everywhere, &p)
+                    || !keep(&home, everywhere, &excludes, &p)
+                {
+                    continue;
+                }
+                if let Some(t) = stamp(&p) {
+                    if t >= since {
+                        found.insert(RecentFiles::canonical(&p), t);
+                    }
+                }
+            }
+        }
+        scan_dir(
+            &home,
+            everywhere,
+            &excludes,
+            "/private/tmp",
+            1,
+            since,
+            &mut found,
+        );
+    found
+}
+
 fn scan_dir(
     home: &str,
     everywhere: bool,
@@ -761,6 +808,9 @@ pub struct RecentFiles {
     store: String,
     #[cfg(target_os = "macos")]
     stream: Option<StreamHandle>,
+    /// Bumped by `stop`; a background seed whose generation is stale is dropped.
+    #[cfg(target_os = "macos")]
+    seed_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub on_kept: Option<Box<dyn FnMut(&str, bool, Option<&str>)>>,
     pub on_renamed: Option<Box<dyn FnMut(&str, &str)>>,
 }
@@ -780,6 +830,8 @@ impl RecentFiles {
             store: store.to_string(),
             #[cfg(target_os = "macos")]
             stream: None,
+            #[cfg(target_os = "macos")]
+            seed_gen: Default::default(),
             on_kept: None,
             on_renamed: None,
         }
@@ -1094,47 +1146,11 @@ impl RecentFiles {
     /// `seed()` — mdfind + a shallow `/private/tmp` scan. Not run by
     /// `configure` in this first cut (the watcher is unwired).
     pub fn seed(&mut self) {
-        let since = now() - self.days as f64 * 86400.0;
-        let secs = self.days * 86400;
-        let mut found: HashMap<String, f64> = HashMap::new();
-        let changed = format!(
-            "kMDItemFSContentChangeDate >= $time.now(-{secs}) || kMDItemDateAdded >= $time.now(-{secs})"
-        );
-        for p in run_lines("/usr/bin/mdfind", &["-onlyin".into(), self.home.clone(), changed]) {
-            if !keep(&self.home, self.everywhere, &self.excludes, &p) {
-                continue;
-            }
-            if let Some(t) = stamp(&p) {
-                if t >= since {
-                    found.insert(Self::canonical(&p), t);
-                }
-            }
-        }
-        if self.everywhere {
-            let downloaded =
-                format!("kMDItemDateAdded >= $time.now(-{secs}) && kMDItemWhereFroms == \"*\"");
-            for p in run_lines("/usr/bin/mdfind", &[downloaded]) {
-                if !in_scope(&self.home, self.everywhere, &p)
-                    || !keep(&self.home, self.everywhere, &self.excludes, &p)
-                {
-                    continue;
-                }
-                if let Some(t) = stamp(&p) {
-                    if t >= since {
-                        found.insert(Self::canonical(&p), t);
-                    }
-                }
-            }
-        }
-        scan_dir(
-            &self.home,
-            self.everywhere,
-            &self.excludes,
-            "/private/tmp",
-            1,
-            since,
-            &mut found,
-        );
+        let found = seed_scan(&self.home, self.everywhere, &self.excludes, self.days);
+        self.merge_seed(found);
+    }
+
+    fn merge_seed(&mut self, found: HashMap<String, f64>) {
         for (p, t) in found {
             if self.items.get(&p).map(|i| i.at).unwrap_or(0.0) < t {
                 let source = self
@@ -1219,7 +1235,32 @@ impl RecentFiles {
         }
         self.enabled = true;
         self.load();
-        self.seed();
+        // The mdfind seed can block for seconds (wedged ~/Files NFS); run it
+        // off the main thread and merge the result back on the main queue.
+        let gen = self.seed_gen.load(std::sync::atomic::Ordering::SeqCst);
+        let gen_cell = self.seed_gen.clone();
+        let me = self as *mut RecentFiles as usize;
+        let (home, everywhere, excludes, days) =
+            (self.home.clone(), self.everywhere, self.excludes.clone(), self.days);
+        let _ = std::thread::Builder::new().name("recent-seed".into()).spawn(move || {
+            let t0 = std::time::Instant::now();
+            let found = seed_scan(&home, everywhere, &excludes, days);
+            crate::app::logging::ws_log(&format!(
+                "recent-files: seed found {} in {:.1}s (background)",
+                found.len(),
+                t0.elapsed().as_secs_f64()
+            ));
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                // `stop` (also run by Drop) bumps the generation on the main
+                // thread, so a stale seed never touches a dead/stopped self.
+                if gen_cell.load(std::sync::atomic::Ordering::SeqCst) != gen {
+                    return;
+                }
+                let this = unsafe { &mut *(me as *mut RecentFiles) };
+                this.merge_seed(found);
+                this.publish();
+            });
+        });
         let keys: Vec<String> = self.items.keys().cloned().collect();
         for p in keys {
             if self.items.get(&p).map(|i| i.source.is_none()).unwrap_or(false) {
@@ -1273,6 +1314,7 @@ impl RecentFiles {
     #[cfg(target_os = "macos")]
     pub fn stop(&mut self) {
         self.enabled = false;
+        self.seed_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = self.stream.take() {
             unsafe {
                 FSEventStreamStop(h.stream);
