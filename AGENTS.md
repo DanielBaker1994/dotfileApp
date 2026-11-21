@@ -464,7 +464,7 @@ app logs the same report at launch (`config::startup_config_report`) and
 toasts if `~/.config/jira` / `~/.config/confluence` reappear.
 **Menu-bar only:** Accessory activation policy + `LSUIElement`; `[app]
 dock-icon = true` (or `WS_DOCK_ICON=1`) brings the Dock icon back. The status
-item shows `menubar_icon.png` (Japanese scene — bonsai, Fuji, torii — template image; redraw
+item shows `menubar_icon.png` (bonsai silhouette, template image; redraw
 with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `RESOURCE_FILES`).
 
 ## Common tasks
