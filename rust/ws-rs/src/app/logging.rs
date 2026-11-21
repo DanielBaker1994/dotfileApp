@@ -72,3 +72,65 @@ pub fn install_panic_hook() {
         default_hook(info);
     }));
 }
+
+/// Main-thread stall watchdog (macOS). Every 500ms a background thread asks
+/// the main queue to bump a counter; if the main thread has not answered for
+/// 1s it logs "MAIN THREAD STALLED", runs `/usr/bin/sample` on ourselves into
+/// `logs/YYYY_MM_DD/stall-<unix>.txt` (shows exactly what the main thread is
+/// blocked on), and logs when it recovers and how long it was stuck. This is
+/// what a "menu-bar icon does nothing" report looks like from the inside.
+#[cfg(target_os = "macos")]
+pub fn start_main_thread_watchdog() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let acked = Arc::new(AtomicU64::new(0));
+    let a2 = acked.clone();
+    let _ = std::thread::Builder::new().name("main-watchdog".into()).spawn(move || {
+        let mut seq = 0u64;
+        let mut stalled_since: Option<Instant> = None;
+        loop {
+            seq += 1;
+            let sent = Instant::now();
+            let ack = a2.clone();
+            let s = seq;
+            dispatch2::DispatchQueue::main().exec_async(move || ack.store(s, Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(500));
+            if a2.load(Ordering::SeqCst) >= seq {
+                if let Some(t0) = stalled_since.take() {
+                    ws_log(&format!("main thread recovered after {:.1}s stall", t0.elapsed().as_secs_f64()));
+                }
+                continue;
+            }
+            // Not answered within 500ms: give it a second, then report.
+            std::thread::sleep(Duration::from_millis(500));
+            if a2.load(Ordering::SeqCst) >= seq {
+                continue;
+            }
+            let t0 = *stalled_since.get_or_insert(sent);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let pid = std::process::id();
+            let out = crate::app::paths::Paths::from_env().log_path(&format!("stall-{stamp}")).replace(".log", ".txt");
+            ws_log(&format!(
+                "MAIN THREAD STALLED {:.1}s (menu-bar clicks/UI frozen) — sampling to {out}",
+                t0.elapsed().as_secs_f64()
+            ));
+            let _ = std::process::Command::new("/usr/bin/sample")
+                .args([&pid.to_string(), "2", "-file", &out])
+                .output();
+            // Wait for recovery without re-sampling every second.
+            while a2.load(Ordering::SeqCst) < seq {
+                std::thread::sleep(Duration::from_millis(250));
+                if t0.elapsed() > Duration::from_secs(600) {
+                    break;
+                }
+            }
+            if let Some(t0) = stalled_since.take() {
+                ws_log(&format!("main thread recovered after {:.1}s stall", t0.elapsed().as_secs_f64()));
+            }
+        }
+    });
+}

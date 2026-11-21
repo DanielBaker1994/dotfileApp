@@ -169,6 +169,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
             std::mem::forget(target);
         }
         install_status_item(mtm, &controller);
+        app::logging::start_main_thread_watchdog();
 
         // The socket thread enqueues UI commands; the main-thread timer drains
         // them into the shared host window (see `app::host::install_daemon_ui`).
