@@ -516,7 +516,7 @@ mod appkit {
         let status_item = bar.statusItemWithLength(NSSquareStatusItemLength);
         if let Some(button) = status_item.button(mtm) {
             button.setToolTip(Some(ns_string!("kitchen-sink")));
-            // The kitchen-sink stencil (`menubar_icon.png`, 36px = 18pt @2x,
+            // The bonsai silhouette (`menubar_icon.png`, 36px = 18pt @2x,
             // made by bin/make-menubar-icon.py) as a template image, so it
             // tints with the menu bar in light/dark; "☰" if it is missing.
             let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
