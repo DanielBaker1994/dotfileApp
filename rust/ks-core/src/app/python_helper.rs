@@ -221,7 +221,7 @@ fn reader_loop(stdout: ChildStdout, pending: PendingMap) {
 /// Windows executable heuristic shared by every `is_executable` twin: a real
 /// file whose extension is one of the Windows-executable ones (case-insensitive).
 /// Pure and cfg-free so it is unit-tested on every host; Unix uses mode bits.
-pub(crate) fn is_executable_windows_ext(path: &Path) -> bool {
+pub fn is_executable_windows_ext(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };

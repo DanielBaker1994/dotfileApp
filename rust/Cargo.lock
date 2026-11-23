@@ -1323,6 +1323,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "ks-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "block2 0.6.2",
+ "dispatch2 0.3.1",
+ "fs4",
+ "interprocess",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-quick-look-ui",
+ "objc2-screen-capture-kit",
+ "objc2-vision",
+ "objc2-web-kit",
+ "open",
+ "rmpv",
+ "serde",
+ "serde_json",
+ "time",
+ "xcap",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3884,6 +3913,7 @@ dependencies = [
  "egui_extras",
  "fs4",
  "interprocess",
+ "ks-core",
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

@@ -7,12 +7,12 @@ pub mod jira_poll;
 pub mod host;
 #[cfg(target_os = "macos")]
 pub mod live_panes;
-pub mod logging;
+pub use ks_core::app::logging;
 pub mod menu;
-pub mod pathfmt;
-pub mod paths;
-pub mod process_run;
-pub mod python_helper;
+pub use ks_core::app::pathfmt;
+pub use ks_core::app::paths;
+pub use ks_core::app::process_run;
+pub use ks_core::app::python_helper;
 pub mod quick;
 pub mod registry;
 pub mod socket;

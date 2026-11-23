@@ -8,7 +8,7 @@
 mod app;
 mod engines;
 mod panes;
-mod platform;
+use ks_core::platform;
 mod ui;
 mod views;
 
