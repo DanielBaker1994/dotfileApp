@@ -595,7 +595,7 @@ mod appkit {
 
         /// The shared rule-2 menu for the file on show, popped over `cv`
         /// at the pointer. Actions run through the daemon's popup backends
-        /// ([`crate::app::host::popup_file_menu_actions`]) and the preview
+        /// ([`crate::app::hooks::popup_file_menu_actions`]) and the preview
         /// follows the file: rename re-targets the shown path, trash closes
         /// the popup — no ghost preview of a gone file, and the recents rows
         /// are re-pulled by the backends themselves.
@@ -603,7 +603,7 @@ mod appkit {
             let Some(path) = self.ivars().path.borrow().clone() else { return };
             let sheet: Retained<NSWindow> =
                 Retained::into_super(Retained::into_super(self.retain()));
-            let mut actions = crate::app::host::popup_file_menu_actions(&path, Some(sheet));
+            let mut actions = crate::app::hooks::popup_file_menu_actions(&path, Some(sheet));
             // Rename… is preview-local: the same `form_sheet` prompt the
             // Files rename flow falls back to (there is no inline row editor
             // here) and the same `rename_into` commit — `record_rename` lands
@@ -633,7 +633,7 @@ mod appkit {
                         "Rename",
                         move |answer| {
                             let Some(text) = answer.and_then(|v| v.into_iter().next()) else { return };
-                            if let Ok(Some(dst)) = crate::app::host::popup_rename_commit(&p, &text) {
+                            if let Ok(Some(dst)) = crate::app::hooks::popup_rename_commit(&p, &text) {
                                 *editor.ivars().path.borrow_mut() = Some(dst);
                             }
                         },

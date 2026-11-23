@@ -2971,26 +2971,8 @@ pub use ks_core::app::hooks::{cancel_click_rename, copy_files_toast};
 /// `file_context_menu` from these. `sheet` hosts the Rename… prompt. macOS
 /// only: the surface has no AppKit half elsewhere.
 #[cfg(target_os = "macos")]
-pub fn popup_file_menu_actions(
-    path: &str,
-    sheet: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
-) -> crate::views::files::FileMenuActions {
-    daemon_ui::popup_file_menu_actions(path, sheet)
-}
-
-/// [`daemon_ui::popup_rename_commit`] for outside-`daemon_ui` popups (main
-/// thread). Off macOS there is no popup to commit for.
-pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        daemon_ui::popup_rename_commit(path, name)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (path, name);
-        Ok(None)
-    }
-}
+pub use ks_core::app::hooks::popup_file_menu_actions;
+pub use ks_core::app::hooks::popup_rename_commit;
 
 #[cfg(target_os = "macos")]
 mod daemon_ui {
@@ -3720,6 +3702,8 @@ mod daemon_ui {
             h::set_reveal_hook(|p| reveal_in_files(p));
             h::set_shelf_add_hook(|paths, why| shelf_add(paths, why));
             h::set_cancel_click_rename_hook(|| cancel_click_rename());
+            h::set_popup_file_actions_hook(|path, sheet| popup_file_menu_actions(path, sheet));
+            h::set_popup_rename_hook(|path, name| popup_rename_commit(path, name));
         }
         let bridge_path = format!(
             "{}{}",

@@ -141,3 +141,69 @@ pub fn copied_what(paths: &[String]) -> String {
         _ => format!("{} items", paths.len()),
     }
 }
+
+#[cfg(target_os = "macos")]
+type PopupActionsFn = Box<
+    dyn Fn(&str, Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>) -> crate::views::files::FileMenuActions
+        + Send
+        + Sync,
+>;
+#[cfg(target_os = "macos")]
+static POPUP_FILE_ACTIONS_HOOK: OnceLock<PopupActionsFn> = OnceLock::new();
+
+/// Install the main daemon's rule-2 popup actions (rename / compress / trash
+/// wired to its Files backends).
+#[cfg(target_os = "macos")]
+pub fn set_popup_file_actions_hook(
+    f: impl Fn(&str, Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>) -> crate::views::files::FileMenuActions
+        + Send
+        + Sync
+        + 'static,
+) {
+    let _ = POPUP_FILE_ACTIONS_HOOK.set(Box::new(f));
+}
+
+/// The rule-2 popup actions for a standalone popup showing `path` (the
+/// preview panel's right-click menu builds its `file_context_menu` from
+/// these); `sheet` hosts the Rename… prompt. Without a host hook nothing is
+/// wired and the caller shows no extra actions.
+#[cfg(target_os = "macos")]
+pub fn popup_file_menu_actions(
+    path: &str,
+    sheet: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
+) -> crate::views::files::FileMenuActions {
+    match POPUP_FILE_ACTIONS_HOOK.get() {
+        Some(h) => h(path, sheet),
+        None => crate::views::files::FileMenuActions::default(),
+    }
+}
+
+type RenameCommitFn = Box<dyn Fn(&str, &str) -> Result<Option<String>, String> + Send + Sync>;
+static POPUP_RENAME_HOOK: OnceLock<RenameCommitFn> = OnceLock::new();
+
+/// Install the main daemon's popup rename commit (it also repaints the
+/// recents rows).
+pub fn set_popup_rename_hook(
+    f: impl Fn(&str, &str) -> Result<Option<String>, String> + Send + Sync + 'static,
+) {
+    let _ = POPUP_RENAME_HOOK.set(Box::new(f));
+}
+
+/// Rename `path` to `name` for a popup (main thread); the destination comes
+/// back so a preview can follow the renamed file. Off macOS there is no popup
+/// to commit for. Without a host hook the file is renamed with
+/// [`crate::views::files::rename_into`] and nothing else is refreshed.
+pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        match POPUP_RENAME_HOOK.get() {
+            Some(h) => h(path, name),
+            None => crate::views::files::rename_into(path, name),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, name);
+        Ok(None)
+    }
+}
