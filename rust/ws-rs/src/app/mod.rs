@@ -1,8 +1,8 @@
 //! App host layer (mirrors `kitchen_sink.swift` top-level + `main.swift`).
 
 pub mod cli;
-pub mod config;
-pub mod hotkey;
+pub use ks_core::app::config;
+pub use ks_core::app::hotkey;
 pub mod jira_poll;
 pub mod host;
 #[cfg(target_os = "macos")]

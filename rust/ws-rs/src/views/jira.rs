@@ -33,16 +33,7 @@ fn get_bool(v: &Value, k: &str) -> bool {
     v.get(k).map(truthy).unwrap_or(false)
 }
 
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|x| x != 0.0).unwrap_or(false),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
+use crate::app::config::truthy;
 
 fn strings(v: &Value) -> Vec<String> {
     v.as_array()
@@ -185,99 +176,7 @@ pub fn board_table_columns() -> Value {
         .unwrap_or_else(|| Value::Array(Vec::new()))
 }
 
-/// `columns` -> the columns. Accepts the structured JSON array of
-/// `{field,title,width,align,filter,sort}` objects and the legacy one-line
-/// string `field:Title:width:align:flags, ...`. Title defaults to the field;
-/// width 0 shares the leftover width; negative widths clamp to 0; flags set
-/// the sortable / filterable bits.
-pub fn parse_columns(spec: &str) -> Vec<ListColumn> {
-    let text = spec.trim();
-    if text.starts_with('[') {
-        return match serde_json::from_str::<Value>(text) {
-            Ok(Value::Array(a)) => a.iter().filter_map(column_from_obj).collect(),
-            _ => Vec::new(),
-        };
-    }
-    let mut cols = Vec::new();
-    for part in spec.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let seg: Vec<&str> = part.split(':').map(str::trim).collect();
-        let field = seg[0];
-        if field.is_empty() {
-            continue;
-        }
-        let title = if seg.len() > 1 && !seg[1].is_empty() {
-            seg[1].to_string()
-        } else {
-            field.to_string()
-        };
-        let width = if seg.len() > 2 && !seg[2].is_empty() {
-            seg[2].parse::<f64>().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let mut align = if seg.len() > 3 && !seg[3].is_empty() {
-            seg[3].to_lowercase()
-        } else {
-            "left".to_string()
-        };
-        if !matches!(align.as_str(), "left" | "right" | "center") {
-            align = "left".to_string();
-        }
-        let mut flags: Vec<String> = Vec::new();
-        for s in &seg[4.min(seg.len())..] {
-            for f in s.split(|c| c == '+' || c == '|' || c == '/') {
-                let f = f.trim().to_lowercase();
-                if !f.is_empty() {
-                    flags.push(f);
-                }
-            }
-        }
-        cols.push(ListColumn {
-            field: field.to_string(),
-            title,
-            width: width.max(0.0),
-            width_px: None,
-            align,
-            sortable: flags.iter().any(|f| f == "sort"),
-            filterable: flags.iter().any(|f| f == "filter"),
-        });
-    }
-    cols
-}
-
-/// One structured column object -> a `ListColumn` (`None` without a field).
-fn column_from_obj(o: &Value) -> Option<ListColumn> {
-    let field = o.get("field").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    if field.is_empty() {
-        return None;
-    }
-    let title = o
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&field)
-        .to_string();
-    let width = o.get("width").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
-    let raw_align = o.get("align").and_then(Value::as_str).unwrap_or("left").to_lowercase();
-    let align = if matches!(raw_align.as_str(), "left" | "right" | "center") {
-        raw_align
-    } else {
-        "left".to_string()
-    };
-    Some(ListColumn {
-        field,
-        title,
-        width,
-        width_px: o.get("width_px").and_then(Value::as_f64),
-        align,
-        sortable: o.get("sort").map(truthy).unwrap_or(false),
-        filterable: o.get("filter").map(truthy).unwrap_or(false),
-    })
-}
+pub use crate::app::config::{column_from_obj, parse_columns};
 
 /// A `columns` config value: the structured array, or a legacy / JSON string.
 pub fn parse_columns_value(v: &Value) -> Vec<ListColumn> {
