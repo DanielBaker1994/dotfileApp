@@ -183,6 +183,13 @@ pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 sleep 1
 open -n -g "$ROOT/$APP_NAME.app" --args voice >/dev/null 2>&1 || true
 ok "app launched — the voice window should be on screen"
+# Hyper+S / Hyper+X are served by the small quick agent: start it at login too
+# (LaunchAgent through LaunchServices) and now.
+if "$ROOT/bin/quick-agent.sh" install >/dev/null 2>&1; then
+    ok "quick agent (Hyper+S / Hyper+X) starts at login"
+else
+    warn "could not install the quick agent login item — run bin/quick-agent.sh install"
+fi
 
 printf "\n${GREEN}══════════════════════════════════════════════════════════════${RESET}\n"
 printf "${GREEN}  INSTALL COMPLETE${RESET}\n"

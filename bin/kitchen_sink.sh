@@ -18,12 +18,31 @@ if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"
 fi
 
-# Hyper+S on a running daemon: toggle the palette first thing — no lock, no
-# aerospace query (the palette reads the frontmost app itself). A cold start
-# falls through to the launch path at the bottom.
-if [ -z "$MODE" ] && [ "${WS_BUILD_ONLY:-}" != "1" ] && "$BIN" toggle >/dev/null 2>&1; then
-    exit 0
+# Hyper+S (palette) and Hyper+X (screenshot) belong to the QUICK AGENT
+# (`kitchen-sink quick`, its own socket $TMPDIR/ks-quick.sock): a small
+# resident process of the same signed bundle that works with the main app not
+# running. On a running agent a press is one socket write — no lock, no
+# aerospace query. A cold start falls through to the launch paths below.
+if [ "${WS_BUILD_ONLY:-}" != "1" ]; then
+    if [ -z "$MODE" ] && "$BIN" quick-toggle >/dev/null 2>&1; then
+        exit 0
+    fi
+    if [ "$MODE" = "screenshot" ] && "$BIN" quick-screenshot "${@:2}" >/dev/null 2>&1; then
+        exit 0
+    fi
 fi
+
+# Stop stray MAIN-app processes but spare the quick agent (argv `quick`),
+# which must outlive the main app being restarted.
+kill_main() {
+    local p cmd
+    for p in $(pgrep -f "$APP/Contents/MacOS" 2>/dev/null); do
+        cmd=$(ps -o command= -p "$p" 2>/dev/null)
+        case "$cmd" in *"MacOS/$APP_NAME quick"*) continue ;; esac
+        kill "$p" 2>/dev/null
+    done
+    return 0
+}
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
@@ -81,14 +100,20 @@ LOG(){
 }
 
 case "$MODE" in screenshot)
-    # /screenshot (Hyper+X) with no daemon running (a warm daemon gets the
-    # binary's own ping): no window to move, just start it command-first
-    if WS_PING_ONLY=1 "$BIN" screenshot >/dev/null 2>&1; then
-        LOG "daemon ping: delivered (screenshot)"
-    else
+    # /screenshot (Hyper+X) with no quick agent answering (the fast path at
+    # the top already tried it): start the agent through LaunchServices with
+    # the capture as its first action. The main app is not involved.
+    build
+    LOG "quick agent not answering -> starting it (screenshot)"
+    open -n -g "$APP" --args quick screenshot >/dev/null 2>&1 || LOG "LaunchServices launch FAILED"
+    exit 0
+esac
+
+# `kitchen_sink.sh quick [show|screenshot]`: just (re)start the quick agent.
+case "$MODE" in quick)
+    if ! "$BIN" quick-state >/dev/null 2>&1; then
         build
-        pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
-        open -n -g "$APP" --args screenshot >/dev/null 2>&1 || LOG "LaunchServices launch FAILED"
+        open -n -g "$APP" --args quick "${2:-}" >/dev/null 2>&1 || LOG "LaunchServices launch FAILED"
     fi
     exit 0
 esac
@@ -119,8 +144,9 @@ case "$MODE" in window|jira|files|terminal|confluence|ai)
         # applies and voice stays dead for the whole session.
         LOG "daemon ping: FAILED -> launching fresh daemon via LaunchServices ($MODE)"
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
-        # attribution and would answer future pings forever)
-        pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
+        # attribution and would answer future pings forever); the quick
+        # agent is spared
+        kill_main
         # cold start: "window" opens the first view, files —
         # the CLI client (rust/ws-rs/src/app/cli.rs) maps it
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
@@ -130,13 +156,14 @@ case "$MODE" in window|jira|files|terminal|confluence|ai)
     exit 0
 esac
 
-# Toggle the daemon if it's running; otherwise launch it with "show" so the
-# popup appears immediately (no retry loop needed). Same LaunchServices rule
-# as above so a cold start from Hyper+S still gets the mic grant.
-if ! "$BIN" toggle >/dev/null 2>&1; then
+# Hyper+S with no quick agent answering (the fast path at the top already
+# tried it): start the agent with "show" so the palette appears immediately
+# (no retry loop needed). Same LaunchServices rule as above, so a cold start
+# from Hyper+S gets the bundle's TCC grants. The main app is not involved.
+if ! "$BIN" quick-toggle >/dev/null 2>&1; then
     build
-    pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
-    if ! open -n -g "$APP" --args show >/dev/null 2>&1; then
-        LOG "LaunchServices launch FAILED — voice permissions will be broken"
+    LOG "quick agent not answering -> starting it (show)"
+    if ! open -n -g "$APP" --args quick show >/dev/null 2>&1; then
+        LOG "LaunchServices launch FAILED — TCC grants will be broken"
     fi
 fi

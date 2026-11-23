@@ -31,6 +31,11 @@ pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 [ -n "$APP_BUNDLE" ] && pkill -f "$APP_BUNDLE/Contents/MacOS" 2>/dev/null || true
 ok "daemon stopped"
 
+step "removing the quick agent login item"
+"$ROOT/bin/quick-agent.sh" uninstall >/dev/null 2>&1 || true
+rm -f "${QUICK_AGENT_PLIST:-$HOME/Library/LaunchAgents/dev.danielbaker.kitchen-sink.quick.plist}"
+ok "quick agent login item removed"
+
 step "removing the jira poll launchd agent"
 PLIST="$JIRA_AGENT_PLIST"
 launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true

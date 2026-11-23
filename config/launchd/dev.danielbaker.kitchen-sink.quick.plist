@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.danielbaker.kitchen-sink.quick</string>
+    <!-- Starts the quick agent (Hyper+S palette / Hyper+X screenshot) at login.
+         It goes through LaunchServices (`open`), never by exec'ing the binary
+         from launchd: macOS then attributes Screen Recording and the other TCC
+         grants to the app bundle, exactly like a hotkey cold start does. `open`
+         exits at once, so there is no KeepAlive: the agent is a normal app
+         process, and a press of the hotkey restarts it if it ever dies.
+         __APP__ is replaced by bin/quick-agent.sh with the app bundle path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-g</string>
+        <string>-n</string>
+        <string>__APP__</string>
+        <string>--args</string>
+        <string>quick</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

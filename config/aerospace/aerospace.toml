@@ -85,9 +85,13 @@ N = ['main']
 
 [mode.main.binding]
 
+    # Hyper+S (palette) and Hyper+X (screenshot) go to the quick agent
+    # (`kitchen-sink quick`, socket $TMPDIR/ks-quick.sock): one socket write
+    # when it is up, a LaunchServices cold start of the agent otherwise. They
+    # work with the main app not running (see AGENTS.md, "Quick agent").
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/kitchen-sink/bin/kitchen_sink.sh'
 
-    alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/kitchen-sink/kitchen-sink.app/Contents/MacOS/kitchen-sink screenshot'
+    alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/kitchen-sink/bin/kitchen_sink.sh screenshot'
 
     alt-cmd-ctrl-shift-slash = 'exec-and-forget ~/.config/kitchen-sink/bin/ws-settings open'
 
