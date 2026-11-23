@@ -4287,6 +4287,19 @@ mod daemon_ui {
         /// The waker's main-thread body.
         fn wake_run(&self) {
             self.ivars().wake.clear();
+            // The main dispatch queue also drains inside nested run loops
+            // (context-menu tracking, sheets) — entered from handlers that may
+            // hold a `state`/`panels` borrow. The old NSTimer only fired in the
+            // default mode; keep that guarantee and leave the queue to the
+            // timer tick (which is default-mode only) while a nested loop runs.
+            let default_mode = unsafe {
+                objc2_foundation::NSRunLoop::currentRunLoop()
+                    .currentMode()
+                    .is_none_or(|m| &*m == objc2_foundation::NSDefaultRunLoopMode)
+            };
+            if !default_mode {
+                return;
+            }
             self.apply_commands();
             self.ivars().fast_mode.set(self.compute_fast_mode());
         }
