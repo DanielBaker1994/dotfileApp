@@ -9163,6 +9163,16 @@ mod daemon_ui {
             }
         }
 
+        /// True when the filter field holds a text selection that is neither
+        /// empty nor the whole text — i.e. the user picked part of the query.
+        fn files_filter_partial_selection(&self) -> bool {
+            let field = self.files_surface(|b| b.view.as_ref().map(|v| v.search_field())).flatten();
+            let Some(ed) = field.and_then(|f| f.currentEditor()) else { return false };
+            let r = ed.selectedRange();
+            let len = ed.string().length();
+            r.length > 0 && r.length < len
+        }
+
         fn files_window(&self) -> Option<Retained<SlotHostWindow>> {
             self.ivars().state.borrow().as_ref().map(|st| st.window.clone())
         }
@@ -9711,6 +9721,18 @@ mod daemon_ui {
                 51 if cmd_only && in_list => self.files_trash(),
                 2 if cmd_only && in_list => self.files_duplicate(),
                 8 if cmd_only && in_list => self.files_copy(),
+                // Cmd+C typed in the filter while a row is highlighted (Down /
+                // Up there move the row but leave focus in the field): copy
+                // the row, not the query. Only a hand-made partial text
+                // selection keeps the field's own Cmd+C; the whole-text
+                // select-on-focus does not count.
+                8 if cmd_only && text
+                    && self.focused_pane_id().as_deref() == Some("files-filter")
+                    && !self.files_filter_partial_selection()
+                    && self.files_surface(|b| !b.selected_paths().is_empty()).unwrap_or(false) =>
+                {
+                    self.files_copy()
+                }
                 7 if cmd_only && in_list => self.files_cut(),
                 9 if cmd && !shift && !ctrl && in_list => self.files_paste(opt),
                 // Type-ahead: a printable key with the list focused starts the
