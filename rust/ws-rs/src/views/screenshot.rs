@@ -8777,6 +8777,44 @@ pub fn controller_test_do(
     }
 }
 
+/// The main-thread half of the `screenshot[\tWORDS]` socket verb, shared by the
+/// main daemon and the quick agent: start/handle the capture session, then
+/// answer `reply` (a caller that wants output: `--raw`, `--print-geometry`, …)
+/// right away when the session is already over, else once the interactive
+/// overlay closes. `reply = None` closes straight away. Call on the main thread.
+pub fn run_screenshot_message(
+    controller: Arc<Mutex<ScreenshotController>>,
+    words: Vec<String>,
+    reply: Option<crate::app::socket::Reply>,
+) {
+    let (finished, data) = {
+        let mut c = controller.lock().unwrap();
+        c.reply = None;
+        let _ = c.handle(&words);
+        #[cfg(target_os = "macos")]
+        c.redraw_overlays();
+        crate::app::logging::log_hotkey_shown(Some("screenshot"));
+        let finished = c.is_idle();
+        (finished, if finished { c.reply.take() } else { None })
+    };
+    let Some(reply) = reply else { return };
+    if finished {
+        reply.send_bytes(data.as_deref().unwrap_or_default());
+        return;
+    }
+    // An interactive overlay is up: answer when it closes.
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut c = controller.lock().unwrap();
+        if c.is_idle() {
+            let data = c.reply.take();
+            drop(c);
+            reply.send_bytes(data.as_deref().unwrap_or_default());
+            return;
+        }
+    });
+}
+
 /// Register the `do:screenshot:*` hooks into the shared [`Registry`].
 pub fn register_controller(reg: &mut Registry, controller: Arc<Mutex<ScreenshotController>>) {
     #[cfg(target_os = "macos")]

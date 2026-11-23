@@ -32,7 +32,7 @@ use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
 use crate::views::tools::ToolKind;
 
 /// The sections `loadCommands` never turns into commands.
-const COMMAND_SECTION_SKIPS: [&str; 10] = [
+pub(crate) const COMMAND_SECTION_SKIPS: [&str; 10] = [
     "icons",
     "shortcuts",
     "app",
@@ -236,6 +236,127 @@ pub(crate) fn poll_interval_secs(active: bool) -> f64 {
 #[allow(dead_code)]
 pub(crate) fn poll_due(last: f64, now: f64, interval: f64) -> bool {
     now - last >= interval - 0.005
+}
+
+/// How a find-window run reports to the user (a toast on the daemon UI).
+pub type ToastFn = Arc<dyn Fn(String, &'static str) + Send + Sync>;
+
+/// `[find-window]` palette command, shared by the main daemon and the quick
+/// agent: wait `delay` seconds (so the user can point at or focus the window
+/// in question), run `script` (winwatch --pids2 candidate rows), then offer a
+/// kill picker. `text` is the config text; progress goes through `toast`.
+/// Never activates the app; the work is off the main thread.
+pub(crate) fn run_find_window(text: &str, toast: ToastFn) {
+    let vars = crate::views::tools::section_vars(text, "find-window");
+    let delay: f64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(2.0);
+    let script = vars.get("script").cloned().unwrap_or_default();
+    let script = match script.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+        None => script,
+    };
+    toast(format!("Point at (or focus) the window — reading in {delay}s"), "scope");
+    crate::app::logging::ws_log(&format!("find-window: sampling in {delay}s via {script}"));
+    let secs: u64 = vars.get("dialog-seconds").and_then(|v| v.parse().ok()).unwrap_or(30);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs_f64(delay.max(0.0)));
+        let me = std::process::id() as i64;
+        let o = match std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(&script)
+            .env("KS_EXCLUDE_PID", me.to_string())
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let why = err.lines().last().unwrap_or("non-zero exit").trim().to_string();
+                toast(format!("find-window failed: {why}"), "exclamationmark.triangle.fill");
+                return;
+            }
+            Err(e) => {
+                toast(format!("find-window failed: {e}"), "exclamationmark.triangle.fill");
+                return;
+            }
+        };
+        // winwatch --pids2: kind<TAB>pid<TAB>owner<TAB>WxH<TAB>note, kinds
+        // P (under pointer), A (AX focused), F (frontmost app), T (small window).
+        // One picker row per pid, labelled by the first (best) kind it showed up as.
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        let mut rows: Vec<(i64, String)> = Vec::new();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let Ok(p) = f[1].parse::<i64>() else { continue };
+            if p == me || p <= 1 || rows.iter().any(|r| r.0 == p) {
+                continue;
+            }
+            let kind = match f[0] {
+                "P" => "Under pointer",
+                "A" => "Focused window",
+                "F" => "Frontmost app",
+                "T" => "Small window",
+                _ => continue,
+            };
+            let size = f.get(3).filter(|s| **s != "-").map(|s| format!(" {s}")).unwrap_or_default();
+            let note = f.get(4).filter(|s| !s.is_empty()).map(|s| format!(" [{s}]")).unwrap_or_default();
+            rows.push((p, format!("{kind}: {} (pid {p}){size}{note}", f[2])));
+        }
+        if rows.is_empty() {
+            toast("find-window: no candidate windows".into(), "scope");
+            return;
+        }
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let items = rows.iter().map(|r| format!("\"{}\"", esc(&r.1))).collect::<Vec<_>>().join(", ");
+        // `choose from list` takes any number of rows (display dialog caps at
+        // 3 buttons) but has no timeout, so the osascript is killed after `secs`.
+        let first = format!("\"{}\"", esc(&rows[0].1));
+        let osa = format!(
+            "choose from list {{{items}}} with title \"Find Window PID\" \
+             with prompt \"Kill which process? (SIGTERM, then SIGKILL)\" default items {{{first}}} \
+             OK button name \"Kill\" cancel button name \"Cancel\""
+        );
+        let Ok(child) = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &osa])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return;
+        };
+        let child_pid = child.id();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done2 = done.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            // Only while still waiting on it, so a recycled pid is never hit.
+            if !done2.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::process::Command::new("/bin/kill").arg(child_pid.to_string()).status();
+            }
+        });
+        let r = child.wait_with_output();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let Ok(r) = r else { return };
+        // Cancel prints "false"; a pick prints the row text.
+        let reply = String::from_utf8_lossy(&r.stdout).trim().to_string();
+        let pid = rows.iter().find(|row| row.1 == reply).map(|row| row.0);
+        let Some(pid) = pid else { return };
+        if pid == me || pid <= 1 {
+            return;
+        }
+        // SIGTERM first; SIGKILL if it is still there a second later.
+        let ok = std::process::Command::new("/bin/bash")
+            .args(["-c", &format!("kill {pid} && sleep 1; kill -0 {pid} 2>/dev/null && kill -9 {pid}; ! kill -0 {pid} 2>/dev/null")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            toast(format!("Killed pid {pid}"), "checkmark");
+        } else {
+            toast(format!("Couldn't kill pid {pid}"), "exclamationmark.triangle.fill");
+        }
+    });
 }
 
 /// The Hyper+S palette's rows: `[app] palette` picks and orders them (an id
@@ -1223,127 +1344,15 @@ impl SwitcherController {
         }
     }
 
-    /// `[find-window]` palette command: wait `delay` seconds (so the user can
-    /// point at or focus the window in question), run `script` (winwatch
-    /// --pids2 candidate rows), then offer a kill picker.
-    /// Never activates the app; the work is off the main thread.
+    /// `[find-window]` palette command (see [`run_find_window`]).
     fn find_window(&self) {
         let path = self.inner.lock().unwrap().settings.commands_conf_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let vars = crate::views::tools::section_vars(&text, "find-window");
-        let delay: f64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(2.0);
-        let script = vars.get("script").cloned().unwrap_or_default();
-        let script = match script.strip_prefix("~/") {
-            Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
-            None => script,
-        };
         let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else { return };
-        let toast = |q: &std::sync::Arc<std::sync::Mutex<Vec<UiCommand>>>, t: String, sym: &'static str| {
-            q.lock().unwrap().push(UiCommand::Toast(t, sym));
-        };
-        toast(&queue, format!("Point at (or focus) the window — reading in {delay}s"), "scope");
-        self.log(&format!("find-window: sampling in {delay}s via {script}"));
-        let secs: u64 = vars.get("dialog-seconds").and_then(|v| v.parse().ok()).unwrap_or(30);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs_f64(delay.max(0.0)));
-            let me = std::process::id() as i64;
-            let o = match std::process::Command::new("/bin/bash")
-                .arg("-c")
-                .arg(&script)
-                .env("KS_EXCLUDE_PID", me.to_string())
-                .output()
-            {
-                Ok(o) if o.status.success() => o,
-                Ok(o) => {
-                    let err = String::from_utf8_lossy(&o.stderr);
-                    let why = err.lines().last().unwrap_or("non-zero exit").trim().to_string();
-                    toast(&queue, format!("find-window failed: {why}"), "exclamationmark.triangle.fill");
-                    return;
-                }
-                Err(e) => {
-                    toast(&queue, format!("find-window failed: {e}"), "exclamationmark.triangle.fill");
-                    return;
-                }
-            };
-            // winwatch --pids2: kind<TAB>pid<TAB>owner<TAB>WxH<TAB>note, kinds
-            // P (under pointer), A (AX focused), F (frontmost app), T (small window).
-            // One picker row per pid, labelled by the first (best) kind it showed up as.
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            let mut rows: Vec<(i64, String)> = Vec::new();
-            for line in text.lines() {
-                let f: Vec<&str> = line.split('\t').collect();
-                if f.len() < 3 {
-                    continue;
-                }
-                let Ok(p) = f[1].parse::<i64>() else { continue };
-                if p == me || p <= 1 || rows.iter().any(|r| r.0 == p) {
-                    continue;
-                }
-                let kind = match f[0] {
-                    "P" => "Under pointer",
-                    "A" => "Focused window",
-                    "F" => "Frontmost app",
-                    "T" => "Small window",
-                    _ => continue,
-                };
-                let size = f.get(3).filter(|s| **s != "-").map(|s| format!(" {s}")).unwrap_or_default();
-                let note = f.get(4).filter(|s| !s.is_empty()).map(|s| format!(" [{s}]")).unwrap_or_default();
-                rows.push((p, format!("{kind}: {} (pid {p}){size}{note}", f[2])));
-            }
-            if rows.is_empty() {
-                toast(&queue, "find-window: no candidate windows".into(), "scope");
-                return;
-            }
-            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-            let items = rows.iter().map(|r| format!("\"{}\"", esc(&r.1))).collect::<Vec<_>>().join(", ");
-            // `choose from list` takes any number of rows (display dialog caps at
-            // 3 buttons) but has no timeout, so the osascript is killed after `secs`.
-            let first = format!("\"{}\"", esc(&rows[0].1));
-            let osa = format!(
-                "choose from list {{{items}}} with title \"Find Window PID\" \
-                 with prompt \"Kill which process? (SIGTERM, then SIGKILL)\" default items {{{first}}} \
-                 OK button name \"Kill\" cancel button name \"Cancel\""
-            );
-            let Ok(child) = std::process::Command::new("/usr/bin/osascript")
-                .args(["-e", &osa])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            else {
-                return;
-            };
-            let child_pid = child.id();
-            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let done2 = done.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(secs));
-                // Only while still waiting on it, so a recycled pid is never hit.
-                if !done2.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = std::process::Command::new("/bin/kill").arg(child_pid.to_string()).status();
-                }
-            });
-            let r = child.wait_with_output();
-            done.store(true, std::sync::atomic::Ordering::SeqCst);
-            let Ok(r) = r else { return };
-            // Cancel prints "false"; a pick prints the row text.
-            let reply = String::from_utf8_lossy(&r.stdout).trim().to_string();
-            let pid = rows.iter().find(|row| row.1 == reply).map(|row| row.0);
-            let Some(pid) = pid else { return };
-            if pid == me || pid <= 1 {
-                return;
-            }
-            // SIGTERM first; SIGKILL if it is still there a second later.
-            let ok = std::process::Command::new("/bin/bash")
-                .args(["-c", &format!("kill {pid} && sleep 1; kill -0 {pid} 2>/dev/null && kill -9 {pid}; ! kill -0 {pid} 2>/dev/null")])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if ok {
-                toast(&queue, format!("Killed pid {pid}"), "checkmark");
-            } else {
-                toast(&queue, format!("Couldn't kill pid {pid}"), "exclamationmark.triangle.fill");
-            }
-        });
+        run_find_window(
+            &text,
+            Arc::new(move |t, sym| queue.lock().unwrap().push(UiCommand::Toast(t, sym))),
+        );
     }
 
     /// The Hyper+S palette's `(id, title)` rows (`[app] palette`).
@@ -2354,32 +2363,7 @@ impl SwitcherController {
             return;
         };
         self.post_main(move || {
-            let (finished, data) = {
-                let mut c = controller.lock().unwrap();
-                c.reply = None;
-                let _ = c.handle(&words);
-                #[cfg(target_os = "macos")]
-                c.redraw_overlays();
-                crate::app::logging::log_hotkey_shown(Some("screenshot"));
-                let finished = c.is_idle();
-                (finished, if finished { c.reply.take() } else { None })
-            };
-            let Some(reply) = reply else { return };
-            if finished {
-                reply.send_bytes(data.as_deref().unwrap_or_default());
-                return;
-            }
-            // An interactive overlay is up: answer when it closes.
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let mut c = controller.lock().unwrap();
-                if c.is_idle() {
-                    let data = c.reply.take();
-                    drop(c);
-                    reply.send_bytes(data.as_deref().unwrap_or_default());
-                    return;
-                }
-            });
+            crate::views::screenshot::run_screenshot_message(controller, words, reply);
         });
     }
 
@@ -2567,7 +2551,7 @@ fn parse_esc_close(text: &str) -> HashMap<String, i64> {
 
 /// Parse `[section]` + `key = value` lines in file order (duplicate sections
 /// stay separate entries, mirroring `loadCommands`'s per-header flush).
-fn parse_sections_ordered(text: &str) -> Vec<(String, HashMap<String, String>)> {
+pub(crate) fn parse_sections_ordered(text: &str) -> Vec<(String, HashMap<String, String>)> {
     let mut out: Vec<(String, HashMap<String, String>)> = Vec::new();
     for line in crate::engines::config_text::config_lines(text) {
         let t = line.trim();
@@ -2593,7 +2577,7 @@ fn parse_sections_ordered(text: &str) -> Vec<(String, HashMap<String, String>)> 
 
 /// A pure `config.tri` over a raw value (the helper-backed
 /// `config_text::tri` stays the codec path; the raw scan must not need it).
-fn tri_pure(value: &str) -> Option<bool> {
+pub(crate) fn tri_pure(value: &str) -> Option<bool> {
     match value.trim().trim_matches('"').to_lowercase().as_str() {
         "true" | "yes" | "on" | "1" => Some(true),
         "false" | "no" | "off" | "0" => Some(false),
@@ -2602,7 +2586,7 @@ fn tri_pure(value: &str) -> Option<bool> {
 }
 
 /// Strip matching surrounding quotes (the python codec's value decoding).
-fn unquote_value(v: &str) -> String {
+pub(crate) fn unquote_value(v: &str) -> String {
     let t = v.trim();
     if t.len() >= 2
         && ((t.starts_with('"') && t.ends_with('"'))
@@ -2616,7 +2600,7 @@ fn unquote_value(v: &str) -> String {
 
 /// Parse `[section]` + `key = value` lines into `section -> key -> value`
 /// (a small pure scan; the python codec is not needed for enabled flags).
-fn parse_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
+pub(crate) fn parse_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
     let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut section = String::new();
     for line in crate::engines::config_text::config_lines(text) {
@@ -2642,7 +2626,7 @@ fn parse_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
     out
 }
 
-fn strip_comment(v: &str) -> &str {
+pub(crate) fn strip_comment(v: &str) -> &str {
     let (mut single, mut double) = (false, false);
     for (i, c) in v.char_indices() {
         match c {
@@ -2789,7 +2773,7 @@ fn fmt_width(w: f64) -> String {
 /// Bound to the section map so `build_nav` and `build_palette` share one rule:
 /// renaming a label in `commands.toml` cannot desynchronize the header nav, the
 /// pane names and the palette.
-fn label_of<'a>(
+pub(crate) fn label_of<'a>(
     sections: &'a HashMap<String, HashMap<String, String>>,
 ) -> impl Fn(&str, &str) -> String + 'a {
     move |section: &str, fallback: &str| -> String {
@@ -2802,7 +2786,7 @@ fn label_of<'a>(
     }
 }
 
-fn section_flag(
+pub(crate) fn section_flag(
     sections: &HashMap<String, HashMap<String, String>>,
     section: &str,
     default: bool,
@@ -3187,6 +3171,16 @@ impl CommandHandler for SwitcherController {
     }
 
     fn launch(&self, message: &str) {
+        // `reveal\tPATH…` from the quick agent (a screenshot's / the paths
+        // shelf's "reveal in Files"): show the paths in the Files view.
+        if let Some(rest) = message.strip_prefix("reveal\t") {
+            let paths: Vec<String> =
+                rest.split('\t').filter(|p| !p.is_empty()).map(str::to_string).collect();
+            if !paths.is_empty() {
+                crate::platform::run_on_main(move || reveal_in_files(&paths));
+            }
+            return;
+        }
         let prep = if self.inner.lock().unwrap().settings.shared_window
             && hotkey::is_hotkey_mode(message)
         {
@@ -3210,21 +3204,54 @@ pub use daemon_ui::install_daemon_ui;
 
 /// `PathShelf.add([path], why: .screenshot)` after a successful overlay save.
 /// Called on the main thread from `views::screenshot`'s save path.
+///
+/// With no live shelf in this process (the quick agent) the store file is
+/// updated directly — pure Rust, atomic, merged with whatever the other
+/// process wrote ([`crate::engines::path_shelf::pure_add`]).
 pub fn screenshot_saved_to_path_shelf(path: &str) {
     #[cfg(target_os = "macos")]
-    daemon_ui::shelf_add(&[path.to_string()], crate::engines::path_shelf::Why::Screenshot);
+    {
+        let why = crate::engines::path_shelf::Why::Screenshot;
+        if !daemon_ui::shelf_add(&[path.to_string()], why) {
+            crate::engines::path_shelf::pure_add(
+                &crate::engines::path_shelf::default_store(),
+                &[path.to_string()],
+                why,
+            );
+        }
+    }
     #[cfg(not(target_os = "macos"))]
     let _ = path;
+}
+
+/// Where "reveal in Files" goes when this process has no Files view (the
+/// quick agent forwards it to the main daemon's socket). Set once at startup.
+static REVEAL_HOOK: std::sync::OnceLock<Box<dyn Fn(&[String]) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+pub fn set_reveal_hook(f: impl Fn(&[String]) + Send + Sync + 'static) {
+    let _ = REVEAL_HOOK.set(Box::new(f));
 }
 
 /// Show `paths` in the app's own file browser (`SlotView::Files`) — the uniform
 /// entry point for every "reveal / show in Finder" action, callable from any
 /// module. Never opens macOS Finder. A no-op off macOS or before the UI is up.
 pub fn reveal_in_files(paths: &[String]) {
+    if let Some(hook) = REVEAL_HOOK.get() {
+        hook(paths);
+        return;
+    }
     #[cfg(target_os = "macos")]
     daemon_ui::reveal_in_files(paths);
     #[cfg(not(target_os = "macos"))]
     let _ = paths;
+}
+
+/// Copy files to the pasteboard and toast ("Copied “x”"); `true` when
+/// something landed. The quick agent's paths shelf uses it too.
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_files_toast(paths: &[String]) -> bool {
+    daemon_ui::copy_files_toast(paths)
 }
 
 /// The rule-2 popup actions (rename / compress / trash wired to the daemon's
@@ -3547,17 +3574,30 @@ mod daemon_ui {
     }
 
     fn shelf_entries() -> Vec<crate::engines::path_shelf::Item> {
-        SHELF.with(|s| s.borrow().as_ref().map(|sh| sh.borrow().entries()).unwrap_or_default())
+        SHELF.with(|s| {
+            s.borrow()
+                .as_ref()
+                .map(|sh| {
+                    // The quick agent writes screenshots into the same file.
+                    sh.borrow_mut().refresh_from_disk();
+                    sh.borrow().entries()
+                })
+                .unwrap_or_default()
+        })
     }
 
     /// `PathShelf.add(_:why:)` on the live shelf (main thread). The screenshot
     /// save path calls this through [`super::screenshot_saved_to_path_shelf`].
-    pub(crate) fn shelf_add(paths: &[String], why: crate::engines::path_shelf::Why) {
-        SHELF.with(|s| {
-            if let Some(sh) = s.borrow().as_ref() {
+    /// `false` when no live shelf exists in this process (the quick agent,
+    /// or a main daemon without `[paths]`): the caller writes the store file.
+    pub(crate) fn shelf_add(paths: &[String], why: crate::engines::path_shelf::Why) -> bool {
+        SHELF.with(|s| match s.borrow().as_ref() {
+            Some(sh) => {
                 sh.borrow_mut().add(paths, why);
+                true
             }
-        });
+            None => false,
+        })
     }
 
     thread_local! {
@@ -5179,99 +5219,14 @@ mod daemon_ui {
             }
         }
 
-        /// Cmd+A/X/C/V/Z (+ Cmd+Shift+Z) for a popup's text input while
-        /// another app is frontmost. Popups are non-activating panels — Hyper+S
-        /// never activates kitchen-sink — and AppKit only routes Cmd edit keys
-        /// through the Edit menu of the *active* app, so without this they did
-        /// nothing in the Create File paste box, Text to Table, the palette
-        /// search, … (rule 1). Sent straight to the first responder: any
-        /// `NSText` (fields, text views), or the terminal popup's view.
+        /// See [`crate::ui::popup_keys::cmd_edit_in_popup`] (shared with the quick agent).
         fn cmd_edit_in_popup(&self, event: &NSEvent) -> bool {
-            use objc2_app_kit::NSEventModifierFlags as F;
-            let Some(mtm) = MainThreadMarker::new() else {
-                return false;
-            };
-            let flags = event.modifierFlags();
-            if !flags.contains(F::Command) || flags.contains(F::Control) || flags.contains(F::Option) {
-                return false;
-            }
-            let shift = flags.contains(F::Shift);
-            let selector = match (event.keyCode(), shift) {
-                (0, false) => sel!(selectAll:),
-                (7, false) => sel!(cut:),
-                (8, false) => sel!(copy:),
-                (9, false) => sel!(paste:),
-                (6, false) => sel!(undo:),
-                (6, true) => sel!(redo:),
-                _ => return false,
-            };
-            // We are the frontmost app: the Edit menu works, leave it be.
-            let own = std::process::id() as i32;
-            if crate::platform::frontmost_app().map_or(true, |a| a.pid == own) {
-                return false;
-            }
-            let app = NSApplication::sharedApplication(mtm);
-            let Some(window) = app.keyWindow() else {
-                return false;
-            };
-            let Some(r) = window.firstResponder() else {
-                return false;
-            };
-            let is_text = as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some();
-            let is_terminal = window.title().to_string() == "terminal";
-            // Find Recent Files: Cmd+C with no text selected in the filter
-            // field copies the selected row's path (`paths_key`), without
-            // needing a click to activate the app first.
-            if selector == sel!(copy:) && window.title().to_string() == "paths" {
-                let has_sel = as_any(&*r)
-                    .downcast_ref::<objc2_app_kit::NSText>()
-                    .is_some_and(|t| t.selectedRange().length > 0);
-                if !has_sel {
-                    return false;
-                }
-            }
-            let target: &AnyObject = as_any(&*r);
-            let responds: bool = unsafe { msg_send![target, respondsToSelector: selector] };
-            if !(is_text || is_terminal) || !responds {
-                return false;
-            }
-            unsafe { app.sendAction_to_from(selector, Some(target), None) }
+            crate::ui::popup_keys::cmd_edit_in_popup(event)
         }
 
-        /// `TextEditKeys.killWordBackward` for any editable `NSText` first
-        /// responder (field editors included) in the key window.
+        /// See [`crate::ui::popup_keys::kill_word_in_text_input`].
         fn kill_word_in_text_input(&self, event: &NSEvent) -> bool {
-            use crate::engines::text_edit_keys::{route, EditAction, Focus, Modifiers, KEY_W};
-            use objc2_app_kit::NSEventModifierFlags as F;
-            let Some(mtm) = MainThreadMarker::new() else {
-                return false;
-            };
-            let flags = event.modifierFlags();
-            let mods = Modifiers {
-                ctrl: flags.contains(F::Control),
-                cmd: flags.contains(F::Command),
-                option: flags.contains(F::Option),
-                shift: flags.contains(F::Shift),
-            };
-            if !mods.ctrl || event.keyCode() != KEY_W {
-                return false;
-            }
-            let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
-                return false;
-            };
-            let Some(r) = window.firstResponder() else {
-                return false;
-            };
-            let Some(text) = as_any(&*r).downcast_ref::<objc2_app_kit::NSText>() else {
-                return false;
-            };
-            let focus = Focus { is_text: true, is_editable: text.isEditable() };
-            if route(event.keyCode(), mods, focus) != Some(EditAction::KillWordBackward) {
-                return false;
-            }
-            let nil: Option<&AnyObject> = None;
-            let _: () = unsafe { msg_send![text, deleteWordBackward: nil] };
-            true
+            crate::ui::popup_keys::kill_word_in_text_input(event)
         }
 
         /// True when the window's first responder is a text field / editor
@@ -12006,7 +11961,7 @@ mod daemon_ui {
     }
 
     /// Copy files and toast Swift's wording; only toasts when something landed.
-    fn copy_files_toast(paths: &[String]) -> bool {
+    pub(crate) fn copy_files_toast(paths: &[String]) -> bool {
         let ok = copy_files_to_pasteboard(paths);
         if ok {
             crate::ui::toast::show(&format!("Copied {}", copied_what(paths)), "doc.on.doc");

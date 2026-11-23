@@ -18,6 +18,8 @@ pub mod pill_selector;
 #[cfg(target_os = "macos")]
 pub mod panel_frame;
 pub mod popup;
+#[cfg(target_os = "macos")]
+pub mod popup_keys;
 pub mod preview_ring;
 pub mod sheet;
 pub mod shared_window;
