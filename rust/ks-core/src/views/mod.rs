@@ -4,3 +4,4 @@ pub mod files;
 pub mod files_view;
 pub mod file_popup;
 pub mod paths;
+pub mod screenshot;

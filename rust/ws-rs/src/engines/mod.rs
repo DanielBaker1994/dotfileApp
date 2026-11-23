@@ -10,6 +10,6 @@ pub use ks_core::engines::pane_shot;
 pub use ks_core::engines::path_shelf;
 pub use ks_core::engines::recent_files;
 pub use ks_core::engines::screenshot_annotations;
-pub mod screenshot_text;
+pub use ks_core::engines::screenshot_text;
 pub use ks_core::engines::switcher_status;
 pub use ks_core::engines::text_edit_keys;

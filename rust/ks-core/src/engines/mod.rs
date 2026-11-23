@@ -8,3 +8,4 @@ pub mod screenshot_annotations;
 pub mod switcher_status;
 pub mod text_edit_keys;
 pub mod ansi_render;
+pub mod screenshot_text;

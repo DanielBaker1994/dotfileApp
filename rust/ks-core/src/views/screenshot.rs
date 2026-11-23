@@ -4296,7 +4296,7 @@ mod shot_cg {
     /// frame × the max backing scale into one bitmap and draw each capture at
     /// `(frame.min - union.min) * scale`. The context is bottom-left (default),
     /// so the raw `draw_image` shows each capture upright (no CTM flip).
-    pub(super) fn stitch(screens: &[ScreenRef], images: &[CapturedImage]) -> Option<ShotImage> {
+    pub fn stitch(screens: &[ScreenRef], images: &[CapturedImage]) -> Option<ShotImage> {
         let mut union: Option<Rect> = None;
         for s in screens {
             union = Some(match union {
@@ -4367,7 +4367,7 @@ mod shot_cg {
     }
 
     /// `ShotRenderer.drawImage`: place an image upright in the top-left space.
-    pub(super) fn draw_image(ctx: &CGContext, img: &CGImage, r: Rect, smooth: bool) {
+    pub fn draw_image(ctx: &CGContext, img: &CGImage, r: Rect, smooth: bool) {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
@@ -4435,7 +4435,7 @@ mod shot_cg {
 
     /// `ShotCanvas.color(at:)`: the frozen capture's colour at a point-space
     /// location, scaled to pixels like `draw_loupe` does.
-    pub(super) fn sample_color(base: &CGImage, scale: f64, p: Point) -> Option<ShotColor> {
+    pub fn sample_color(base: &CGImage, scale: f64, p: Point) -> Option<ShotColor> {
         let px = rasterize(base)?;
         let x = (p.x * scale) as i64;
         let y = (p.y * scale) as i64;
@@ -4530,7 +4530,7 @@ mod shot_cg {
 
     /// `(string as NSString).size(withAttributes:).width` for the overlay chrome
     /// (help-card columns, button badges), via the shared CoreText font path.
-    pub(super) fn measure_text_width(text: &str, point_size: f64, bold: bool) -> f64 {
+    pub fn measure_text_width(text: &str, point_size: f64, bold: bool) -> f64 {
         let style = ShotTextStyle {
             family: String::new(),
             bold,
@@ -4555,7 +4555,7 @@ mod shot_cg {
         )
     }
 
-    pub(super) fn draw_text(ctx: &CGContext, o: &ShotObject) {
+    pub fn draw_text(ctx: &CGContext, o: &ShotObject) {
         let font = text_font(&o.style, o.font_size());
         let color = CGColor::new_srgb(o.color.r, o.color.g, o.color.b, o.color.a);
         let parts: Vec<&str> = o.text.split('\n').collect();
@@ -4795,14 +4795,14 @@ mod shot_cg {
 
     /// The pixel buffer secure pixelation reads, for the live overlay (the
     /// caller caches it per frozen image; rasterizing is a full-screen copy).
-    pub(super) fn pixels_for(base: &CGImage) -> Option<ShotPixels> {
+    pub fn pixels_for(base: &CGImage) -> Option<ShotPixels> {
         rasterize(base)
     }
 
     /// `ShotRenderer.draw(_:canvas:ctx:)` — the objects over the frozen
     /// capture in the context's top-left point space (the live overlay and
     /// the final render share this pass, so what you see is what you get).
-    pub(super) fn draw_objects(
+    pub fn draw_objects(
         ctx: &CGContext,
         base: &CGImage,
         scale: f64,
@@ -4894,7 +4894,7 @@ mod shot_cg {
         Some((nw as i64, nh as i64, encode_png(&out)?))
     }
 
-    pub(super) fn encode_png(image: &CGImage) -> Option<Vec<u8>> {
+    pub fn encode_png(image: &CGImage) -> Option<Vec<u8>> {
         let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
         let props: Retained<NSDictionary<NSBitmapImageRepPropertyKey, AnyObject>> =
             NSDictionary::new();
@@ -7073,7 +7073,7 @@ fn open_in_workspace(path: &str) {
 #[cfg(target_os = "macos")]
 fn reveal_in_workspace(path: &str) {
     // Uniform "reveal": the app's own file browser, never macOS Finder.
-    crate::app::host::reveal_in_files(&[path.to_string()]);
+    crate::app::hooks::reveal_in_files(&[path.to_string()]);
 }
 
 /// The frame of the screen under the mouse (`mouseScreen`).
@@ -7294,7 +7294,7 @@ impl ScreenshotController {
             {
                 crate::platform::set_text(&target);
                 #[cfg(target_os = "macos")]
-                crate::app::host::screenshot_saved_to_path_shelf(&target);
+                crate::app::hooks::screenshot_saved_to_path_shelf(&target);
             }
             let shown = abbreviate_tilde(&target);
             ScreenToast::show(&mut self.toast, format!("Saved recording {shown} \u{b7} path copied"), "checkmark.circle.fill");
@@ -7473,7 +7473,7 @@ impl ScreenshotController {
 
     /// Invalidate every live overlay panel after a model change.
     #[cfg(target_os = "macos")]
-    pub(crate) fn redraw_overlays(&self) {
+    pub fn redraw_overlays(&self) {
         for panel in &self.overlay_panels.0 {
             panel.redraw();
         }
@@ -7831,7 +7831,7 @@ impl ScreenshotController {
         }
         self.last_output["path"] = json!(target);
         // Swift `onSaved` → `PathShelf.add([path], why: .screenshot)`.
-        crate::app::host::screenshot_saved_to_path_shelf(&target);
+        crate::app::hooks::screenshot_saved_to_path_shelf(&target);
         // Swift `write`'s `copyPathAfterSave`: put the saved path on the
         // clipboard after a successful save.
         if cfg.copy_path_after_save {
@@ -8984,7 +8984,7 @@ pub fn mouse_screen_scale() -> f64 {
         .map_or(2.0, |s| s.scale)
 }
 
-pub(crate) fn epoch_millis() -> i64 {
+pub fn epoch_millis() -> i64 {
     now_millis()
 }
 

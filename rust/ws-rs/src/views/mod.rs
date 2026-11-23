@@ -14,7 +14,7 @@ pub mod jira_view;
 pub mod jira_search_bar;
 pub mod pane_find;
 pub use ks_core::views::paths;
-pub mod screenshot;
+pub use ks_core::views::screenshot;
 pub mod setup;
 pub use ks_core::views::switcher;
 pub mod terminal;
