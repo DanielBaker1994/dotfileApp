@@ -7,4 +7,6 @@
 
 pub mod app;
 pub mod engines;
+pub mod panes;
 pub mod platform;
+pub mod ui;

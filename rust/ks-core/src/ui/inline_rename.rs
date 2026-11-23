@@ -51,7 +51,7 @@ mod appkit {
     }
 
     /// Drop the field; run its callback with `result` (when one was live).
-    pub(super) fn finish(result: Option<Option<String>>) {
+    pub fn finish(result: Option<Option<String>>) {
         let live = LIVE.with(|l| l.borrow_mut().take());
         if let Some((f, _, done)) = live {
             f.removeFromSuperview();
