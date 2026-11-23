@@ -1,5 +1,9 @@
 //! Slot views (mirrors the per-view Swift files).
 
+// Modules moved to `ks-core` are re-exported so `crate::<mod>::…` paths stay valid;
+// not every re-export is used by every target.
+#![allow(unused_imports)]
+
 pub mod ai;
 pub mod ai_view;
 pub mod confluence;

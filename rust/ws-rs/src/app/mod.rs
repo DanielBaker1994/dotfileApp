@@ -1,5 +1,9 @@
 //! App host layer (mirrors `kitchen_sink.swift` top-level + `main.swift`).
 
+// Modules moved to `ks-core` are re-exported so `crate::<mod>::…` paths stay valid;
+// not every re-export is used by every target.
+#![allow(unused_imports)]
+
 pub use ks_core::app::cli;
 pub use ks_core::app::config;
 pub use ks_core::app::hotkey;

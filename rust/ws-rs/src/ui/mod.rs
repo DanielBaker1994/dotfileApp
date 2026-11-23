@@ -1,6 +1,10 @@
 //! AppKit window framework (mirrors `PopupWindow.swift`, `CardWindow.swift`,
 //! `SharedWindow.swift`, theme).
 
+// Modules moved to `ks-core` are re-exported so `crate::<mod>::…` paths stay valid;
+// not every re-export is used by every target.
+#![allow(unused_imports)]
+
 pub use ks_core::ui::ansi_text;
 pub use ks_core::ui::card;
 pub use ks_core::ui::chrome;

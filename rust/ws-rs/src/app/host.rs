@@ -23,7 +23,9 @@ use serde_json::{json, Map, Value};
 use crate::app::config::{self, AppSettings, HeaderStyle};
 use crate::app::hotkey::{self, HotkeyPrep};
 use crate::app::paths::Paths;
+#[allow(unused_imports)]
 pub(crate) use ks_core::app::find_window::{run_find_window, ToastFn};
+#[allow(unused_imports)]
 pub(crate) use ks_core::app::sections::{
     label_of, parse_sections, parse_sections_ordered, section_flag, strip_comment, tri_pure,
     unquote_value, COMMAND_SECTION_SKIPS,
@@ -2961,8 +2963,10 @@ impl CommandHandler for SwitcherController {
 #[cfg(target_os = "macos")]
 pub use daemon_ui::install_daemon_ui;
 
+#[allow(unused_imports)]
 pub use ks_core::app::hooks::{reveal_in_files, screenshot_saved_to_path_shelf, set_reveal_hook};
 #[cfg(target_os = "macos")]
+#[allow(unused_imports)]
 pub use ks_core::app::hooks::{cancel_click_rename, copy_files_toast};
 
 /// The rule-2 popup actions (rename / compress / trash wired to the daemon's
@@ -2971,7 +2975,9 @@ pub use ks_core::app::hooks::{cancel_click_rename, copy_files_toast};
 /// `file_context_menu` from these. `sheet` hosts the Rename… prompt. macOS
 /// only: the surface has no AppKit half elsewhere.
 #[cfg(target_os = "macos")]
+#[allow(unused_imports)]
 pub use ks_core::app::hooks::popup_file_menu_actions;
+#[allow(unused_imports)]
 pub use ks_core::app::hooks::popup_rename_commit;
 
 #[cfg(target_os = "macos")]

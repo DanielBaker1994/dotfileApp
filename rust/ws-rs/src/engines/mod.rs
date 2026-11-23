@@ -1,6 +1,10 @@
 //! Foundation-only engines + Python-facing facades (mirrors the leaf Swift
 //! files). Most delegate to `pylib/` through the helper.
 
+// Modules moved to `ks-core` are re-exported so `crate::<mod>::…` paths stay valid;
+// not every re-export is used by every target.
+#![allow(unused_imports)]
+
 pub mod ai_format;
 pub use ks_core::engines::ansi_render;
 pub use ks_core::engines::config_text;
