@@ -13,3 +13,5 @@ pub mod registry;
 pub mod socket;
 #[cfg(target_os = "macos")]
 pub mod live_panes;
+pub mod cli;
+pub mod quick;

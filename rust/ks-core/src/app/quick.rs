@@ -178,8 +178,8 @@ fn id_list(v: &str) -> Vec<String> {
 /// enabled confluence / ai views and "Bansho", ordered by `[app]
 /// palette-first`, then narrowed to `[app] palette` (empty = all).
 pub fn palette_rows(text: &str) -> Vec<(String, String)> {
-    use crate::app::host::{label_of, parse_sections, parse_sections_ordered, section_flag, tri_pure};
-    use crate::app::host::COMMAND_SECTION_SKIPS;
+    use crate::app::sections::{label_of, parse_sections, parse_sections_ordered, section_flag, tri_pure};
+    use crate::app::sections::COMMAND_SECTION_SKIPS;
     let sections = parse_sections(text);
     let label = label_of(&sections);
     let app = sections.get("app").cloned().unwrap_or_default();
@@ -395,7 +395,7 @@ mod appkit {
         /// theme, so edits apply on the next press without a restart.
         fn refresh_config(&self) -> String {
             let text = crate::app::config::read_config_text_pure().unwrap_or_default();
-            let sections = crate::app::host::parse_sections(&text);
+            let sections = crate::app::sections::parse_sections(&text);
             crate::ui::theme::install_theme(
                 &sections.get("theme").cloned().unwrap_or_default(),
                 sections.clone(),
@@ -404,7 +404,7 @@ mod appkit {
         }
 
         fn app_settings(text: &str) -> crate::app::config::AppSettings {
-            let sections = crate::app::host::parse_sections(text);
+            let sections = crate::app::sections::parse_sections(text);
             let mut s = crate::app::config::AppSettings::default();
             if let Some(f) = sections.get("app").and_then(|a| a.get("terminal-font")) {
                 if !f.trim().is_empty() {
@@ -415,7 +415,7 @@ mod appkit {
         }
 
         fn shot_config(text: &str) -> ScreenshotConfig {
-            let sections = crate::app::host::parse_sections(text);
+            let sections = crate::app::sections::parse_sections(text);
             ScreenshotConfig::from_entries(&sections.get("screenshot").cloned().unwrap_or_default())
         }
 
@@ -626,7 +626,7 @@ mod appkit {
                     }
                     PickRoute::FindWindow => {
                         let text = self.refresh_config();
-                        crate::app::host::run_find_window(
+                        crate::app::find_window::run_find_window(
                             &text,
                             Arc::new(|t, sym| {
                                 crate::platform::run_on_main(move || crate::ui::toast::show(&t, sym))
@@ -824,7 +824,7 @@ mod appkit {
                         open: Some(Box::new(move || {
                             crate::platform::open_path(std::path::Path::new(&po));
                         })),
-                        reveal: Some(Box::new(move || crate::app::host::reveal_in_files(&[pr]))),
+                        reveal: Some(Box::new(move || crate::app::hooks::reveal_in_files(&[pr]))),
                         copy_file: Some(Box::new(move || {
                             copy_files_toast(&[pcf]);
                         })),
@@ -888,7 +888,7 @@ mod appkit {
                         crate::platform::open_path(std::path::Path::new(p));
                     }
                 }
-                PathsKey::Reveal => crate::app::host::reveal_in_files(&paths),
+                PathsKey::Reveal => crate::app::hooks::reveal_in_files(&paths),
                 // Inline rename needs the main app's Files backends.
                 PathsKey::BeginRename => return false,
                 PathsKey::Forget => {
@@ -1036,7 +1036,7 @@ mod appkit {
     }
 
     fn copy_files_toast(paths: &[String]) -> bool {
-        crate::app::host::copy_files_toast(paths)
+        crate::app::hooks::copy_files_toast(paths)
     }
 
     /// Run the agent: bind the socket, build the UI, run the main loop.
@@ -1051,7 +1051,7 @@ mod appkit {
         crate::app::menu::install_main_menu(mtm, None);
 
         let text = crate::app::config::read_config_text_pure().unwrap_or_default();
-        let sections = crate::app::host::parse_sections(&text);
+        let sections = crate::app::sections::parse_sections(&text);
         crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections.clone());
         let mut shot = ScreenshotController::new();
         shot.set_config(QuickUi::shot_config(&text));
@@ -1060,7 +1060,7 @@ mod appkit {
         // "Reveal in Files" has no Files view here: ask the main app.
         {
             let (sock, script) = (paths.notes_socket_path(), format!("{}/bin/kitchen_sink.sh", paths.asset_dir()));
-            crate::app::host::set_reveal_hook(move |p: &[String]| {
+            crate::app::hooks::set_reveal_hook(move |p: &[String]| {
                 let msg = std::iter::once("reveal".to_string()).chain(p.iter().cloned()).collect::<Vec<_>>().join("\t");
                 forward_to_main(&sock, &script, &msg);
             });

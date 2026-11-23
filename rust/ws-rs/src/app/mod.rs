@@ -1,6 +1,6 @@
 //! App host layer (mirrors `kitchen_sink.swift` top-level + `main.swift`).
 
-pub mod cli;
+pub use ks_core::app::cli;
 pub use ks_core::app::config;
 pub use ks_core::app::hotkey;
 pub mod jira_poll;
@@ -13,7 +13,7 @@ pub use ks_core::app::pathfmt;
 pub use ks_core::app::paths;
 pub use ks_core::app::process_run;
 pub use ks_core::app::python_helper;
-pub mod quick;
+pub use ks_core::app::quick;
 pub use ks_core::app::registry;
 pub use ks_core::app::socket;
 pub mod synth_input;
