@@ -203,6 +203,171 @@ pub fn save(path: &str, items: &[Item]) {
     let _ = shelf_call("shelf.save", json!({"path": path, "items": items_value(items)}));
 }
 
+// ------------------------------------------------- Python-free store
+//
+// The quick agent (`kitchen-sink quick`) must not start the Python helper
+// pool, yet it reads the shelf (Find Recent Files) and adds screenshots to
+// it while the main daemon may be writing the same `paths.json`. These are
+// pure-Rust mirrors of `pylib/shelf.py` (`canonical`, `normalize`, `bump`,
+// `finalize`, `load_candidates`, `save`); the save is atomic (tmp + rename)
+// so a concurrent reader in the other process never sees a torn file.
+
+/// `~/.cache/kitchen-sink/paths.json`.
+pub fn default_store() -> String {
+    format!("{}/.cache/kitchen-sink/paths.json", home_dir())
+}
+
+/// Modification time of the store (`None` when it does not exist).
+pub fn store_mtime(store: &str) -> Option<SystemTime> {
+    fs::metadata(store).and_then(|m| m.modified()).ok()
+}
+
+/// `shelf.canonical`: realpath + stat (sockets / devices are not files).
+pub fn pure_canonical(p: &str) -> Option<Canonical> {
+    let real = fs::canonicalize(p).ok()?;
+    let md = fs::metadata(&real).ok()?;
+    Some(Canonical {
+        path: real.to_string_lossy().into_owned(),
+        is_file: md.is_file(),
+        is_dir: md.is_dir(),
+    })
+}
+
+/// `shelf.normalize`: `file://` URLs, `~`, and `.` / `..` / `//` collapsed.
+pub fn pure_normalize(p: &str) -> String {
+    let mut s = p.to_string();
+    if let Some(rest) = s.strip_prefix("file://") {
+        // file:///a%20b -> /a b
+        let path = rest.find('/').map_or("", |i| &rest[i..]);
+        let mut out = Vec::with_capacity(path.len());
+        let b = path.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 3 <= b.len() {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+                if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        s = String::from_utf8_lossy(&out).into_owned();
+    }
+    if s == "~" || s.starts_with("~/") {
+        s = format!("{}{}", home_dir(), &s[1..]);
+    }
+    let abs = s.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|l| *l != "..") {
+                    parts.pop();
+                } else if !abs {
+                    parts.push("..");
+                }
+            }
+            x => parts.push(x),
+        }
+    }
+    let joined = parts.join("/");
+    let mut n = if abs { format!("/{joined}") } else if joined.is_empty() { ".".to_string() } else { joined };
+    if n == "/tmp" || n.starts_with("/tmp/") {
+        n = format!("/private{n}");
+    }
+    n
+}
+
+/// `shelf.bump`: move / insert `path` to the top; anything but an edit
+/// replaces the stored why; capped at `limit`.
+pub fn pure_bump(items: &[Item], path: &str, why: Why, at: f64, limit: usize) -> Vec<Item> {
+    let mut out: Vec<Item> = items.to_vec();
+    match out.iter().position(|i| i.path == path) {
+        Some(idx) => {
+            let mut it = out.remove(idx);
+            it.at = at;
+            if why != Why::Modified {
+                it.why = why;
+            }
+            out.insert(0, it);
+        }
+        None => out.insert(0, Item { path: path.to_string(), at, why }),
+    }
+    out.truncate(limit);
+    out
+}
+
+/// `shelf.finalize`: newest first (stable), deduplicated, capped.
+pub fn pure_finalize(items: &[Item], limit: usize) -> Vec<Item> {
+    let mut v: Vec<Item> = items.to_vec();
+    v.sort_by(|a, b| b.at.partial_cmp(&a.at).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|i| seen.insert(i.path.clone()));
+    v.truncate(limit);
+    v
+}
+
+/// `shelf.load` + `finalize` over the store file: entries that still exist
+/// and pass the activity rule (activity whys need a file, the rest a file or
+/// a folder). The app's ignore rules are not applied here.
+pub fn pure_load(store: &str, limit: usize) -> Vec<Item> {
+    let Ok(data) = fs::read(store) else { return Vec::new() };
+    let Ok(Value::Array(raw)) = serde_json::from_slice::<Value>(&data) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for d in &raw {
+        let (Some(path), Some(at)) = (
+            d.get("path").and_then(Value::as_str),
+            d.get("at").filter(|v| v.is_number()).and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let why = d.get("why").and_then(Value::as_str).and_then(Why::from_raw).unwrap_or(Why::Modified);
+        let Some(c) = pure_canonical(path) else { continue };
+        let activity = matches!(why, Why::Created | Why::Modified | Why::Downloaded);
+        let keep = if activity { c.is_file } else { c.is_file || c.is_dir };
+        if keep {
+            out.push(Item { path: c.path, at, why });
+        }
+    }
+    pure_finalize(&out, limit)
+}
+
+/// Atomic write: a unique tmp file beside the store, then `rename`.
+pub fn pure_save(store: &str, items: &[Item]) -> std::io::Result<()> {
+    let path = Path::new(store);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = format!("{store}.tmp.{}", std::process::id());
+    let data = serde_json::to_vec(&items_value(items)).unwrap_or_else(|_| b"[]".to_vec());
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, store).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
+/// `PathShelf.add(paths, why)` against the store file only (read, bump each
+/// path newest-first, write back atomically). Returns the new item list.
+pub fn pure_add(store: &str, paths: &[String], why: Why) -> Vec<Item> {
+    let mut items = pure_load(store, MAX_LIMIT);
+    for p in paths.iter().rev() {
+        let n = pure_normalize(p);
+        let Some(c) = pure_canonical(&n) else { continue };
+        if !(c.is_file || c.is_dir) {
+            continue;
+        }
+        items = pure_bump(&items, &c.path, why, next_stamp(), MAX_LIMIT);
+    }
+    let _ = pure_save(store, &items);
+    items
+}
+
 fn ir_call(method: &str, params: Value) -> Option<Value> {
     PythonHelper::shared().call_default(method, params).ok()
 }
@@ -281,6 +446,9 @@ pub struct PathShelf {
     pub immediate: bool,
     loaded: bool,
     store: String,
+    /// The store's mtime right after our own load / save: a different value
+    /// later means another process (the quick agent) wrote it.
+    last_mtime: Option<SystemTime>,
     items: Vec<Item>,
     snapshot: Vec<Item>,
     pub rules: IgnoreRules,
@@ -303,6 +471,7 @@ impl PathShelf {
             immediate: false,
             loaded: false,
             store,
+            last_mtime: None,
             items: Vec::new(),
             snapshot: Vec::new(),
             rules,
@@ -355,6 +524,7 @@ impl PathShelf {
         if !self.loaded {
             return;
         }
+        self.refresh_from_disk();
         for p in paths.iter().rev() {
             let n = normalize(p);
             let Some(c) = canonical(&n) else { continue };
@@ -449,9 +619,30 @@ impl PathShelf {
             cb();
         }
         save(&self.store, &self.items);
+        self.last_mtime = store_mtime(&self.store);
+    }
+
+    /// Another process (the quick agent adds screenshots) may have written
+    /// the store since we last did: reload when its mtime moved. Cheap (one
+    /// `stat`); call before reading `entries()` or adding.
+    pub fn refresh_from_disk(&mut self) -> bool {
+        if !self.loaded {
+            return false;
+        }
+        let now = store_mtime(&self.store);
+        if now.is_none() || now == self.last_mtime {
+            return false;
+        }
+        self.load();
+        self.snapshot = self.items.clone();
+        if let Some(cb) = &mut self.on_changed {
+            cb();
+        }
+        true
     }
 
     fn load(&mut self) {
+        self.last_mtime = store_mtime(&self.store);
         let Ok(data) = fs::read(&self.store) else { return };
         let Ok(raw) = serde_json::from_slice::<Value>(&data) else {
             return;
@@ -644,6 +835,82 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ws-shelf-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn pure_normalize_matches_the_python_rules() {
+        assert_eq!(pure_normalize("/a/b/../c//d/."), "/a/c/d");
+        assert_eq!(pure_normalize("file:///a%20b/c"), "/a b/c");
+        assert_eq!(pure_normalize("/tmp/x"), "/private/tmp/x");
+        assert_eq!(pure_normalize("/tmp"), "/private/tmp");
+    }
+
+    #[test]
+    fn pure_bump_and_finalize_order_newest_first() {
+        let a = Item { path: "/a".into(), at: 1.0, why: Why::Created };
+        let b = Item { path: "/b".into(), at: 2.0, why: Why::Modified };
+        // Re-bumping an existing path moves it up; an edit keeps the old why.
+        let v = pure_bump(&[b.clone(), a.clone()], "/a", Why::Modified, 3.0, 25);
+        assert_eq!(v[0], Item { path: "/a".into(), at: 3.0, why: Why::Created });
+        // Anything else replaces the why.
+        let v = pure_bump(&v, "/a", Why::Screenshot, 4.0, 25);
+        assert_eq!(v[0].why, Why::Screenshot);
+        // Cap.
+        assert_eq!(pure_bump(&v, "/c", Why::Copied, 5.0, 2).len(), 2);
+        // finalize: sorted by time, deduplicated.
+        let f = pure_finalize(&[a.clone(), b.clone(), a.clone()], 25);
+        assert_eq!(f.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(), vec!["/b", "/a"]);
+    }
+
+    #[test]
+    fn pure_add_merges_with_another_writers_entries_atomically() {
+        let d = tdir("merge");
+        let store = d.join("paths.json").to_string_lossy().into_owned();
+        let f1 = d.join("one.png");
+        let f2 = d.join("two.png");
+        fs::write(&f1, b"x").unwrap();
+        fs::write(&f2, b"y").unwrap();
+        let p1 = f1.to_string_lossy().into_owned();
+        let p2 = f2.to_string_lossy().into_owned();
+        // Writer A (e.g. the main daemon) leaves one entry in the file.
+        pure_save(&store, &[Item { path: pure_canonical(&p1).unwrap().path, at: 10.0, why: Why::Modified }]).unwrap();
+        // Writer B (the quick agent) adds a screenshot: the other entry survives.
+        let items = pure_add(&store, &[p2.clone()], Why::Screenshot);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].why, Why::Screenshot, "newest first");
+        let reread = pure_load(&store, MAX_LIMIT);
+        assert_eq!(reread, items);
+        // No leftover tmp files; a vanished file drops out on load.
+        let leftovers: Vec<_> = fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp+rename leaves no tmp file");
+        fs::remove_file(&f1).unwrap();
+        assert_eq!(pure_load(&store, MAX_LIMIT).len(), 1);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn store_mtime_detects_another_process_write() {
+        let d = tdir("mtime");
+        let store = d.join("paths.json").to_string_lossy().into_owned();
+        assert!(store_mtime(&store).is_none());
+        pure_save(&store, &[]).unwrap();
+        let first = store_mtime(&store);
+        assert!(first.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        pure_save(&store, &[]).unwrap();
+        assert_ne!(store_mtime(&store), first, "a rewrite moves the mtime");
+        let _ = fs::remove_dir_all(&d);
+    }
     use crate::engines::recent_files::{
         FSEVENT_ITEM_CREATED, FSEVENT_ITEM_IS_FILE, FSEVENT_ITEM_RENAMED,
     };

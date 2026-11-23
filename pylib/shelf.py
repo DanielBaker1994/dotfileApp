@@ -110,8 +110,12 @@ def save(path, items) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         data = [{"path": i.get("path"), "at": i.get("at"), "why": i.get("why")}
                 for i in items or []]
-        with open(path, "w", encoding="utf-8") as fh:
+        # atomic (tmp + rename): the quick agent process reads and writes the
+        # same file, so a reader must never see a half-written one
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
+        os.replace(tmp, path)
     except OSError:
         pass
 
