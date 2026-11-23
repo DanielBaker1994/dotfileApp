@@ -19,6 +19,11 @@ path": the app talks to it over a persistent JSON-lines helper protocol.
 The Compare view (text + folder diff) was removed in Nov 2026 by owner
 decision; don't bring it back.
 
+**Two processes.** The shared-window app above is the *main* app. Hyper+S (the
+palette) and Hyper+X (screenshot) are owned by a small separate resident
+process, the **quick agent** (`kitchen-sink quick`, see "Quick agent" below), so
+both work with the main app not running.
+
 History: the app was Swift until the Phase-4 cutover (Oct 2026); the Rust
 port mirrors the old Swift files module for module, and Swift type names
 survive in comments (`SwitcherController`,
@@ -377,6 +382,9 @@ socket; files, jira, confluence, ai). Replies > 8 KB are fine
 stray windows) before the toggle. Tool-panel hotkeys (Hyper+X screenshot) are
 not in that list. `[screenshot] text-column-gap` (× line height; 0 = off) makes
 Copy Text join wide-gapped blocks on a row with a tab so tables keep columns.
+**Hyper+S / Hyper+X live in the quick agent** (below), not in the main
+daemon; the main daemon keeps `show` / `do:` / `screenshot` on its own socket
+for in-window use and tests. The rules in this paragraph apply to both.
 **Hyper+S never activates kitchen-sink.** The palette and every popup it opens
 (tool panels, terminal, paths, screenshot, note finders) are non-activating
 panels that take the keyboard without activating the app; only a pick of
@@ -391,6 +399,62 @@ Print), then the AeroSpace workspaces with their app icons (cached, refreshed
 off-main). No side-by-side panes, no Tab pane switch. Ctrl+B W's `/` commands
 keep the full `in-palette` list. `bin/kitchen_sink.sh` toggles a running
 daemon before its lock / aerospace query, so the press costs one socket write.
+
+### Quick agent (Hyper+S / Hyper+X)
+
+`kitchen-sink quick [show|screenshot]` (`app/quick.rs`, `main.rs` `run_quick`,
+`cli.rs` `Outcome::Quick`) is a mode of the SAME signed bundle (so the existing
+Screen Recording grant applies): an Accessory app with no status item, a minimal
+main menu (Edit shortcuts), **no `SwitcherController`, no shared window, no
+registry, no Python worker pool** (config is read by pure scans:
+`config::read_config_text_pure` / `merge_override_pure`, `host::parse_sections`).
+It owns the palette (`PalettePanel`), the tool panels `prettyprint` / `filefast`
+/ `text-table`, the paths shelf window ("Find Recent Files"), find-window and
+the `ScreenshotController` + overlay. Event driven: every socket request is one
+main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
+
+- **Socket** `$TMPDIR/ks-quick.sock` (`Paths::quick_socket_path`, lock beside it
+  `…sock.lock`, `DaemonLock`; the name is the constant `QUICK_SOCKET_NAME`, not a config key).
+  Verbs: `ping`, `toggle` / `show` / `hide` / `quit`, `state` (JSON: `pid`,
+  `palette`, `paths`, `tools`, `openTools`, `screenshotBusy`),
+  `screenshot[\tWORDS]` (same words / raw-reply semantics as the main daemon,
+  shared `views::screenshot::run_screenshot_message`), `screenshot-permission`.
+  Everything else (`do:`, `reload`, `pane-shot`, …) is the main socket's.
+- **CLI**: `kitchen-sink toggle` / `quick-toggle`, `quick-show`, `quick-quit`,
+  `quick-state`, `quick-screenshot [words]` (quick only; exit 1 = no agent),
+  `screenshot [words]` (quick, then a running main daemon, then
+  `bin/kitchen_sink.sh screenshot`). `kitchen-sink quick` with an agent already
+  holding the lock just delivers its action and exits (`open -n` starts a
+  second process).
+- **Launch**: `bin/kitchen_sink.sh` (no mode) and `bin/kitchen_sink.sh
+  screenshot` first try `quick-toggle` / `quick-screenshot` (one socket write);
+  a cold start is `open -n -g kitchen-sink.app --args quick show|screenshot`
+  (LaunchServices, for TCC). The aerospace Hyper+S / Hyper+X bindings both call
+  the script. The script's main-app cold starts (`kill_main`) spare the agent;
+  `./ws build` / `bin/lib.sh` stops (`pkill -f …/Contents/MacOS`) kill it too —
+  the next press cold-starts it again.
+- **Login**: `bin/quick-agent.sh install|uninstall|status` writes the LaunchAgent
+  `~/Library/LaunchAgents/dev.danielbaker.kitchen-sink.quick.plist` from
+  `config/launchd/…plist` (runs `open -g -n <app> --args quick`; INSTALL.sh
+  installs it, UNINSTALL.sh removes it).
+- **Restart / stop**: `kitchen-sink quick-quit` (then any Hyper+S press starts a
+  fresh one), or `bin/kitchen_sink.sh quick`. Logs go to the usual
+  `logs/YYYY_MM_DD/daemon.log` (`quick: …`, `hotkey: toggle recv->shown Nms`).
+- **Picks**: agent-owned commands open locally (`quick::route_command`);
+  workspaces via AeroSpace IPC; everything else (views, "Bansho"/`window`,
+  terminal, jira-config, health) is forwarded to `ws-notes.sock`
+  (`quick::forward_to_main`; `jira-config` → `jira-dashboard`, `terminal` →
+  `term`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
+  nothing answers. Screenshot / paths "reveal in Files" send `reveal\tPATH…` to
+  the main socket (`host::set_reveal_hook`; lost if the main app is down).
+- **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
+  `PathShelf` via Python `shelf.save`, agent via `path_shelf::pure_add`); both
+  write tmp + rename, and the main shelf reloads when the file's mtime moved
+  (`PathShelf::refresh_from_disk`). The agent has no Recent-files FSEvents feed:
+  it shows what is on disk and adds screenshots.
+- **Not in the agent**: rename / compress / trash in the paths shelf (rows menu
+  offers open / reveal / copy), the screenshot `do:` hooks (registered only in
+  the main daemon), health checks, the terminal panel.
 
 ### Keyboard / focus
 
@@ -477,6 +541,8 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   Hyper+KEY → `config/aerospace/aerospace.toml` binding (then `aerospace
   reload-config --dry-run --no-gui`), `hotkey::HOTKEY_MODES` + the host's
   `toggle_command`, `bin/kitchen_sink.sh`, `commands.toml [shortcuts]`, docs.
+  Hyper+S / Hyper+X are the exception: they go to the quick agent
+  (`app/quick.rs`, `quick::route_command`).
 - **Add a view:** extend `SlotView` + nav ids, `content_for`, the registry
   (`app/registry.rs`), and the `[section]` + `enabled` gate.
 - **Add a socket `do:` hook:** `do_host_action` or a view's registry hook
