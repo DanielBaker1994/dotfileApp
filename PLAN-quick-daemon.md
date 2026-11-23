@@ -1,8 +1,8 @@
 # PLAN — Hyper+S / Hyper+X independent of the main app, plus responsiveness
 
-Status: Phase 0 landed (e503871, 63f038f); Phase 1 implemented 2026-11-23
-(quick agent, `app/quick.rs`; awaiting live test + login-item install); Phases 2-3
-not started. Proposed 2026-11-23. Owner request: Hyper+S (palette) and Hyper+X
+Status: Phase 0 landed (e503871, 63f038f); Phase 1 landed + live-verified
+2026-11-23 (quick agent); Phase 2 landed 2026-11-23 (`rust/ks-core`, see below);
+Phase 3 not started. Proposed 2026-11-23. Owner request: Hyper+S (palette) and Hyper+X
 (screenshot) must work with the main kitchen-sink (Bansho) app not running;
 treat them as a shared module; make the app feel faster.
 
@@ -129,7 +129,7 @@ treat them as a shared module; make the app feel faster.
   starts a capture; picks of agent tools work; a view pick cold-starts the
   main app. With both running, no double palettes. TCC grant reused.
 
-### Phase 2 — shared crate (`rust/ks-quick-core`)
+### Phase 2 — shared crate (`rust/ks-core`) — DONE 2026-11-23
 
 Move what the agent actually imports (from Phase 1's `use` list):
 `platform::*`, `ui::{popup, theme, chrome, style, list_panel, view_base,
@@ -137,7 +137,23 @@ toast, menu_kit, preview_ring}`, `views::{switcher (palette half), tools,
 paths, screenshot}`, `engines::{screenshot_*, pane_shot, path_shelf,
 list_filter, switcher_status, recent_files}`, `app::{hotkey (AeroIpc),
 paths, config (pure parts)}` into a lib crate; `ws-rs` depends on it.
-Enforced boundary: the lib crate cannot see `host.rs`. Optional Phase 3: a
+Enforced boundary: the lib crate cannot see `host.rs`.
+
+Result: crate `ks-core` (lib `ks_core`) holds `platform`, all of `ui` except
+`shared_window`/`jira_setup`, `panes`, `views::{switcher, tools, paths, screenshot,
+files, files_view, file_popup}`, the engines the agent uses, and `app::{quick, cli,
+socket, config, paths, pathfmt, logging, hotkey, menu, process_run, python_helper,
+registry, sections, find_window, hooks}`. `app::quick` itself moved in, so the
+agent provably cannot depend on `host.rs`. Edges to the main daemon are cut with
+`ks_core::app::hooks` slots (reveal, shelf add, click-rename cancel, popup file
+actions, popup rename) that `host.rs` installs in `install_daemon_ui`; `config`
+no longer reaches `views::jira` (`parse_columns` moved to `config`); `host.rs`
+re-exports the pure section scans / `run_find_window` from the lib. ws-rs keeps
+`pub use ks_core::…` re-exports so `crate::` paths are unchanged. `registry.rs`
+(plain data types, no host dependency) moved too. Stayed in ws-rs: `host.rs`,
+`shared_window`, jira/confluence/ai/terminal/inspector views, `jira_poll`,
+`synth_input`, `ai_format`, the egui frontend. Phase 3 (separate binary) can now
+be a thin `[[bin]]` calling `ks_core::app::quick`. Optional Phase 3: a
 separate `ks-quick` binary in a nested helper bundle (smaller, faster cold
 start; costs one Screen Recording grant).
 

@@ -47,7 +47,7 @@ echo
 echo "## 2. Stub markers"
 echo
 echo '```'
-rg -n -i 'not modelled|not ported|not yet ported|unimplemented!|todo!\(' rust/ws-rs/src | sed 's#rust/ws-rs/src/##' || true
+rg -n -i 'not modelled|not ported|not yet ported|unimplemented!|todo!\(' rust/ws-rs/src rust/ks-core/src | sed 's#rust/ws-rs/src/##' || true
 echo '```'
 echo
 
@@ -60,7 +60,7 @@ echo "| verb | Rust |"
 echo "|---|---|"
 for v in $swift_verbs; do
   if grep -qx "$v" <<<"$stubbed"; then s="❌ stub (logs only)"
-  elif grep -q "\"$v\"" "$HOST" rust/ws-rs/src/app/registry.rs rust/ws-rs/src/views/*.rs; then s="✅ handled"
+  elif grep -q "\"$v\"" "$HOST" rust/ks-core/src/app/registry.rs rust/ws-rs/src/views/*.rs rust/ks-core/src/views/*.rs; then s="✅ handled"
   else s="❌ missing"; fi
   echo "| \`$v\` | $s |"
 done

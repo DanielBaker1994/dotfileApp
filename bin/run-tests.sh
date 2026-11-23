@@ -11,7 +11,7 @@ rust_test() {
     echo "Running cargo test ${1:-(workspace)}..."
     command -v cargo >/dev/null 2>&1 || { echo "cargo not found — install Rust" >&2; return 1; }
     if [ -n "${1:-}" ]; then
-        (cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/rust/target" cargo test -q -p ws-rs "$1")
+        (cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/rust/target" cargo test -q -p ws-rs -p ks-core "$1")
     else
         (cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/rust/target" cargo test -q)
     fi

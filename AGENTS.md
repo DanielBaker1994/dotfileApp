@@ -99,7 +99,7 @@ Don't export `MACOSX_DEPLOYMENT_TARGET=26.7` (corrupt proc-macro dylibs).
 **Tests.** `./ws test SUITE` → `bin/run-tests.sh SUITE`. `all` (the default)
 runs the Python suites with no case of their own (`test_jira_poll.py`,
 `test_confluence.py`, `test_notifications.py`) plus
-the whole cargo workspace; module cases map to `cargo test -p ws-rs <module>`
+the whole cargo workspace; module cases map to `cargo test -p ws-rs -p ks-core <module>`
 (`filter`, `paths`, `screenshot`, `ansi`, `prose` (= `engines::ai_format`), `panes`,
 `vim-keys`, `recent`, `helper-client`),
 the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
@@ -255,30 +255,58 @@ gitignored.
 
 ### Rust workspace (`rust/`)
 
-- `ws-rs` — the app binary `kitchen-sink` (~65k lines; objc2 0.6, block2,
-  dispatch2, serde, libc; **no tokio** — std threads + a main-thread drain timer).
+- `ks-core` — the shared library crate (lib name `ks_core`; objc2 deps, **no
+  dependency on ws-rs**: the compiler enforces that `host.rs`, the controller and
+  the shared window are invisible to it). Everything the quick agent runs lives
+  here, plus the framework the main daemon shares:
+  - `platform/` — all cross-platform seams (clipboard, dispatch, ipc, lock,
+    screens, capture, settings).
+  - `app/` — `quick.rs` (the quick agent), `cli.rs` (client side), `socket.rs`
+    (server, `Reply`, `DaemonLock`), `config.rs`, `paths.rs`, `pathfmt.rs`,
+    `logging.rs`, `hotkey.rs` (AeroSpace), `menu.rs`, `process_run.rs`,
+    `python_helper.rs`, `registry.rs` (`SlotView`, `Registry`, `PaletteCommand`:
+    plain data types the screenshot view registers `do:` hooks into),
+    `sections.rs` (pure `commands.toml` scans), `find_window.rs`, and
+    **`hooks.rs`** — the seam for what only a host can do (below).
+  - `ui/` — every UI-framework module except `shared_window.rs` and
+    `jira_setup.rs` (popup, popup_keys, theme, chrome, style, list_panel,
+    view_base, toast, menu_kit, preview_ring, sidebar, field, ...).
+  - `views/` — `switcher`, `tools`, `paths`, `screenshot`, `files`,
+    `files_view`, `file_popup`.
+  - `engines/` — config_text, file_ops, list_filter, pane_shot, path_shelf,
+    recent_files, screenshot_annotations/text, switcher_status, text_edit_keys,
+    ansi_render. `panes/` — pane_nav, pane_geometry, vim_keys, vim_search.
+  - **Hooks** (`app::hooks`): `set_reveal_hook` / `reveal_in_files`,
+    `set_shelf_add_hook` / `screenshot_saved_to_path_shelf` (default:
+    `path_shelf::pure_add`), `set_cancel_click_rename_hook`,
+    `set_popup_file_actions_hook` / `popup_file_menu_actions`,
+    `set_popup_rename_hook` / `popup_rename_commit` (default: `rename_into`).
+    First installer wins; the main daemon installs its `daemon_ui`
+    implementations at the top of `install_daemon_ui`, the quick agent installs
+    only the reveal hook (forward to the main socket). Shared code must call the
+    `hooks::` free functions, never reach for the host.
+  - Rule: **never `use` ws-rs from ks-core.** Need something from the main
+    daemon? Add a slot to `hooks.rs`.
+- `ws-rs` — the app binary `kitchen-sink` (depends on `ks-core`; objc2 0.6,
+  block2, dispatch2, serde, libc; **no tokio** — std threads + a main-thread
+  drain timer). The moved modules are re-exported (`pub use ks_core::ui::popup;`
+  in `ui/mod.rs`, `use ks_core::platform;` in `main.rs`, ...) so `crate::ui::…`
+  paths in ws-rs are unchanged; new shared code goes in ks-core, and a module
+  moved there must be added to the matching re-export list.
   - `main.rs` — one-shots (`help`, `config-schema`, `config-check`),
     `AppInstall::ensure_home`, the CLI client pass, then the daemon
-    (`run_daemon`: socket server, NSApplication, status item, daemon UI).
-  - `app/` — `cli.rs` (the client side: forward to a running daemon, print
-    replies, `pane-shot`/`screenshot` clients, cold starts via
-    `kitchen_sink.sh`, lock hand-over), `host.rs` (`SwitcherController`:
-    `ControllerInner` slot state machine, `state_json`, `do_host_action`,
-    raw verbs, and the `daemon_ui` module — the shared host window, key
-    routing, tool panels), `socket.rs` (server, `Reply` deferred replies,
-    `DaemonLock`), `config.rs` (`AppSettings`, `[app]`), `paths.rs`,
-    `registry.rs` (`SlotView`, view registry, palette commands, `do:` hooks),
-    `hotkey.rs` (AeroSpace prep), `menu.rs`, `python_helper.rs`, `process_run.rs`.
-  - `ui/` — `popup.rs` (popup framework + `route_key`), `shared_window.rs`,
-    `card.rs`, `chrome.rs`, `theme.rs`.
-  - `views/` — `files.rs`, `jira.rs`, `pane_find.rs` (jira-jump + `/` pane finder),
-    `confluence.rs`, `ai.rs`, `screenshot.rs`, `paths.rs`,
-    `switcher.rs` (palette + view switcher), `terminal.rs`, `tools.rs`,
-    `inspector.rs`, `setup.rs` (`AppInstall` + setup UI).
-  - `engines/` — pure logic (ai_format, ansi_render, config_text, file_ops,
-    list_filter, pane_shot, path_shelf, recent_files,
-    screenshot_annotations/text, switcher_status, text_edit_keys).
-  - `panes/` — pane_nav, pane_geometry, vim_keys, vim_search.
+    (`run_daemon`: socket server, NSApplication, status item, daemon UI) and
+    `run_quick` (the entry for `kitchen-sink quick`).
+  - `app/` — `host.rs` (`SwitcherController`: `ControllerInner` slot state
+    machine, `state_json`, `do_host_action`, raw verbs, and the `daemon_ui`
+    module — the shared host window, key routing, tool panels), plus
+    `jira_poll.rs`, `synth_input.rs` and re-exports.
+  - `ui/` — `shared_window.rs`, `jira_setup.rs` (the rest is in ks-core).
+  - `views/` — `jira.rs`, `pane_find.rs` (jira-jump + `/` pane finder),
+    `confluence.rs`, `ai.rs`, `terminal.rs`, `inspector.rs`, `setup.rs`
+    (`AppInstall` + setup UI), the jira/confluence/ai views.
+  - `engines/` — ai_format only.
+  - `frontend_egui/` — the non-macOS UI.
 - `ws-helpers` — `dock_badges` + `webex_unread` AX helpers (run by
   `notify/notify_poll.py`).
 - `swiftterm-shim` — the one Swift piece: `WSShim`, a tiny `NSView` around the
@@ -402,8 +430,9 @@ daemon before its lock / aerospace query, so the press costs one socket write.
 
 ### Quick agent (Hyper+S / Hyper+X)
 
-`kitchen-sink quick [show|screenshot]` (`app/quick.rs`, `main.rs` `run_quick`,
-`cli.rs` `Outcome::Quick`) is a mode of the SAME signed bundle (so the existing
+`kitchen-sink quick [show|screenshot]` (`ks-core/src/app/quick.rs`, `main.rs`
+`run_quick`, `cli.rs` `Outcome::Quick` — all in the `ks-core` crate, which cannot
+see `host.rs`) is a mode of the SAME signed bundle (so the existing
 Screen Recording grant applies): an Accessory app with no status item, a minimal
 main menu (Edit shortcuts), **no `SwitcherController`, no shared window, no
 registry, no Python worker pool** (config is read by pure scans:
@@ -446,7 +475,7 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   (`quick::forward_to_main`; `jira-config` → `jira-dashboard`, `terminal` →
   `term`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
   nothing answers. Screenshot / paths "reveal in Files" send `reveal\tPATH…` to
-  the main socket (`host::set_reveal_hook`; lost if the main app is down).
+  the main socket (`hooks::set_reveal_hook`; lost if the main app is down).
 - **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
   `PathShelf` via Python `shelf.save`, agent via `path_shelf::pure_add`); both
   write tmp + rename, and the main shelf reloads when the file's mtime moved

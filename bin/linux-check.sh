@@ -7,7 +7,7 @@
 # Linux surfaces exactly the AppKit leaks the later waves fix.
 #
 #   bin/linux-check.sh check          # cargo check --workspace --all-targets
-#   bin/linux-check.sh test [filter]  # cargo test -p ws-rs -- [filter] + python suites
+#   bin/linux-check.sh test [filter]  # cargo test -p ws-rs -p ks-core -- [filter] + python suites
 #   bin/linux-check.sh shell          # interactive shell in the image
 set -euo pipefail
 
@@ -41,7 +41,7 @@ case "${1:-check}" in
         ;;
     test)
         shift || true
-        _run /repo/rust cargo test -p ws-rs -- "$@"
+        _run /repo/rust cargo test -p ws-rs -p ks-core -- "$@"
         # The plain-script suites with no `cargo test` case of their own.
         for t in Tests/test_config_text.py Tests/test_file_ops.py \
                  Tests/test_jsonmgr.py Tests/test_snippet_render.py; do
