@@ -1649,6 +1649,98 @@ pub fn read_config_text() -> Option<String> {
     read_config_text_at(&commands_conf_path()).map(|t| apply_override(&t))
 }
 
+/// `read_config_text` without the Python helper: the quick agent must not
+/// start a worker pool, so the override is laid over the repo file by a
+/// plain line scan ([`merge_override_pure`]) instead of the `config.*`
+/// codec. A missing / empty override leaves the repo text untouched.
+pub fn read_config_text_pure() -> Option<String> {
+    let base = read_config_text_at(&commands_conf_path())?;
+    let over = commands_override_path().and_then(|p| read_config_text_at(&p));
+    Some(match over {
+        Some(o) if !o.trim().is_empty() => merge_override_pure(&base, &o),
+        _ => base,
+    })
+}
+
+/// `(section, [(key, raw "key = value" line)])` of a config text, in file
+/// order; a repeated key keeps its last line.
+fn scan_entries(text: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for line in text.strip_prefix('\u{feff}').unwrap_or(text).lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            let name = name.trim().to_string();
+            if !out.iter().any(|(s, _)| *s == name) {
+                out.push((name, Vec::new()));
+            }
+            continue;
+        }
+        let Some((k, _)) = t.split_once('=') else { continue };
+        let key = k.trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        // Keys before any header are not part of a section.
+        let Some(last) = out.last_mut() else { continue };
+        last.1.retain(|(existing, _)| *existing != key);
+        last.1.push((key, t.to_string()));
+    }
+    out
+}
+
+/// Python-free [`merge_override`]: every `[section] key` of `over` replaces
+/// the same key's line in `base` (in place), is added at the end of its
+/// section, or brings a new section along.
+pub fn merge_override_pure(base: &str, over: &str) -> String {
+    let mut lines: Vec<String> =
+        base.strip_prefix('\u{feff}').unwrap_or(base).lines().map(str::to_string).collect();
+    let header_of = |l: &str| -> Option<String> {
+        let t = l.trim();
+        t.strip_prefix('[').and_then(|r| r.strip_suffix(']')).map(|n| n.trim().to_string())
+    };
+    for (section, entries) in scan_entries(over) {
+        for (key, raw) in entries {
+            // The section's line range [start, end) in the current text.
+            let start = lines.iter().position(|l| header_of(l).as_deref() == Some(section.as_str()));
+            let Some(start) = start else {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(format!("[{section}]"));
+                lines.push(raw);
+                continue;
+            };
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| header_of(l).is_some())
+                .map_or(lines.len(), |i| start + 1 + i);
+            let hit = (start + 1..end).find(|&i| {
+                let t = lines[i].trim();
+                !t.starts_with('#') && t.split_once('=').is_some_and(|(k, _)| k.trim() == key)
+            });
+            match hit {
+                Some(i) => lines[i] = raw,
+                None => {
+                    // After the section's last non-blank line.
+                    let at = (start + 1..end)
+                        .rev()
+                        .find(|&i| !lines[i].trim().is_empty())
+                        .map_or(start + 1, |i| i + 1);
+                    lines.insert(at, raw);
+                }
+            }
+        }
+    }
+    let mut text = lines.join("\n");
+    if base.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
 /// The launch-time check of the config paths (same report as
 /// `bin/check-overrides.sh`): one log line per file, plus a warning when an
 /// old `~/.config/jira` / `~/.config/confluence` folder exists (no longer read).
@@ -1820,6 +1912,22 @@ pub fn handle_escape(query_is_empty: bool) -> EscapeAction {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pure_override_merge_replaces_adds_and_appends() {
+        let base = "[app]\nshell = \"a\"\npalette = \"x\"\n\n[screenshot]\nhistory = 20\n";
+        let over = "# mine\n[app]\npalette = \"paths, filefast\"\nextra = 1\n[new]\nk = v\n";
+        let m = merge_override_pure(base, over);
+        assert_eq!(
+            m,
+            "[app]\nshell = \"a\"\npalette = \"paths, filefast\"\nextra = 1\n\n[screenshot]\nhistory = 20\n\n[new]\nk = v\n"
+        );
+        // No override keys: the base text is unchanged.
+        assert_eq!(merge_override_pure(base, "# nothing\n"), base);
+        // The last duplicate in the override wins.
+        let m2 = merge_override_pure("[a]\nk = 1\n", "[a]\nk = 2\nk = 3\n");
+        assert_eq!(m2, "[a]\nk = 3\n");
+    }
     use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
