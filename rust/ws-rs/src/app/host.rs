@@ -194,6 +194,50 @@ pub type UiQueue = Arc<Mutex<Vec<UiCommand>>>;
 /// drains this alongside the [`UiQueue`]; headless controllers run inline.
 pub type MainQueue = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
+/// Called (from any thread) after a [`UiCommand`] or main job is queued, so the
+/// daemon UI drains immediately instead of on its next timer tick.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// Coalesces wakes: while one dispatch is pending, further `wake()` calls are
+/// no-ops. The main-thread handler calls `clear()` *before* draining, so a push
+/// that lands mid-drain schedules a fresh dispatch.
+pub struct CoalescingWaker {
+    pending: std::sync::atomic::AtomicBool,
+    dispatch: Box<dyn Fn() + Send + Sync>,
+}
+
+impl CoalescingWaker {
+    pub fn new(dispatch: impl Fn() + Send + Sync + 'static) -> Self {
+        Self { pending: std::sync::atomic::AtomicBool::new(false), dispatch: Box::new(dispatch) }
+    }
+
+    /// Schedule one dispatch unless one is already pending.
+    pub fn wake(&self) {
+        if !self.pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            (self.dispatch)();
+        }
+    }
+
+    /// The pending dispatch started running; allow the next `wake()`.
+    pub fn clear(&self) {
+        self.pending.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Seconds between daemon UI poll ticks: fast while any window/panel is up,
+/// slow when everything is hidden.
+#[allow(dead_code)]
+pub(crate) fn poll_interval_secs(active: bool) -> f64 {
+    if active { 0.03 } else { 0.25 }
+}
+
+/// Whether a poll is due (`tol` absorbs timer jitter so a 30 ms timer does not
+/// skip every other tick against a 30 ms interval).
+#[allow(dead_code)]
+pub(crate) fn poll_due(last: f64, now: f64, interval: f64) -> bool {
+    now - last >= interval - 0.005
+}
+
 /// The Hyper+S palette's rows: `[app] palette` picks and orders them (an id
 /// with no enabled command is skipped); an empty list keeps every palette
 /// command. The Ctrl+B W `/` commands keep the full list.
@@ -276,6 +320,8 @@ struct ControllerInner {
     /// The daemon UI's command queue (`install_ui`); `None` = headless (tests).
     ui_queue: Option<UiQueue>,
     main_queue: Option<MainQueue>,
+    /// Wakes the daemon UI after a push (`install_waker`); `None` = headless.
+    waker: Option<Waker>,
 }
 
 impl ControllerInner {
@@ -345,6 +391,9 @@ impl ControllerInner {
     fn ui_push(&self, cmd: UiCommand) {
         if let Some(q) = &self.ui_queue {
             q.lock().unwrap().push(cmd);
+            if let Some(w) = &self.waker {
+                w();
+            }
         }
     }
 
@@ -731,6 +780,7 @@ impl SwitcherController {
             logs: Vec::new(),
             ui_queue: None,
             main_queue: None,
+            waker: None,
         };
         SwitcherController {
             inner: Arc::new(Mutex::new(inner)),
@@ -949,6 +999,11 @@ impl SwitcherController {
         self.inner.lock().unwrap().main_queue = Some(queue);
     }
 
+    /// Install the waker called after every UI command / main job push.
+    pub fn install_waker(&self, waker: Waker) {
+        self.inner.lock().unwrap().waker = Some(waker);
+    }
+
     /// Run `work` on the main thread, waiting up to `timeout` — Swift's
     /// `testQuery` main hop. `None` on timeout (the caller replies
     /// `{"error":"timeout"}`). Inline when already on main or headless.
@@ -962,12 +1017,18 @@ impl SwitcherController {
             return Some(work());
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let queue = self.inner.lock().unwrap().main_queue.clone();
+        let (queue, waker) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.main_queue.clone(), inner.waker.clone())
+        };
         match queue {
             Some(q) => {
                 q.lock().unwrap().push(Box::new(move || {
                     let _ = tx.send(work());
                 }));
+                if let Some(w) = waker {
+                    w();
+                }
                 rx.recv_timeout(timeout).ok()
             }
             None => Some(work()),
@@ -2264,9 +2325,17 @@ impl SwitcherController {
     /// Queue `work` on the main thread without waiting (Swift's
     /// `DispatchQueue.main.async`); inline when headless.
     fn post_main(&self, work: impl FnOnce() + Send + 'static) {
-        let queue = self.inner.lock().unwrap().main_queue.clone();
+        let (queue, waker) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.main_queue.clone(), inner.waker.clone())
+        };
         match queue {
-            Some(q) => q.lock().unwrap().push(Box::new(work)),
+            Some(q) => {
+                q.lock().unwrap().push(Box::new(work));
+                if let Some(w) = waker {
+                    w();
+                }
+            }
             None => work(),
         }
     }
@@ -2291,6 +2360,7 @@ impl SwitcherController {
                 let _ = c.handle(&words);
                 #[cfg(target_os = "macos")]
                 c.redraw_overlays();
+                crate::app::logging::log_hotkey_shown(Some("screenshot"));
                 let finished = c.is_idle();
                 (finished, if finished { c.reply.take() } else { None })
             };
@@ -3349,16 +3419,23 @@ mod daemon_ui {
         jira: Option<(crate::views::jira_view::JiraList, Retained<crate::views::jira_view::JiraView>)>,
         /// The Ctrl+B prefix machine (`SharedWindow.prefixKey`).
         prefix: popup::PrefixState,
-        /// The `show` palette (commands + workspaces).
-        palette: Option<PalettePanel>,
         /// The Ctrl+B W view switcher (a second `ViewSwitcherPanel`).
         switcher: Option<ViewSwitcherPanel>,
+        /// The Cmd+/ shortcuts sheet while it is up.
+        shortcuts: Option<Retained<crate::ui::shortcuts::ShortcutsOverlay>>,
+    }
+
+    /// The standalone panels (palette, tool panels, paths shelf, terminal
+    /// popup). They never show the shared window, so they live outside
+    /// `DaemonUiState` and do not force `build_window`.
+    #[derive(Default)]
+    struct PanelState {
+        /// The `show` palette (commands + workspaces).
+        palette: Option<PalettePanel>,
         /// The `/paths` shelf tool window.
         paths: Option<PathsWindow>,
         /// The `/terminal` tool panel (`do:term` / Ctrl+B T).
         terminal_panel: Option<TerminalPanel>,
-        /// The Cmd+/ shortcuts sheet while it is up.
-        shortcuts: Option<Retained<crate::ui::shortcuts::ShortcutsOverlay>>,
         /// The `openTool` panels (prettyprint / filefast / health-checks).
         tools: HashMap<String, ToolPanel>,
         /// When each tool panel was opened (the `reclaimToolKey` window).
@@ -3801,7 +3878,14 @@ mod daemon_ui {
         queue: UiQueue,
         /// The `do:` main-hop jobs (`SwitcherController::run_on_main`).
         main_queue: MainQueue,
+        /// Coalescing wake-on-enqueue (see `install_daemon_ui`).
+        wake: Arc<super::CoalescingWaker>,
+        /// Last full poll tick (`now_secs`) and the cadence it chose.
+        last_poll: Cell<f64>,
+        fast_mode: Cell<bool>,
         state: RefCell<Option<DaemonUiState>>,
+        /// Palette / tool / paths / terminal panels (no shared window needed).
+        panels: RefCell<PanelState>,
         /// The Esc streak (`escStreakCloses`): consecutive Esc presses within
         /// 0.6 s; any other key resets it.
         esc_streak: Cell<u32>,
@@ -3855,7 +3939,7 @@ mod daemon_ui {
             /// The main-thread drain: apply every queued UI command.
             #[unsafe(method(drain:))]
             fn drain(&self, _timer: &NSTimer) {
-                self.apply_pending();
+                self.timer_tick();
             }
 
             /// A view-switcher button: route the tag as a nav id.
@@ -3896,6 +3980,19 @@ mod daemon_ui {
         // Held for the delayed `prewarm()` (the `controller` itself moves into
         // the UI ivars below).
         let shot_prewarm = controller.screenshot_controller();
+        // Wake-on-enqueue: one pending main-queue dispatch at a time.
+        let wake = Arc::new(super::CoalescingWaker::new(|| {
+            crate::platform::run_on_main(|| {
+                let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
+                if let Some(ui) = ui {
+                    ui.wake_run();
+                }
+            });
+        }));
+        {
+            let w = wake.clone();
+            controller.install_waker(Arc::new(move || w.wake()));
+        }
         let this = DaemonUi::alloc(mtm).set_ivars(DaemonUiIvars {
             strip_result: Arc::new(std::sync::Mutex::new(None)),
             strip_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3907,7 +4004,11 @@ mod daemon_ui {
             controller,
             queue,
             main_queue,
+            wake: wake.clone(),
+            last_poll: Cell::new(0.0),
+            fast_mode: Cell::new(true),
             state: RefCell::new(None),
+            panels: RefCell::new(PanelState::default()),
             esc_streak: Cell::new(0),
             last_esc_at: Cell::new(0.0),
             key_monitor: RefCell::new(None),
@@ -3948,6 +4049,12 @@ mod daemon_ui {
         // The Recent seed runs `mdfind`: start it after launch settles.
         dispatch2::DispatchQueue::main()
             .after(dispatch2::DispatchTime::NOW.time(2_000_000_000), configure_recent_and_shelf)
+            .ok();
+        // Build the (hidden) palette panel so the first Hyper+S skips it.
+        dispatch2::DispatchQueue::main()
+            .after(dispatch2::DispatchTime::NOW.time(1_500_000_000), || {
+                on_ui(|ui| ui.prewarm_palette());
+            })
             .ok();
         // `ScreenshotController.prewarm()` ~1.5 s after launch: SCK + OCR warm
         // so the first capture / first OCR does not pay the cold cost. The OCR
@@ -4051,8 +4158,10 @@ mod daemon_ui {
     }
 
     impl DaemonUi {
-        fn apply_pending(&self) {
-            self.poll_files_dir();
+        /// Cheap enqueue-driven drain (UI commands, the settling syncs, main
+        /// jobs). Runs from the waker the moment something is queued and as
+        /// part of every due timer tick.
+        fn apply_commands(&self) {
             // UI commands first, then the settling syncs, then the blocking
             // `do:` jobs: a `do:` caller waits on a main-queue job and must see
             // the window it just asked for (`views.*` / `windows`).
@@ -4129,13 +4238,6 @@ mod daemon_ui {
             }
             self.sync_tools();
             self.sync_member_states();
-            self.watch_focus();
-            self.live_pane_refresh();
-            self.refresh_workspace_strip();
-            self.refresh_files_recent();
-            self.refresh_jira();
-            self.poll_conf_hits();
-            self.poll_ai();
             if let Some(mtm) = MainThreadMarker::new() {
                 self.ivars()
                     .controller
@@ -4153,6 +4255,77 @@ mod daemon_ui {
                     job();
                 }
             }
+        }
+
+        /// The periodic observers (file/focus/Jira/AI/Confluence polls).
+        fn poll_tick(&self) {
+            self.poll_files_dir();
+            self.watch_focus();
+            self.live_pane_refresh();
+            self.refresh_workspace_strip();
+            self.refresh_files_recent();
+            self.refresh_jira();
+            self.poll_conf_hits();
+            self.poll_ai();
+        }
+
+        /// The repeating 30 ms timer: a cheap gate, then a full tick when due
+        /// (30 ms while any window/panel is up, 250 ms when everything is
+        /// hidden). Commands do not wait for it: the waker drains them.
+        fn timer_tick(&self) {
+            let now = now_secs();
+            let iv = super::poll_interval_secs(self.ivars().fast_mode.get());
+            if !super::poll_due(self.ivars().last_poll.get(), now, iv) {
+                return;
+            }
+            self.ivars().last_poll.set(now);
+            self.apply_commands();
+            self.poll_tick();
+            self.ivars().fast_mode.set(self.compute_fast_mode());
+        }
+
+        /// The waker's main-thread body.
+        fn wake_run(&self) {
+            self.ivars().wake.clear();
+            self.apply_commands();
+            self.ivars().fast_mode.set(self.compute_fast_mode());
+        }
+
+        /// Is the shared window or any palette/tool/terminal/paths/screenshot
+        /// panel up (so polls must stay at the fast cadence)?
+        fn compute_fast_mode(&self) -> bool {
+            if let Ok(state) = self.ivars().state.try_borrow() {
+                if state.as_ref().is_some_and(|st| st.window.isVisible()) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+            match self.ivars().panels.try_borrow() {
+                Ok(p) => {
+                    if p.palette.as_ref().is_some_and(|x| x.is_visible())
+                        || !p.tools.is_empty()
+                        || p.terminal_panel.as_ref().is_some_and(|t| t.is_shown())
+                        || p.paths
+                            .as_ref()
+                            .is_some_and(|w| w.window.as_ref().is_some_and(|win| win.isVisible()))
+                    {
+                        return true;
+                    }
+                }
+                Err(_) => return true,
+            }
+            if let Some(shot) = self.ivars().controller.screenshot_controller() {
+                match shot.try_lock() {
+                    Ok(c) => {
+                        if !c.is_idle() {
+                            return true;
+                        }
+                    }
+                    Err(_) => return true,
+                }
+            }
+            false
         }
 
         /// The polled focus observers: `SharedWindow`'s didResignKey →
@@ -4380,10 +4553,24 @@ mod daemon_ui {
             }
         }
 
+        /// Construct the palette panel hidden (launch prewarm; no show, no
+        /// activation). `show_palette` reuses it via `palette.take()`.
+        fn prewarm_palette(&self) {
+            if let Ok(mut p) = self.ivars().panels.try_borrow_mut() {
+                if p.palette.is_none() {
+                    let mut panel = PalettePanel::new();
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        panel.prewarm(mtm);
+                    }
+                    p.palette = Some(panel);
+                }
+            }
+        }
+
         /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
         fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
-            let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
-            if let Some(p) = state.as_mut().and_then(|st| st.palette.as_mut()) {
+            let Ok(mut panels) = self.ivars().panels.try_borrow_mut() else { return };
+            if let Some(p) = panels.palette.as_mut() {
                 if p.is_visible() {
                     p.refresh_workspaces(workspaces);
                 }
@@ -4396,9 +4583,13 @@ mod daemon_ui {
                 return;
             };
             let controller = self.ivars().controller.clone();
-            let mut state = self.ivars().state.borrow_mut();
-            let st = state.get_or_insert_with(|| self.build_window(mtm));
-            let mut panel = st.palette.take().unwrap_or_else(PalettePanel::new);
+            let mut panel = self
+                .ivars()
+                .panels
+                .borrow_mut()
+                .palette
+                .take()
+                .unwrap_or_else(PalettePanel::new);
             // The `aerospace` CLI can stall for seconds, so never wait on it
             // here: paint with the last known rows and refresh off-main.
             let workspaces = WORKSPACE_CACHE.lock().unwrap().clone();
@@ -4450,7 +4641,16 @@ mod daemon_ui {
                 .or_else(crate::platform::main_screen)
                 .map(|s| s.visible)
                 .map(|v| NSRect::new(NSPoint::new(v.x, v.y), NSSize::new(v.w, v.h)))
-                .unwrap_or_else(|| st.window.frame());
+                .unwrap_or_else(|| {
+                    // No screen info at all: fall back to the shared window's
+                    // frame if it exists, else a default-sized rect.
+                    self.ivars()
+                        .state
+                        .borrow()
+                        .as_ref()
+                        .map(|st| st.window.frame())
+                        .unwrap_or_else(|| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0)))
+                });
             panel.present(
                 mtm,
                 Some(SwitchFrame::new(
@@ -4460,7 +4660,8 @@ mod daemon_ui {
                     host.size.height,
                 )),
             );
-            st.palette = Some(panel);
+            self.ivars().panels.borrow_mut().palette = Some(panel);
+            crate::app::logging::log_hotkey_shown(None);
             // Opened from another app (Hyper+S): remember it so a cancel
             // gives focus back there. We are frontmost = the user was in our
             // window, and a cancel just leaves them in it.
@@ -4470,7 +4671,6 @@ mod daemon_ui {
             let own = std::process::id() as i32;
             let front = crate::platform::frontmost_app().map(|a| a.pid).filter(|p| *p != own);
             PALETTE_RETURN.with(|c| c.set(front));
-            drop(state);
             // No `activate_app` here: the palette is a non-activating panel
             // (`tool_panel`) and takes the keyboard on its own. Activating
             // kitchen-sink made it the focused app, so dismissing the
@@ -4602,7 +4802,7 @@ mod daemon_ui {
         /// Order the palette window out (a click-pick; `hide_palette` minus the
         /// focus hand-back, which `palette_pick_focus` already did).
         fn hide_palette_panel(&self) {
-            if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+            if let Some(p) = self.ivars().panels.borrow_mut().palette.as_mut() {
                 p.hide_panel();
             }
         }
@@ -4612,13 +4812,9 @@ mod daemon_ui {
             if let Some(mtm) = MainThreadMarker::new() {
                 palette_hand_back(mtm);
             }
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(st) = state.as_mut() {
-                if let Some(panel) = st.palette.as_mut() {
-                    panel.hide_panel();
-                }
+            if let Some(panel) = self.ivars().panels.borrow_mut().palette.as_mut() {
+                panel.hide_panel();
             }
-            drop(state);
             self.ivars().controller.set_palette_visible(false);
             self.end_palette(true);
         }
@@ -4667,12 +4863,10 @@ mod daemon_ui {
                 return;
             };
             let controller = self.ivars().controller.clone();
-            let mut state = self.ivars().state.borrow_mut();
-            let st = match state.as_mut() {
-                Some(s) => s,
-                None => return,
-            };
-            let mut win = st
+            let mut win = self
+                .ivars()
+                .panels
+                .borrow_mut()
                 .paths
                 .take()
                 .unwrap_or_else(|| PathsWindow::new(PathsReturn::File));
@@ -4718,16 +4912,15 @@ mod daemon_ui {
                 PathsCmd::Select(n) => win.test_select(n),
             }
             let (doc, wid) = (win.test_state(), win.window_number());
-            st.paths = Some(win);
-            drop(state);
+            self.ivars().panels.borrow_mut().paths = Some(win);
             controller.set_paths_docs(doc, wid);
             controller.set_window_count(visible_window_count(mtm));
         }
 
         /// Run `f` on the paths window, then repaint it.
         fn paths_surface<R>(&self, f: impl FnOnce(&mut PathsWindow) -> R) -> Option<R> {
-            let mut state = self.ivars().state.borrow_mut();
-            let w = state.as_mut().and_then(|st| st.paths.as_mut())?;
+            let mut panels = self.ivars().panels.borrow_mut();
+            let w = panels.paths.as_mut()?;
             let r = f(w);
             w.sync_view();
             Some(r)
@@ -4826,8 +5019,8 @@ mod daemon_ui {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
             };
-            let mut state = self.ivars().state.borrow_mut();
-            let st = state.get_or_insert_with(|| self.build_window(mtm));
+            let _ = mtm;
+            let mut st = self.ivars().panels.borrow_mut();
             let mut panel = st.terminal_panel.take().unwrap_or_else(|| {
                 TerminalPanel::new(TerminalConfig::from_settings(
                     &self.ivars().controller.settings(),
@@ -4849,8 +5042,7 @@ mod daemon_ui {
                 return;
             };
             let settings = self.ivars().controller.settings();
-            let mut state = self.ivars().state.borrow_mut();
-            let st = state.get_or_insert_with(|| self.build_window(mtm));
+            let mut st = self.ivars().panels.borrow_mut();
             let mut panel = st
                 .tools
                 .remove(kind.name())
@@ -4874,7 +5066,7 @@ mod daemon_ui {
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0),
             );
-            drop(state);
+            drop(st);
             self.ivars().controller.set_tool_state(kind.name(), doc);
             self.ivars()
                 .controller
@@ -4883,13 +5075,10 @@ mod daemon_ui {
 
         /// `unregisterSubWindow` for a tool panel: order it out and drop it.
         fn close_tool(&self, name: &str) {
-            let mut state = self.ivars().state.borrow_mut();
-            if let Some(st) = state.as_mut() {
-                if let Some(mut panel) = st.tools.remove(name) {
-                    panel.hide();
-                }
+            let removed = self.ivars().panels.borrow_mut().tools.remove(name);
+            if let Some(mut panel) = removed {
+                panel.hide();
             }
-            drop(state);
             self.ivars().controller.remove_tool_state(name);
             if let Some(mtm) = MainThreadMarker::new() {
                 self.ivars()
@@ -4909,8 +5098,9 @@ mod daemon_ui {
             let mut docs: Vec<(String, serde_json::Value)> = Vec::new();
             let mut paths_doc: Option<(serde_json::Value, i64)> = None;
             {
-                let mut state = self.ivars().state.borrow_mut();
-                if let Some(st) = state.as_mut() {
+                let mut panels = self.ivars().panels.borrow_mut();
+                {
+                    let st = &mut *panels;
                     let mtm = MainThreadMarker::new();
                     let key_wid: i64 = mtm
                         .and_then(|m| {
@@ -4955,7 +5145,8 @@ mod daemon_ui {
             if let Some((doc, wid)) = paths_doc {
                 self.ivars().controller.set_paths_docs(doc, wid);
             }
-            if let Some(st) = self.ivars().state.borrow_mut().as_mut() {
+            {
+                let mut st = self.ivars().panels.borrow_mut();
                 if st.terminal_opened_at.is_some_and(|t| t.elapsed().as_secs_f64() >= 0.25) {
                     st.terminal_opened_at = None;
                     if let Some(tp) = st.terminal_panel.as_ref() {
@@ -4965,10 +5156,11 @@ mod daemon_ui {
             }
             let term_doc = self
                 .ivars()
-                .state
+                .panels
                 .borrow()
+                .terminal_panel
                 .as_ref()
-                .and_then(|st| st.terminal_panel.as_ref().map(|tp| tp.test_state()));
+                .map(|tp| tp.test_state());
             if let Some(doc) = term_doc {
                 self.ivars().controller.set_terminal_panel_state(doc);
             }
@@ -5465,11 +5657,8 @@ mod daemon_ui {
             let opt = mods.contains(NSEventModifierFlags::Option);
 
             let out = {
-                let mut state = self.ivars().state.borrow_mut();
-                let Some(st) = state.as_mut() else {
-                    return false;
-                };
-                if let Some(p) = st.palette.as_mut() {
+                let mut panels = self.ivars().panels.borrow_mut();
+                if let Some(p) = panels.palette.as_mut() {
                     if p.has_key() {
                         if code == popup::KEY_ESC {
                             if p.live_query().trim().is_empty() {
@@ -5572,7 +5761,7 @@ mod daemon_ui {
                     if let Some(mtm) = MainThreadMarker::new() {
                         palette_pick_focus(mtm, &action);
                     }
-                    if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+                    if let Some(p) = self.ivars().panels.borrow_mut().palette.as_mut() {
                         p.hide_panel();
                     }
                     self.end_palette(false);
@@ -5593,7 +5782,7 @@ mod daemon_ui {
                     if let Some(mtm) = MainThreadMarker::new() {
                         palette_hand_back(mtm);
                     }
-                    if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+                    if let Some(p) = self.ivars().panels.borrow_mut().palette.as_mut() {
                         p.hide_panel();
                     }
                     self.ivars().controller.set_palette_visible(false);
@@ -10442,7 +10631,7 @@ mod daemon_ui {
         /// Cmd+Shift+R, Cmd+Delete.
         fn paths_key(&self, event: &NSEvent) -> bool {
             use crate::views::paths::{key_action, PathsKey};
-            let info = self.ivars().state.borrow().as_ref().and_then(|st| {
+            let info = Some(self.ivars().panels.borrow()).and_then(|st| {
                 let w = st.paths.as_ref()?;
                 let win = w.window.as_ref()?;
                 if !win.isKeyWindow() {
@@ -11185,10 +11374,10 @@ mod daemon_ui {
             // nobody was using, and its Esc then left no key window at all.
             let palette_up = self
                 .ivars()
-                .state
+                .panels
                 .borrow()
+                .palette
                 .as_ref()
-                .and_then(|st| st.palette.as_ref())
                 .is_some_and(|p| p.is_visible());
             if palette_up {
                 self.hide_palette_panel();
@@ -11466,13 +11655,7 @@ mod daemon_ui {
                 confluence: None,
                 ai: None,
                 prefix: popup::PrefixState::new(),
-                palette: None,
                 switcher: None,
-                paths: None,
-                terminal_panel: None,
-                tools: HashMap::new(),
-                tool_opened_at: HashMap::new(),
-                terminal_opened_at: None,
                 shortcuts: None,
             }
         }
@@ -12300,6 +12483,55 @@ mod tests {
         assert_eq!(s["paths"]["key"], json!(false));
         assert_eq!(s["tools"]["paths"]["shown"], json!(false));
         assert_eq!(s["tools"]["paths"]["wid"], json!(4316));
+    }
+
+    #[test]
+    fn coalescing_waker_dispatches_once_until_cleared() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let n = Arc::new(AtomicUsize::new(0));
+        let n2 = n.clone();
+        let w = CoalescingWaker::new(move || {
+            n2.fetch_add(1, Ordering::SeqCst);
+        });
+        w.wake();
+        w.wake();
+        w.wake();
+        assert_eq!(n.load(Ordering::SeqCst), 1, "burst coalesces to one dispatch");
+        w.clear();
+        w.wake();
+        assert_eq!(n.load(Ordering::SeqCst), 2, "after clear the next wake dispatches");
+    }
+
+    #[test]
+    fn ui_push_and_post_main_call_the_waker() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let c = controller();
+        let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
+        let mq: MainQueue = Arc::new(Mutex::new(Vec::new()));
+        c.install_ui(q.clone());
+        c.install_main_queue(mq.clone());
+        let n = Arc::new(AtomicUsize::new(0));
+        let n2 = n.clone();
+        c.install_waker(Arc::new(move || {
+            n2.fetch_add(1, Ordering::SeqCst);
+        }));
+        c.palette_toggle();
+        assert_eq!(n.load(Ordering::SeqCst), 1);
+        c.post_main(|| {});
+        assert_eq!(n.load(Ordering::SeqCst), 2, "post_main wakes too");
+        assert_eq!(mq.lock().unwrap().len(), 1);
+        assert_eq!(q.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn poll_interval_follows_visibility() {
+        assert_eq!(poll_interval_secs(true), 0.03);
+        assert_eq!(poll_interval_secs(false), 0.25);
+        // 30 ms timer jitter must not skip a fast tick; hidden waits 250 ms.
+        assert!(poll_due(1.0, 1.0299, poll_interval_secs(true)));
+        assert!(!poll_due(1.0, 1.01, poll_interval_secs(true)));
+        assert!(!poll_due(1.0, 1.1, poll_interval_secs(false)));
+        assert!(poll_due(1.0, 1.25, poll_interval_secs(false)));
     }
 
     #[test]

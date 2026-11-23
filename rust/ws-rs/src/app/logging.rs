@@ -51,6 +51,35 @@ pub fn ws_log(msg: &str) {
     append_to_file(&line);
 }
 
+/// The last socket request's receive time (`hotkey: … recv->shown` latency).
+static LAST_RECV: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
+/// Stamp a socket request as just received (called from `socket.rs`).
+pub fn note_recv(msg: &str) {
+    if let Ok(mut g) = LAST_RECV.lock() {
+        *g = Some((std::time::Instant::now(), msg.split('\t').next().unwrap_or("").to_string()));
+    }
+}
+
+/// Take the pending receive stamp if it is fresh (< 2 s) and, when `verb`
+/// is given, belongs to that request verb. Returns (verb, elapsed ms).
+pub fn take_recv_ms(verb: Option<&str>) -> Option<(String, u128)> {
+    let mut g = LAST_RECV.lock().ok()?;
+    let (at, msg) = g.as_ref()?.clone();
+    if at.elapsed().as_secs_f64() >= 2.0 || verb.is_some_and(|v| v != msg) {
+        return None;
+    }
+    *g = None;
+    Some((msg, at.elapsed().as_millis()))
+}
+
+/// Log `hotkey: <msg> recv->shown <N>ms` for the request that opened a panel.
+pub fn log_hotkey_shown(verb: Option<&str>) {
+    if let Some((msg, ms)) = take_recv_ms(verb) {
+        ws_log(&format!("hotkey: {msg} recv->shown {ms}ms"));
+    }
+}
+
 /// Send panics to `daemon.log` too. The app is launched by LaunchServices, so
 /// its stderr goes nowhere: without this a panic on the main thread quits the
 /// app (exit 101, no crash report) and leaves no trace of where it happened.

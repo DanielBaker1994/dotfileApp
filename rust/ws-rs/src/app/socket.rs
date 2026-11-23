@@ -400,6 +400,9 @@ fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
     if query == "ping" {
         return;
     }
+    if query != "state" {
+        crate::app::logging::note_recv(&query);
+    }
 
     if query == "state" {
         write_json(fd, &handler.state_json());
@@ -521,6 +524,9 @@ fn handle_conn(shared: &Arc<ipc::Stream>, handler: &dyn CommandHandler) {
 
     if query == "ping" {
         return;
+    }
+    if query != "state" {
+        crate::app::logging::note_recv(&query);
     }
 
     if query == "state" {

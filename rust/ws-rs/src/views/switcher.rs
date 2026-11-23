@@ -1847,6 +1847,13 @@ mod macos {
             self.window.as_ref().map(|w| w.isKeyWindow()).unwrap_or(self.shown)
         }
 
+        /// Build the panel without showing it (launch prewarm).
+        pub fn prewarm(&mut self, mtm: MainThreadMarker) {
+            if self.window.is_none() {
+                self.build_macos(mtm);
+            }
+        }
+
         /// Build (once) and present over the host frame.
         pub fn present(&mut self, mtm: MainThreadMarker, host: Option<SwitchFrame>) {
             if self.window.is_none() {
