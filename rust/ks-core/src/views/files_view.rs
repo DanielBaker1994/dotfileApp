@@ -328,7 +328,7 @@ mod appkit {
                 // A drag is not a click: drop the click-to-rename the
                 // mouse-down on an already-selected row armed.
                 #[cfg(target_os = "macos")]
-                crate::app::host::cancel_click_rename();
+                crate::app::hooks::cancel_click_rename();
                 self.begin_drag(e, row, &path);
             }
 

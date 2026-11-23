@@ -6,7 +6,7 @@ pub use ks_core::app::hotkey;
 pub mod jira_poll;
 pub mod host;
 #[cfg(target_os = "macos")]
-pub mod live_panes;
+pub use ks_core::app::live_panes;
 pub use ks_core::app::logging;
 pub use ks_core::app::menu;
 pub use ks_core::app::pathfmt;
@@ -14,8 +14,8 @@ pub use ks_core::app::paths;
 pub use ks_core::app::process_run;
 pub use ks_core::app::python_helper;
 pub mod quick;
-pub mod registry;
-pub mod socket;
+pub use ks_core::app::registry;
+pub use ks_core::app::socket;
 pub mod synth_input;
 
 /// Entry point. Phase 0 scaffold: no AppKit yet.

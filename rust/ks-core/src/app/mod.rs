@@ -6,3 +6,10 @@ pub mod pathfmt;
 pub mod config;
 pub mod hotkey;
 pub mod menu;
+pub mod find_window;
+pub mod sections;
+pub mod hooks;
+pub mod registry;
+pub mod socket;
+#[cfg(target_os = "macos")]
+pub mod live_panes;

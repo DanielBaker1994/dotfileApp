@@ -23,6 +23,11 @@ use serde_json::{json, Map, Value};
 use crate::app::config::{self, AppSettings, HeaderStyle};
 use crate::app::hotkey::{self, HotkeyPrep};
 use crate::app::paths::Paths;
+pub(crate) use ks_core::app::find_window::{run_find_window, ToastFn};
+pub(crate) use ks_core::app::sections::{
+    label_of, parse_sections, parse_sections_ordered, section_flag, strip_comment, tri_pure,
+    unquote_value, COMMAND_SECTION_SKIPS,
+};
 use crate::app::registry::{PaletteCommand, RectI, Registry, SlotView};
 use crate::app::socket::{CommandHandler, Reply};
 use crate::panes::pane_geometry::{PaneDir, Rect};
@@ -31,19 +36,6 @@ use crate::panes::vim_keys::VimKeys;
 use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
 use crate::views::tools::ToolKind;
 
-/// The sections `loadCommands` never turns into commands.
-pub(crate) const COMMAND_SECTION_SKIPS: [&str; 10] = [
-    "icons",
-    "shortcuts",
-    "app",
-    "confluence",
-    "ai",
-    "notifications",
-    "pane-shot",
-    "pane-find",
-    "setup",
-    "settings-hub",
-];
 
 /// Every `SlotView`, in `testQuery`'s order (`kitchen_sink.swift:3111`).
 pub const ALL_VIEWS: [SlotView; 8] = [
@@ -238,126 +230,7 @@ pub(crate) fn poll_due(last: f64, now: f64, interval: f64) -> bool {
     now - last >= interval - 0.005
 }
 
-/// How a find-window run reports to the user (a toast on the daemon UI).
-pub type ToastFn = Arc<dyn Fn(String, &'static str) + Send + Sync>;
 
-/// `[find-window]` palette command, shared by the main daemon and the quick
-/// agent: wait `delay` seconds (so the user can point at or focus the window
-/// in question), run `script` (winwatch --pids2 candidate rows), then offer a
-/// kill picker. `text` is the config text; progress goes through `toast`.
-/// Never activates the app; the work is off the main thread.
-pub(crate) fn run_find_window(text: &str, toast: ToastFn) {
-    let vars = crate::views::tools::section_vars(text, "find-window");
-    let delay: f64 = vars.get("delay").and_then(|v| v.parse().ok()).unwrap_or(2.0);
-    let script = vars.get("script").cloned().unwrap_or_default();
-    let script = match script.strip_prefix("~/") {
-        Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
-        None => script,
-    };
-    toast(format!("Point at (or focus) the window — reading in {delay}s"), "scope");
-    crate::app::logging::ws_log(&format!("find-window: sampling in {delay}s via {script}"));
-    let secs: u64 = vars.get("dialog-seconds").and_then(|v| v.parse().ok()).unwrap_or(30);
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs_f64(delay.max(0.0)));
-        let me = std::process::id() as i64;
-        let o = match std::process::Command::new("/bin/bash")
-            .arg("-c")
-            .arg(&script)
-            .env("KS_EXCLUDE_PID", me.to_string())
-            .output()
-        {
-            Ok(o) if o.status.success() => o,
-            Ok(o) => {
-                let err = String::from_utf8_lossy(&o.stderr);
-                let why = err.lines().last().unwrap_or("non-zero exit").trim().to_string();
-                toast(format!("find-window failed: {why}"), "exclamationmark.triangle.fill");
-                return;
-            }
-            Err(e) => {
-                toast(format!("find-window failed: {e}"), "exclamationmark.triangle.fill");
-                return;
-            }
-        };
-        // winwatch --pids2: kind<TAB>pid<TAB>owner<TAB>WxH<TAB>note, kinds
-        // P (under pointer), A (AX focused), F (frontmost app), T (small window).
-        // One picker row per pid, labelled by the first (best) kind it showed up as.
-        let text = String::from_utf8_lossy(&o.stdout).to_string();
-        let mut rows: Vec<(i64, String)> = Vec::new();
-        for line in text.lines() {
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 3 {
-                continue;
-            }
-            let Ok(p) = f[1].parse::<i64>() else { continue };
-            if p == me || p <= 1 || rows.iter().any(|r| r.0 == p) {
-                continue;
-            }
-            let kind = match f[0] {
-                "P" => "Under pointer",
-                "A" => "Focused window",
-                "F" => "Frontmost app",
-                "T" => "Small window",
-                _ => continue,
-            };
-            let size = f.get(3).filter(|s| **s != "-").map(|s| format!(" {s}")).unwrap_or_default();
-            let note = f.get(4).filter(|s| !s.is_empty()).map(|s| format!(" [{s}]")).unwrap_or_default();
-            rows.push((p, format!("{kind}: {} (pid {p}){size}{note}", f[2])));
-        }
-        if rows.is_empty() {
-            toast("find-window: no candidate windows".into(), "scope");
-            return;
-        }
-        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-        let items = rows.iter().map(|r| format!("\"{}\"", esc(&r.1))).collect::<Vec<_>>().join(", ");
-        // `choose from list` takes any number of rows (display dialog caps at
-        // 3 buttons) but has no timeout, so the osascript is killed after `secs`.
-        let first = format!("\"{}\"", esc(&rows[0].1));
-        let osa = format!(
-            "choose from list {{{items}}} with title \"Find Window PID\" \
-             with prompt \"Kill which process? (SIGTERM, then SIGKILL)\" default items {{{first}}} \
-             OK button name \"Kill\" cancel button name \"Cancel\""
-        );
-        let Ok(child) = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", &osa])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
-            return;
-        };
-        let child_pid = child.id();
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let done2 = done.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(secs));
-            // Only while still waiting on it, so a recycled pid is never hit.
-            if !done2.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = std::process::Command::new("/bin/kill").arg(child_pid.to_string()).status();
-            }
-        });
-        let r = child.wait_with_output();
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        let Ok(r) = r else { return };
-        // Cancel prints "false"; a pick prints the row text.
-        let reply = String::from_utf8_lossy(&r.stdout).trim().to_string();
-        let pid = rows.iter().find(|row| row.1 == reply).map(|row| row.0);
-        let Some(pid) = pid else { return };
-        if pid == me || pid <= 1 {
-            return;
-        }
-        // SIGTERM first; SIGKILL if it is still there a second later.
-        let ok = std::process::Command::new("/bin/bash")
-            .args(["-c", &format!("kill {pid} && sleep 1; kill -0 {pid} 2>/dev/null && kill -9 {pid}; ! kill -0 {pid} 2>/dev/null")])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            toast(format!("Killed pid {pid}"), "checkmark");
-        } else {
-            toast(format!("Couldn't kill pid {pid}"), "exclamationmark.triangle.fill");
-        }
-    });
-}
 
 /// The Hyper+S palette's rows: `[app] palette` picks and orders them (an id
 /// with no enabled command is skipped); an empty list keeps every palette
@@ -2549,95 +2422,10 @@ fn parse_esc_close(text: &str) -> HashMap<String, i64> {
     out
 }
 
-/// Parse `[section]` + `key = value` lines in file order (duplicate sections
-/// stay separate entries, mirroring `loadCommands`'s per-header flush).
-pub(crate) fn parse_sections_ordered(text: &str) -> Vec<(String, HashMap<String, String>)> {
-    let mut out: Vec<(String, HashMap<String, String>)> = Vec::new();
-    for line in crate::engines::config_text::config_lines(text) {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            out.push((name.trim().to_string(), HashMap::new()));
-            continue;
-        }
-        if let Some((k, v)) = t.split_once('=') {
-            let key = k.trim();
-            if key.is_empty() {
-                continue;
-            }
-            if let Some((_, vars)) = out.last_mut() {
-                vars.insert(key.to_string(), unquote_value(strip_comment(v)));
-            }
-        }
-    }
-    out
-}
 
-/// A pure `config.tri` over a raw value (the helper-backed
-/// `config_text::tri` stays the codec path; the raw scan must not need it).
-pub(crate) fn tri_pure(value: &str) -> Option<bool> {
-    match value.trim().trim_matches('"').to_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => Some(true),
-        "false" | "no" | "off" | "0" => Some(false),
-        _ => None,
-    }
-}
 
-/// Strip matching surrounding quotes (the python codec's value decoding).
-pub(crate) fn unquote_value(v: &str) -> String {
-    let t = v.trim();
-    if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"'))
-            || (t.starts_with('\'') && t.ends_with('\'')))
-    {
-        t[1..t.len() - 1].to_string()
-    } else {
-        t.to_string()
-    }
-}
 
-/// Parse `[section]` + `key = value` lines into `section -> key -> value`
-/// (a small pure scan; the python codec is not needed for enabled flags).
-pub(crate) fn parse_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
-    let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut section = String::new();
-    for line in crate::engines::config_text::config_lines(text) {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            section = name.trim().to_string();
-            out.entry(section.clone()).or_default();
-            continue;
-        }
-        if let Some((k, v)) = t.split_once('=') {
-            let key = k.trim();
-            if key.is_empty() {
-                continue;
-            }
-            out.entry(section.clone())
-                .or_default()
-                .insert(key.to_string(), unquote_value(strip_comment(v)));
-        }
-    }
-    out
-}
 
-pub(crate) fn strip_comment(v: &str) -> &str {
-    let (mut single, mut double) = (false, false);
-    for (i, c) in v.char_indices() {
-        match c {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '#' if !single && !double => return &v[..i],
-            _ => {}
-        }
-    }
-    v
-}
 
 /// The views whose left pane is resizable (`do:sidebar-width:*`).
 const SIDEBAR_VIEWS: [&str; 2] = ["jira", "confluence"];
@@ -2769,36 +2557,7 @@ fn fmt_width(w: f64) -> String {
     }
 }
 
-/// Resolve a section's configured `label` (trimmed, non-empty), else `fallback`.
-/// Bound to the section map so `build_nav` and `build_palette` share one rule:
-/// renaming a label in `commands.toml` cannot desynchronize the header nav, the
-/// pane names and the palette.
-pub(crate) fn label_of<'a>(
-    sections: &'a HashMap<String, HashMap<String, String>>,
-) -> impl Fn(&str, &str) -> String + 'a {
-    move |section: &str, fallback: &str| -> String {
-        sections
-            .get(section)
-            .and_then(|m| m.get("label"))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback.to_string())
-    }
-}
 
-pub(crate) fn section_flag(
-    sections: &HashMap<String, HashMap<String, String>>,
-    section: &str,
-    default: bool,
-) -> bool {
-    match sections.get(section).and_then(|m| m.get("enabled")) {
-        Some(v) => matches!(
-            v.trim().trim_matches('"').to_ascii_lowercase().as_str(),
-            "true" | "yes" | "on" | "1"
-        ),
-        None => default,
-    }
-}
 
 /// `loadCommands().count` — sections with `enabled = "true"` outside the skip
 /// list, plus top-level `key = value` shell commands (the Swift `commands`
@@ -3202,69 +2961,15 @@ impl CommandHandler for SwitcherController {
 #[cfg(target_os = "macos")]
 pub use daemon_ui::install_daemon_ui;
 
-/// `PathShelf.add([path], why: .screenshot)` after a successful overlay save.
-/// Called on the main thread from `views::screenshot`'s save path.
-///
-/// With no live shelf in this process (the quick agent) the store file is
-/// updated directly — pure Rust, atomic, merged with whatever the other
-/// process wrote ([`crate::engines::path_shelf::pure_add`]).
-pub fn screenshot_saved_to_path_shelf(path: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let why = crate::engines::path_shelf::Why::Screenshot;
-        if !daemon_ui::shelf_add(&[path.to_string()], why) {
-            crate::engines::path_shelf::pure_add(
-                &crate::engines::path_shelf::default_store(),
-                &[path.to_string()],
-                why,
-            );
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = path;
-}
-
-/// Where "reveal in Files" goes when this process has no Files view (the
-/// quick agent forwards it to the main daemon's socket). Set once at startup.
-static REVEAL_HOOK: std::sync::OnceLock<Box<dyn Fn(&[String]) + Send + Sync>> =
-    std::sync::OnceLock::new();
-
-pub fn set_reveal_hook(f: impl Fn(&[String]) + Send + Sync + 'static) {
-    let _ = REVEAL_HOOK.set(Box::new(f));
-}
-
-/// Show `paths` in the app's own file browser (`SlotView::Files`) — the uniform
-/// entry point for every "reveal / show in Finder" action, callable from any
-/// module. Never opens macOS Finder. A no-op off macOS or before the UI is up.
-pub fn reveal_in_files(paths: &[String]) {
-    if let Some(hook) = REVEAL_HOOK.get() {
-        hook(paths);
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    daemon_ui::reveal_in_files(paths);
-    #[cfg(not(target_os = "macos"))]
-    let _ = paths;
-}
-
-/// Copy files to the pasteboard and toast ("Copied “x”"); `true` when
-/// something landed. The quick agent's paths shelf uses it too.
+pub use ks_core::app::hooks::{reveal_in_files, screenshot_saved_to_path_shelf, set_reveal_hook};
 #[cfg(target_os = "macos")]
-pub(crate) fn copy_files_toast(paths: &[String]) -> bool {
-    daemon_ui::copy_files_toast(paths)
-}
+pub use ks_core::app::hooks::{cancel_click_rename, copy_files_toast};
 
 /// The rule-2 popup actions (rename / compress / trash wired to the daemon's
 /// Files backends, with the recents rows repainted) for a standalone popup
 /// showing `path` — the preview panel's right-click menu builds its
 /// `file_context_menu` from these. `sheet` hosts the Rename… prompt. macOS
 /// only: the surface has no AppKit half elsewhere.
-/// Drop a pending click-to-rename (a row drag started: it was never a click).
-#[cfg(target_os = "macos")]
-pub fn cancel_click_rename() {
-    daemon_ui::cancel_click_rename();
-}
-
 #[cfg(target_os = "macos")]
 pub fn popup_file_menu_actions(
     path: &str,
@@ -4008,6 +3713,14 @@ mod daemon_ui {
         queue: UiQueue,
         main_queue: MainQueue,
     ) -> Retained<DaemonUi> {
+        // The shared code (screenshot, file popup, files list) reaches the
+        // daemon's surfaces through `ks_core::app::hooks`.
+        {
+            use ks_core::app::hooks as h;
+            h::set_reveal_hook(|p| reveal_in_files(p));
+            h::set_shelf_add_hook(|paths, why| shelf_add(paths, why));
+            h::set_cancel_click_rename_hook(|| cancel_click_rename());
+        }
         let bridge_path = format!(
             "{}{}",
             crate::app::paths::Paths::from_env().popup_tmp_dir(),
@@ -11932,50 +11645,7 @@ mod daemon_ui {
             .unwrap_or_default()
     }
 
-    /// Swift `copyFiles`: one pasteboard item per path carrying both a
-    /// `public.file-url` (Finder pastes the file) and a plain string (text
-    /// fields / terminals paste the path). Returns whether anything was written.
-    fn copy_files_to_pasteboard(paths: &[String]) -> bool {
-        use objc2::runtime::ProtocolObject;
-        use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardWriting};
-        use objc2_foundation::NSURL;
-        if paths.is_empty() {
-            return false;
-        }
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
-            .iter()
-            .map(|p| {
-                let item = NSPasteboardItem::new();
-                let url = NSURL::fileURLWithPath(&NSString::from_str(p));
-                if let Some(abs) = url.absoluteString() {
-                    let _ = item.setString_forType(&abs, unsafe { NSPasteboardTypeFileURL });
-                }
-                let _ = item.setString_forType(&NSString::from_str(p), unsafe { NSPasteboardTypeString });
-                ProtocolObject::from_retained(item)
-            })
-            .collect();
-        let array = objc2_foundation::NSArray::from_retained_slice(&objects);
-        pb.writeObjects(&array)
-    }
-
-    /// Copy files and toast Swift's wording; only toasts when something landed.
-    pub(crate) fn copy_files_toast(paths: &[String]) -> bool {
-        let ok = copy_files_to_pasteboard(paths);
-        if ok {
-            crate::ui::toast::show(&format!("Copied {}", copied_what(paths)), "doc.on.doc");
-        }
-        ok
-    }
-
-    /// Swift `items(n, leaf)`: “name” for one path, "N items" otherwise.
-    fn copied_what(paths: &[String]) -> String {
-        match paths {
-            [one] => format!("“{}”", std::path::Path::new(one).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
-            _ => format!("{} items", paths.len()),
-        }
-    }
+    use ks_core::app::hooks::{copied_what, copy_files_to_pasteboard, copy_files_toast};
 
     fn open_path(path: &str) {
         crate::platform::open_path(std::path::Path::new(path));
