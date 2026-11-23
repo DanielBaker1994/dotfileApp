@@ -70,6 +70,7 @@ fn main() {
             let _lock: DaemonLock = lock;
             run_daemon(paths.notes_socket_path(), mode, headless);
         }
+        app::cli::Outcome::Quick { action, lock } => run_quick(&paths, action, lock),
     }
 }
 
@@ -200,6 +201,19 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
             crate::ui::toast::show(&w, "exclamationmark.triangle");
         }
         app.run();
+    }
+}
+
+/// `kitchen-sink quick`: the small resident agent that owns Hyper+S / Hyper+X
+/// (see `app::quick`). Needs AppKit; elsewhere it is not available.
+fn run_quick(paths: &Paths, action: app::quick::StartAction, lock: DaemonLock) {
+    #[cfg(target_os = "macos")]
+    app::quick::run(paths, action, lock);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (paths, action, lock);
+        eprintln!("kitchen-sink quick: the quick agent is macOS only");
+        std::process::exit(1);
     }
 }
 
@@ -363,7 +377,7 @@ fn config_check(argv: &[String]) -> i32 {
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
-    println!("usage: kitchen-sink [headless|window|files|jira|confluence|ai|terminal|ping|");
+    println!("usage: kitchen-sink [headless|quick|window|files|jira|confluence|ai|terminal|ping|");
     println!("                     config-check SECTION KEY VALUE | config-check --file PATH | config-schema]");
 }
 

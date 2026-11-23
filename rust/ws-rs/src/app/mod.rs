@@ -13,6 +13,7 @@ pub mod pathfmt;
 pub mod paths;
 pub mod process_run;
 pub mod python_helper;
+pub mod quick;
 pub mod registry;
 pub mod socket;
 pub mod synth_input;

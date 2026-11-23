@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 pub const COMMANDS_CONF_NAME: &str = "commands.toml";
 pub const NOTES_SOCKET_NAME: &str = "ws-notes.sock";
+/// The quick agent's socket (`kitchen-sink quick`): Hyper+S / Hyper+X.
+pub const QUICK_SOCKET_NAME: &str = "ks-quick.sock";
 pub const FOCUS_FILE_NAME: &str = "kitchen-sink-focus";
 pub const FOCUS_BRIDGE_NAME: &str = "ws-aerospace-focus";
 pub const SWITCHER_WINDOW_NAME: &str = "kitchen-sink";
@@ -183,6 +185,16 @@ impl Paths {
 
     pub fn notes_socket_path(&self) -> String {
         format!("{}{}", self.tmp_dir, self.notes_socket_name)
+    }
+
+    /// The quick agent's socket (`$TMPDIR/ks-quick.sock`); its lock file is
+    /// [`Self::quick_lock_path`].
+    pub fn quick_socket_path(&self) -> String {
+        format!("{}{}", self.tmp_dir, QUICK_SOCKET_NAME)
+    }
+
+    pub fn quick_lock_path(&self) -> String {
+        format!("{}.lock", self.quick_socket_path())
     }
 
     pub fn focus_bridge_path(&self) -> String {
@@ -386,6 +398,9 @@ mod tests {
         let p = Paths::resolve_at(bin.to_str().unwrap(), None, Some("/var/x"), Some("/Users/x"));
         assert_eq!(p.focus_file_path(), "/var/x/kitchen-sink-focus");
         assert_eq!(p.notes_socket_path(), "/var/x/ws-notes.sock");
+        assert_eq!(p.quick_socket_path(), "/var/x/ks-quick.sock");
+        assert_eq!(p.quick_lock_path(), "/var/x/ks-quick.sock.lock");
+        assert_ne!(p.quick_socket_path(), p.notes_socket_path());
         assert_eq!(p.focus_bridge_path(), "/var/x/ws-aerospace-focus");
     }
 

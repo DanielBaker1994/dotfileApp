@@ -7,7 +7,6 @@
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -29,6 +28,9 @@ pub enum Outcome {
     Exit(i32),
     /// Become the daemon, applying `mode` once it is up (`openCommand`).
     Daemon { mode: Option<String>, lock: DaemonLock },
+    /// Become the quick agent (`kitchen-sink quick [show|screenshot]`), which
+    /// owns Hyper+S / Hyper+X on its own socket and lock.
+    Quick { action: crate::app::quick::StartAction, lock: DaemonLock },
 }
 
 /// `sendLaunchMessage`: connect (bounded), write `name\n`, no reply.
@@ -189,8 +191,42 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
 
     let mut open_command: Option<String> = None;
     match arg1 {
-        Some("toggle") => {
-            return Outcome::Exit(if send_launch_message(&sock, "show") { 0 } else { 1 });
+        // Hyper+S: the quick agent owns the palette. No agent = exit 1, and
+        // `bin/kitchen_sink.sh` cold-starts it (`quick show`).
+        Some("toggle") | Some("quick-toggle") => {
+            return Outcome::Exit(if send_launch_message(&paths.quick_socket_path(), "toggle") { 0 } else { 1 });
+        }
+        Some("quick-show") => {
+            return Outcome::Exit(if send_launch_message(&paths.quick_socket_path(), "show") { 0 } else { 1 });
+        }
+        Some("quick-quit") => {
+            return Outcome::Exit(if send_launch_message(&paths.quick_socket_path(), "quit") { 0 } else { not_running() });
+        }
+        Some("quick-state") => {
+            let Some(data) = send_request(&paths.quick_socket_path(), "state", Duration::from_secs(3)) else {
+                return Outcome::Exit(not_running());
+            };
+            let _ = std::io::stdout().write_all(&data);
+            return Outcome::Exit(0);
+        }
+        Some("quick") => {
+            // The agent: take its own lock, or hand the start action to the
+            // one already running (`open -n` always starts a second process).
+            let action = crate::app::quick::start_action(args.get(2).map(String::as_str));
+            if let Some(lock) = DaemonLock::try_acquire(paths.quick_lock_path()) {
+                return Outcome::Quick { action, lock };
+            }
+            let qsock = paths.quick_socket_path();
+            match action {
+                crate::app::quick::StartAction::Show => {
+                    send_launch_message(&qsock, "show");
+                }
+                crate::app::quick::StartAction::Screenshot => {
+                    send_launch_message(&qsock, "screenshot");
+                }
+                crate::app::quick::StartAction::None => {}
+            }
+            return Outcome::Exit(0);
         }
         Some("jira-poll") => {
             let action = args.get(2).map(String::as_str).unwrap_or("toggle");
@@ -223,12 +259,12 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
             }
             open_command = Some("setup".to_string());
         }
-        Some("screenshot") => {
+        Some(verb @ ("screenshot" | "quick-screenshot")) => {
             let words: Vec<String> = args[2..].to_vec();
             let parsed = match ShotArgs::parse(&words) {
                 Ok(a) => a,
                 Err(p) => {
-                    eprintln!("kitchen-sink screenshot: {}", p.message);
+                    eprintln!("kitchen-sink {verb}: {}", p.message);
                     return Outcome::Exit(2);
                 }
             };
@@ -236,18 +272,31 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
                 .chain(words.iter().cloned())
                 .collect::<Vec<_>>()
                 .join("\t");
+            // The quick agent first (it owns Hyper+X); `screenshot` then falls
+            // back to a running main daemon, `quick-screenshot` does not.
+            let mut targets = vec![paths.quick_socket_path()];
+            if verb == "screenshot" {
+                targets.push(sock.clone());
+            }
             if parsed.wants_reply() {
-                let Some(data) = send_request(&sock, &msg, Duration::from_secs(3600)) else {
-                    return Outcome::Exit(not_running());
-                };
-                if data.is_empty() {
-                    return Outcome::Exit(1);
+                for t in &targets {
+                    let Some(data) = send_request(t, &msg, Duration::from_secs(3600)) else { continue };
+                    if data.is_empty() {
+                        return Outcome::Exit(1);
+                    }
+                    let _ = std::io::stdout().write_all(&data);
+                    return Outcome::Exit(0);
                 }
-                let _ = std::io::stdout().write_all(&data);
+                return Outcome::Exit(not_running());
+            }
+            if targets.iter().any(|t| send_launch_message(t, &msg)) {
                 return Outcome::Exit(0);
             }
-            if send_launch_message(&sock, &msg) {
-                return Outcome::Exit(0);
+            if verb == "quick-screenshot" {
+                // No agent: exit 1. `bin/kitchen_sink.sh screenshot` (which
+                // calls this) cold-starts it; exec'ing the launcher from here
+                // would loop.
+                return Outcome::Exit(1);
             }
             exec_launcher(paths, "screenshot");
             open_command = Some("screenshot".to_string());
