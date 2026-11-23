@@ -16,6 +16,6 @@ pub mod pane_find;
 pub mod paths;
 pub mod screenshot;
 pub mod setup;
-pub mod switcher;
+pub use ks_core::views::switcher;
 pub mod terminal;
-pub mod tools;
+pub use ks_core::views::tools;

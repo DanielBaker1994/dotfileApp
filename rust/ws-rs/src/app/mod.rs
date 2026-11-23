@@ -8,7 +8,7 @@ pub mod host;
 #[cfg(target_os = "macos")]
 pub mod live_panes;
 pub use ks_core::app::logging;
-pub mod menu;
+pub use ks_core::app::menu;
 pub use ks_core::app::pathfmt;
 pub use ks_core::app::paths;
 pub use ks_core::app::process_run;

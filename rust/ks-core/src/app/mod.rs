@@ -5,3 +5,4 @@ pub mod paths;
 pub mod pathfmt;
 pub mod config;
 pub mod hotkey;
+pub mod menu;
