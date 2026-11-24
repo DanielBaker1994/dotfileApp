@@ -406,6 +406,8 @@ mod appkit {
     struct QuickUi {
         paths: Paths,
         files_win: RefCell<Option<FilesWin>>,
+        /// Ctrl+H/J/K/L focus ring + spatial pane moves for the Recent window.
+        files_nav: RefCell<crate::app::live_panes::LiveNav>,
         shared: Arc<QuickShared>,
         server: RefCell<Option<CommandServer>>,
         palette: RefCell<Option<PalettePanel>>,
@@ -1209,6 +1211,12 @@ mod appkit {
             true
         }
 
+        fn files_pane_move(&self, dir: crate::panes::pane_geometry::PaneDir) {
+            let Some(panel) = self.files_window() else { return };
+            let panes = self.files_surface(|b| b.view.as_ref().map(|v| v.nav_panes())).flatten().unwrap_or_default();
+            self.files_nav.borrow_mut().move_dir(&panel, &panes, dir, &|_| false);
+        }
+
         fn files_focus_filter(&self, select_all: bool) {
             let field = self.files_surface(|b| b.view.as_ref().map(|v| v.search_field())).flatten();
             let (Some(f), Some(w)) = (field, self.files_window()) else { return };
@@ -1741,6 +1749,21 @@ mod appkit {
             let home = std::env::var("HOME").unwrap_or_default();
             let mtm = MainThreadMarker::new();
             let code = event.keyCode();
+            // Ctrl+H/J/K/L: move the focus between the sidebar, filter, list and preview.
+            if ctrl && !cmd && !opt && !shift {
+                use crate::panes::pane_geometry::PaneDir;
+                let dir = match code {
+                    4 => Some(PaneDir::Left),
+                    38 => Some(PaneDir::Down),
+                    40 => Some(PaneDir::Up),
+                    37 => Some(PaneDir::Right),
+                    _ => None,
+                };
+                if let Some(dir) = dir {
+                    self.files_pane_move(dir);
+                    return true;
+                }
+            }
             match code {
                 popup::KEY_ESC if plain => self.files_escape(),
                 popup::KEY_RETURN | 76 if plain => self.files_open_selected(),
@@ -2255,6 +2278,7 @@ mod appkit {
             opened_at: RefCell::new(HashMap::new()),
             paths_win: RefCell::new(None),
             files_win: RefCell::new(None),
+            files_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
             shot: shot.clone(),
             palette_return: Cell::new(None),
             pick_return: Cell::new(None),
