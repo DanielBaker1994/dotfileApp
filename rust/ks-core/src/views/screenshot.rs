@@ -67,8 +67,6 @@ use crate::engines::screenshot_annotations::{
 /// The frozen base image behind a [`ShotDisplay`] (macOS only; `()` elsewhere).
 #[cfg(target_os = "macos")]
 pub type BaseImage = objc2::rc::Retained<objc2_core_graphics::CGImage>;
-#[cfg(not(target_os = "macos"))]
-pub type BaseImage = ();
 
 /// The backing scale `ShotCanvas.init` derives: `img.width / max(1, frame.width)`,
 /// clamped to ≥ 1 (the ×2/×1 rule).
@@ -562,11 +560,6 @@ pub fn on_screen_windows() -> Vec<ScreenWindow> {
     out
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn on_screen_windows() -> Vec<ScreenWindow> {
-    Vec::new()
-}
-
 // __NEXT__
 
 // ---------------------------------------------------------------------------
@@ -892,18 +885,10 @@ pub fn current_screens() -> Vec<ScreenRef> {
 pub fn screen_capture_permitted() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
-#[cfg(not(target_os = "macos"))]
-pub fn screen_capture_permitted() -> bool {
-    false
-}
 
 #[cfg(target_os = "macos")]
 pub fn request_screen_capture_access() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
-}
-#[cfg(not(target_os = "macos"))]
-pub fn request_screen_capture_access() -> bool {
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -3468,11 +3453,6 @@ impl ShotSession {
             let empty: [ShotObject; 0] = [];
             let objects: &[ShotObject] = if draw_objects { &self.doc.objects } else { &empty };
             shot_cg::render_shot(base, scale, crop, objects)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (display, draw_objects, crop);
-            None
         }
     }
 }
@@ -7388,11 +7368,6 @@ impl ScreenshotController {
             }
             None
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = cfg;
-            None
-        }
     }
 
     /// Build one overlay panel per display for the current session and order
@@ -7555,8 +7530,6 @@ impl ScreenshotController {
                 return Ok(());
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (allow_delay, delay_ms);
 
         // KR1 (PRD §7.3.4): time the capture and the path to the overlay.
         let t0 = std::time::Instant::now();
@@ -7598,8 +7571,6 @@ impl ScreenshotController {
                                 s.set_base_image(i, image.image.clone());
                             }
                         }
-                        #[cfg(not(target_os = "macos"))]
-                        let _ = &images;
                         // `--region` / `--last-region`: preselect before the
                         // panel presents so the ring/selection show on open.
                         if let Some((rect, idx)) = initial_region(args, &s) {
@@ -7694,12 +7665,6 @@ impl ScreenshotController {
                 Some(Vec::new())
             };
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (args, cfg, images);
-            self.note("screenshot: full/screen capture needs macOS");
-            self.reply = Some(Vec::new());
-        }
     }
 
     /// `NSScreen` under the pointer as a [`ScreenRef`], or the first screen.
@@ -7753,8 +7718,6 @@ impl ScreenshotController {
         {
             let _ = write_image_pasteboard(img);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = img;
         self.last_output["copied"] = json!(true);
         ScreenToast::show(&mut self.toast, cfg.copy_toast.clone(), "checkmark.circle.fill");
     }
@@ -7784,10 +7747,6 @@ impl ScreenshotController {
                     .map(|bytes| std::fs::write(&target, &bytes).is_ok())
                     .unwrap_or(false)
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                false
-            }
         } else {
             match &img.png {
                 Some(bytes) => std::fs::write(&target, bytes).is_ok(),
@@ -7810,8 +7769,6 @@ impl ScreenshotController {
             {
                 let _ = write_text_pasteboard(&target);
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = &target;
         }
         let toast = cfg.save_toast.replace("{}", &abbreviate_tilde(&target));
         ScreenToast::show(&mut self.toast, toast, "checkmark.circle.fill");
@@ -8031,8 +7988,6 @@ impl ScreenshotController {
             );
             return Some(ShotImage::with_png(pw, ph, png));
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = i;
         #[allow(unreachable_code)]
         None
     }
@@ -8516,11 +8471,6 @@ impl ScreenshotController {
                     .get(i)
                     .map(|p| p.isVisible())
                     .unwrap_or(false);
-                #[cfg(not(target_os = "macos"))]
-                let visible = {
-                    let _ = i;
-                    true
-                };
                 json!({
                     "id": d.id as i64,
                     "frame": [f.x as i64, f.y as i64, f.w as i64, f.h as i64],
@@ -8657,11 +8607,6 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
         };
         let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
         crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (img, ocr);
-        String::new()
     }
 }
 

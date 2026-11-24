@@ -989,15 +989,6 @@ mod appkit {
 #[allow(unused_imports)]
 pub use appkit::VimModeBadge;
 
-/// Non-AppKit build: the chip cannot draw.
-#[cfg(not(target_os = "macos"))]
-pub struct VimModeBadge;
-
-#[cfg(not(target_os = "macos"))]
-impl VimModeBadge {
-    pub fn draw(&self) {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

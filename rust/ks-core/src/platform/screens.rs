@@ -101,24 +101,6 @@ fn info(scr: &NSScreen) -> Option<ScreenInfo> {
     })
 }
 
-/// Every display. Non-macOS: always empty.
-#[cfg(not(target_os = "macos"))]
-pub fn screens() -> Vec<ScreenInfo> {
-    Vec::new()
-}
-
-/// The main screen. Non-macOS: always `None`.
-#[cfg(not(target_os = "macos"))]
-pub fn main_screen() -> Option<ScreenInfo> {
-    None
-}
-
-/// The screen containing `(x, y)`. Non-macOS: always `None`.
-#[cfg(not(target_os = "macos"))]
-pub fn screen_containing(x: f64, y: f64) -> Option<ScreenInfo> {
-    containing(&[], x, y)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,8 +59,6 @@ pub fn screenshot_saved_to_path_shelf(path: &str) {
             );
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = path;
 }
 
 #[cfg(target_os = "macos")]
@@ -200,10 +198,5 @@ pub fn popup_rename_commit(path: &str, name: &str) -> Result<Option<String>, Str
             Some(h) => h(path, name),
             None => crate::views::files::rename_into(path, name),
         }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (path, name);
-        Ok(None)
     }
 }

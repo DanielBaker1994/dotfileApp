@@ -193,7 +193,6 @@ mod appkit {
         img
     }
 
-
     // ------------------------------------------------------------ list pane
 
     pub struct FileListIvars {

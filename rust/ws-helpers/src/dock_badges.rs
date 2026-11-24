@@ -143,8 +143,3 @@ fn main() {
     imp::main();
 }
 
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("macOS only");
-    std::process::exit(1);
-}

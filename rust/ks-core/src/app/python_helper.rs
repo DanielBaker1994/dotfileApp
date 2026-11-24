@@ -246,11 +246,6 @@ pub fn is_executable(path: &str) -> bool {
     }
 }
 
-#[cfg(windows)]
-pub fn is_executable(path: &str) -> bool {
-    is_executable_windows_ext(Path::new(path))
-}
-
 /// True when a PATH entry should be skipped during python discovery.
 ///
 /// macOS `/usr/bin/python3` is the system 3.9, so the system directories are
@@ -289,35 +284,6 @@ fn find_python(lib: &str) -> Option<String> {
     None
 }
 
-/// Windows twin: `PATH` is `;`-separated (`std::env::split_paths`) and the
-/// interpreter is `python.exe` / the `py.exe` launcher, not `python3`. No
-/// Homebrew candidates.
-#[cfg(windows)]
-fn find_python(lib: &str) -> Option<String> {
-    let mut candidates: Vec<String> = Vec::new();
-    if let Ok(own) = std::env::var("WS_PYTHON") {
-        if !own.is_empty() {
-            candidates.push(own);
-        }
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let dir = dir.to_string_lossy().into_owned();
-            if skip_path_dir(&dir) {
-                continue;
-            }
-            candidates.push(format!("{dir}/python.exe"));
-            candidates.push(format!("{dir}/py.exe"));
-        }
-    }
-    for c in candidates {
-        if is_executable(&c) && python_runs_311(&c, lib) {
-            return Some(c);
-        }
-    }
-    None
-}
-
 #[cfg(unix)]
 fn python_runs_311(path: &str, lib: &str) -> bool {
     let Ok(mut child) = Command::new(path)
@@ -344,39 +310,6 @@ fn python_runs_311(path: &str, lib: &str) -> bool {
                 libc::kill(pid as i32, libc::SIGKILL);
             }
             false
-        }
-    }
-}
-
-/// Windows twin: no `libc::kill`, so keep the `Child` and poll it, killing a
-/// wedged interpreter through `Child::kill()` when the bound elapses.
-#[cfg(windows)]
-fn python_runs_311(path: &str, lib: &str) -> bool {
-    let Ok(mut child) = Command::new(path)
-        .args(["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"])
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .env("PYTHONPATH", lib)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    // Bounded wait so a wedged interpreter can't hang discovery.
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.code() == Some(0),
-            Ok(None) => {
-                if start.elapsed() >= Duration::from_secs(5) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return false,
         }
     }
 }

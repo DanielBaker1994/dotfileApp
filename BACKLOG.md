@@ -98,20 +98,9 @@ app's own keys configurable from `[shortcuts]` (real remapping), quiz mode. Old 
   `Reply::peer_closed` is a stub.
 - **Key-only surfaces have no headless entry**: `do:key:SPEC` records `last_key` only, so
   Cmd+K pickers, find bars and right-click menus cannot be driven headless.
-- **Known failing tests** (not regressions): `bin/linux-check.sh check` (macOS-only
-  `ui::toast::show` in `files.rs` `copy_contents_entry`);
-  `Tests/test_mcp_verbs.py::test_every_do_host_action_verb_is_in_the_table`; the flaky
+- **Known failing tests** (not regressions): `Tests/test_mcp_verbs.py::test_every_do_host_action_verb_is_in_the_table`; the flaky
   `engines::path_shelf::tests::pure_add_merges_with_another_writers_entries_atomically`
   under parallel runs.
-
-## Ports (Linux / Windows)
-
-State: macOS is the only GUI; non-macOS builds are headless-only and the Linux check is
-already broken. Whether to drop Linux/Windows support entirely is an owner decision (if
-yes: delete `bin/linux-check.sh`, `bin/windows-check.sh`, `bin/build-linux.sh`,
-`Tests/test_linux_headless.sh`, `rust/docker/`, the `ws test linux*|windows` cases, and
-strip non-mac `cfg` code). The old plans: `git show 64bbd4a^:PLAN-cross-platform.md`,
-`PLAN-windows.md`, `PORTS-STATUS.md`.
 
 ## Tooling cleanup (from the teardown handoff)
 

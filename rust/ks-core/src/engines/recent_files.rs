@@ -390,10 +390,6 @@ fn fnmatch_str(pattern: &str, name: &str) -> bool {
         };
         unsafe { libc::fnmatch(cp.as_ptr(), cn.as_ptr(), 0) == 0 }
     }
-    #[cfg(windows)]
-    {
-        glob_match(pattern, name)
-    }
 }
 
 /// Minimal, portable stand-in for `fnmatch(3)` with flags 0 (the Windows CRT
@@ -616,8 +612,6 @@ fn stamp(p: &str) -> Option<f64> {
     }
     #[cfg(target_os = "macos")]
     let t = (st.st_birthtime as f64).max(st.st_mtime as f64);
-    #[cfg(not(target_os = "macos"))]
-    let t = st.st_mtime as f64;
     Some(t)
 }
 
@@ -746,13 +740,6 @@ fn xattr_data(p: &str, name: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(buf)
-}
-
-/// Non-macOS twin: the 6-argument `getxattr` + `XATTR_NOFOLLOW` and the
-/// `com.apple.*` attribute names are macOS-only, so there is never any data.
-#[cfg(not(target_os = "macos"))]
-fn xattr_data(_p: &str, _name: &str) -> Option<Vec<u8>> {
-    None
 }
 
 fn xattr_string(p: &str, name: &str) -> Option<String> {
@@ -961,8 +948,6 @@ impl RecentFiles {
             } else {
                 raw.clone()
             };
-            #[cfg(not(target_os = "macos"))]
-            let p = raw.clone();
             if !in_scope(&self.home, self.everywhere, &p) {
                 continue;
             }
@@ -1292,10 +1277,6 @@ impl RecentFiles {
         self.stream = Some(StreamHandle { stream });
     }
 
-    /// Non-macOS twin: there is no FSEvents watcher to start.
-    #[cfg(not(target_os = "macos"))]
-    pub fn start(&mut self) {}
-
     #[cfg(target_os = "macos")]
     pub fn stop(&mut self) {
         self.enabled = false;
@@ -1309,11 +1290,6 @@ impl RecentFiles {
         }
     }
 
-    /// Non-macOS twin: there is no FSEvents stream to tear down.
-    #[cfg(not(target_os = "macos"))]
-    pub fn stop(&mut self) {
-        self.enabled = false;
-    }
 }
 
 impl Drop for RecentFiles {

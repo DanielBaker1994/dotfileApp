@@ -29,12 +29,6 @@ pub fn frontmost_app() -> Option<FrontApp> {
     })
 }
 
-/// The frontmost application. Non-macOS: always `None`.
-#[cfg(not(target_os = "macos"))]
-pub fn frontmost_app() -> Option<FrontApp> {
-    None
-}
-
 /// Bring the app with process id `pid` forward (hand focus back to it).
 /// `false` when no such app is running or the activation was refused.
 #[cfg(target_os = "macos")]
@@ -46,12 +40,6 @@ pub fn activate_pid(pid: i32) -> bool {
     }
 }
 
-/// Non-macOS: nothing to activate.
-#[cfg(not(target_os = "macos"))]
-pub fn activate_pid(_pid: i32) -> bool {
-    false
-}
-
 /// CFBundleShortVersionString of the running bundle; "" if none.
 #[cfg(target_os = "macos")]
 pub fn bundle_version() -> String {
@@ -61,12 +49,6 @@ pub fn bundle_version() -> String {
         .and_then(|v| v.downcast::<NSString>().ok())
         .map(|v| v.to_string())
         .unwrap_or_default()
-}
-
-/// The running build's version. Non-macOS: the crate's compile-time version.
-#[cfg(not(target_os = "macos"))]
-pub fn bundle_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[cfg(test)]

@@ -86,35 +86,6 @@ pub fn set_file_and_text(path: &str, text: &str) -> bool {
     ok && pb.writeObjects(&NSArray::from_retained_slice(&objects))
 }
 
-/// No file flavor off macOS: the text alone.
-#[cfg(not(target_os = "macos"))]
-pub fn set_file_and_text(_path: &str, text: &str) -> bool {
-    set_text(text)
-}
-
-/// Rich + plain clipboard write (`arboard`'s HTML flavor with a text twin).
-#[cfg(not(target_os = "macos"))]
-pub fn set_html(html: &str, text: &str) -> bool {
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set_html(html.to_owned(), Some(text.to_owned())))
-        .is_ok()
-}
-
-/// The system clipboard's text, if it holds any.
-#[cfg(not(target_os = "macos"))]
-pub fn get_text() -> Option<String> {
-    arboard::Clipboard::new().ok()?.get_text().ok()
-}
-
-/// Replace the system clipboard with plain `text`.
-/// Returns whether the write was accepted.
-#[cfg(not(target_os = "macos"))]
-pub fn set_text(text: &str) -> bool {
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set_text(text.to_owned()))
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

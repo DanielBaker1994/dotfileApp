@@ -292,8 +292,6 @@ impl CommandHandler for QuickHandler {
             "screenshot-permission" => {
                 #[cfg(target_os = "macos")]
                 let ok = crate::views::screenshot::screen_capture_permitted();
-                #[cfg(not(target_os = "macos"))]
-                let ok = false;
                 reply.send(if ok { "granted" } else { "denied" });
                 None
             }

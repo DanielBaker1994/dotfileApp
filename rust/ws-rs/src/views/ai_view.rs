@@ -115,7 +115,6 @@ mod appkit {
 
     type Sink = Rc<dyn Fn(AIEvent)>;
 
-
     fn text_view(mtm: MainThreadMarker, colors: &PopupColors, editable: bool) -> (Retained<NSScrollView>, Retained<NSTextView>) {
         let scroll = crate::ui::style::plain_scroll(mtm);
         let tv = NSTextView::new(mtm);

@@ -119,12 +119,6 @@ menu, or pass a command. `./ws help` lists everything.
   `jira-doctor.sh`
   (health checks, `/health-checks` window). Tests: `python3 Tests/test_jira_poll.py`
 
-### Linux (experimental)
-
-The egui (Linux/Windows) frontend was removed in Nov 2026. Off macOS the daemon runs
-headless only (socket API, no UI); `bin/linux-check.sh check|test` compiles it in Docker.
-See `AGENTS.md` ▸ "Linux (experimental)".
-
 ### Headless control + MCP
 
 `kitchen-sink headless` runs the daemon with no window, menu or Dock presence

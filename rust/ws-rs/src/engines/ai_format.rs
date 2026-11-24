@@ -166,11 +166,6 @@ impl RichText {
         {
             Self::rtf_appkit(fragment)
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = fragment;
-            None
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -238,10 +233,6 @@ impl RichText {
         #[cfg(target_os = "macos")]
         {
             Self::copy_appkit(markdown, fragment, target);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (markdown, fragment, target);
         }
     }
 

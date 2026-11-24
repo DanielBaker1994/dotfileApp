@@ -143,35 +143,6 @@ impl ShotOCR {
         out
     }
 
-    /// Non-macOS OCR (W6-D): Vision is macOS-only, so this twin takes the
-    /// capture's **PNG bytes** (macOS decodes them to a `CGImage` first) and
-    /// shells out to the `tesseract` CLI. `None` when `tesseract` is absent,
-    /// the bytes are not a PNG, or the command fails — the caller reads that
-    /// as "no text", like the macOS twin's empty `Vec`. Plain-text stdout has
-    /// no boxes, so each non-empty line gets a full-image-width box stacked
-    /// top→bottom, preserving order through [`ShotOCR::join`].
-    #[cfg(not(target_os = "macos"))]
-    pub fn recognize(png: &[u8], cfg: &ShotOCRConfig) -> Option<Vec<ShotOCRLine>> {
-        let (img_w, img_h) = png_size(png)?;
-        if !tesseract_available() {
-            return None;
-        }
-        let path = write_temp_png(png)?;
-        let mut cmd = std::process::Command::new("tesseract");
-        cmd.arg(&path).arg("stdout");
-        if let Some(langs) = tesseract_langs(&cfg.languages) {
-            cmd.arg("-l").arg(langs);
-        }
-        let output = cmd.output();
-        let _ = std::fs::remove_file(&path);
-        let output = output.ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(parse_tesseract_stdout(&stdout, img_w, img_h))
-    }
-
     pub fn join(lines: &[ShotOCRLine]) -> String {
         ShotOCR::join_columns(lines, 0.0)
     }
@@ -415,29 +386,6 @@ fn tesseract_langs(languages: &[String]) -> Option<String> {
         }
     }
     if out.is_empty() { None } else { Some(out.join("+")) }
-}
-
-/// `tesseract --version` succeeds ⇒ the CLI is on `PATH` (W6-D).
-#[cfg(not(target_os = "macos"))]
-fn tesseract_available() -> bool {
-    std::process::Command::new("tesseract")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Write the PNG to a unique temp file and return its path (W6-D).
-#[cfg(not(target_os = "macos"))]
-fn write_temp_png(png: &[u8]) -> Option<std::path::PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("ks-ocr-{}-{}.png", std::process::id(), seq));
-    std::fs::write(&path, png).ok()?;
-    Some(path)
 }
 
 #[cfg(test)]

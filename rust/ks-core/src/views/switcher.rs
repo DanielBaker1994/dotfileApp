@@ -477,8 +477,6 @@ impl ViewSwitcherPanel {
             ui.panel.makeKeyAndOrderFront(None);
             ui.panel.makeFirstResponder(Some(&ui.list.search));
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = host;
     }
 }
 

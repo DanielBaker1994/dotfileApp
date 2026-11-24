@@ -3,9 +3,6 @@
 //! same path string maps to a named pipe via `interprocess`. The path→pipe-name
 //! mapping is a pure function so it can be unit-tested on every platform.
 
-#[cfg(windows)]
-use std::io;
-
 /// Map the Unix-domain socket path the macOS/Linux daemon uses (e.g.
 /// `$TMPDIR/ws-notes.sock`) to a Windows named-pipe name in the `\\.\pipe\`
 /// namespace. Named pipes are a flat, machine-wide namespace with no path
@@ -25,56 +22,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-#[cfg(windows)]
-pub use interprocess::local_socket::{Listener, Stream};
-
-#[cfg(windows)]
-use interprocess::local_socket::traits::Stream as _;
-
-#[cfg(windows)]
-use interprocess::local_socket::{ConnectOptions, GenericFilePath, ListenerOptions, ToFsName};
-
-#[cfg(windows)]
-use std::time::Duration;
-
-/// Bind a named-pipe listener for the mapped path.
-#[cfg(windows)]
-pub fn bind(path: &str) -> io::Result<Listener> {
-    let pipe = pipe_name(path);
-    let name = pipe.to_fs_name::<GenericFilePath>()?;
-    ListenerOptions::new().name(name).create_sync()
-}
-
-/// Connect a named-pipe stream for the mapped path.
-#[cfg(windows)]
-pub fn connect(path: &str) -> io::Result<Stream> {
-    let pipe = pipe_name(path);
-    let name = pipe.to_fs_name::<GenericFilePath>()?;
-    ConnectOptions::new().name(name).connect_sync()
-}
-
-/// Connect and set the read/write timeouts (the client counterpart of the Unix
-/// `SO_RCVTIMEO`/`SO_SNDTIMEO`). `None` leaves a direction blocking.
-#[cfg(windows)]
-pub fn connect_with_timeouts(
-    path: &str,
-    read: Option<Duration>,
-    write: Option<Duration>,
-) -> io::Result<Stream> {
-    let stream = connect(path)?;
-    let _ = stream.set_recv_timeout(read);
-    let _ = stream.set_send_timeout(write);
-    Ok(stream)
-}
-
-/// Apply the same send/recv timeouts the Unix body sets on accepted sockets
-/// (`SO_SNDTIMEO` 5 s, `SO_RCVTIMEO` 2 s). Named-pipe streams block by default.
-#[cfg(windows)]
-pub fn configure(stream: &Stream) {
-    let _ = stream.set_send_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_recv_timeout(Some(Duration::from_secs(2)));
 }
 
 #[cfg(test)]

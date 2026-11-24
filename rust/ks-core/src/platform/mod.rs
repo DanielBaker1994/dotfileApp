@@ -47,9 +47,3 @@ pub fn bell() {
     objc2_app_kit::NSBeep();
 }
 
-/// Ring the system bell. Non-macOS fallback: a plain BEL byte on stderr.
-#[cfg(not(target_os = "macos"))]
-pub fn bell() {
-    use std::io::Write;
-    let _ = std::io::stderr().write_all(b"\x07");
-}

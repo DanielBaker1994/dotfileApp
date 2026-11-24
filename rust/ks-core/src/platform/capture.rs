@@ -75,20 +75,6 @@ pub fn capture_screen(_display: usize) -> Option<RgbaImage> {
     None
 }
 
-/// Capture display `display` as a tightly packed RGBA8 image.
-///
-/// Non-macOS: `xcap` enumerates monitors and captures the `display`-th one (in
-/// [`display_count`] order). A missing display, a failed capture, or a headless
-/// session with no X11/Wayland display yields `None`.
-#[cfg(not(target_os = "macos"))]
-pub fn capture_screen(display: usize) -> Option<RgbaImage> {
-    let monitors = xcap::Monitor::all().ok()?;
-    let monitor = monitors.get(display)?;
-    let image = monitor.capture_image().ok()?;
-    let (width, height) = image.dimensions();
-    RgbaImage::new(width, height, image.into_raw())
-}
-
 /// How many displays [`capture_screen`] can address.
 ///
 /// macOS: the `NSScreen` count (0 off the main thread). Non-macOS: the `xcap`
@@ -96,12 +82,6 @@ pub fn capture_screen(display: usize) -> Option<RgbaImage> {
 #[cfg(target_os = "macos")]
 pub fn display_count() -> usize {
     crate::platform::screens().len()
-}
-
-/// How many displays [`capture_screen`] can address.
-#[cfg(not(target_os = "macos"))]
-pub fn display_count() -> usize {
-    xcap::Monitor::all().map(|m| m.len()).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -144,17 +124,4 @@ mod tests {
         assert_eq!(img.pixel(0, 2), None);
     }
 
-    /// The Linux check image (Docker) has no X11/Wayland display, so `xcap`
-    /// cannot enumerate monitors: capture degrades to `None`, never panics.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn capture_screen_is_none_without_a_display() {
-        let n = display_count();
-        if n == 0 {
-            assert_eq!(capture_screen(0), None);
-        } else {
-            // A real display is present; an out-of-range index is still `None`.
-            assert_eq!(capture_screen(n), None);
-        }
-    }
 }

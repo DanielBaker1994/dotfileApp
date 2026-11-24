@@ -2802,8 +2802,6 @@ pub fn start_recent(section: &std::collections::HashMap<String, String>) {
         engine.start();
         r.set(Box::into_raw(engine));
     });
-    #[cfg(not(target_os = "macos"))]
-    let _ = section;
 }
 
 /// Run `f` on the shared Recent engine (no-op before `start_recent`).
@@ -2816,8 +2814,6 @@ pub fn with_recent(f: impl FnOnce(&mut crate::engines::recent_files::RecentFiles
             f(unsafe { &mut *p });
         }
     });
-    #[cfg(not(target_os = "macos"))]
-    let _ = f;
 }
 
 /// `RecentFiles.shared.entries(arrivedOnly:)` (empty before `start_recent`).

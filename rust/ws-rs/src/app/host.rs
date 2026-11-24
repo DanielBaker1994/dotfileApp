@@ -988,15 +988,6 @@ impl SwitcherController {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    pub fn run_on_main<T: Send>(
-        &self,
-        work: impl FnOnce() -> T + Send,
-        _timeout: std::time::Duration,
-    ) -> Option<T> {
-        Some(work())
-    }
-
     // -- direct model accessors (no AppKit) ---------------------------------
 
     pub fn current(&self) -> Option<SlotView> {
@@ -1229,11 +1220,6 @@ impl SwitcherController {
         {
             self.run_on_main(move || daemon_ui::user_in_it(wid), std::time::Duration::from_secs(2))
                 .unwrap_or(true)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = wid;
-            true
         }
     }
 
@@ -2319,11 +2305,6 @@ return Some(None)
                 }
             });
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (args, cfg, controller);
-            reply.send("error: pane-shot needs macOS");
-        }
     }
 
     /// `window-shot[\tWORDS]`: present the view (if `--view`), then capture the
@@ -2400,11 +2381,6 @@ return Some(None)
                 Some(Err(e)) => reply.send(&format!("error: {e}")),
                 None => reply.send("error: window-shot timed out"),
             }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = args;
-            reply.send("error: window-shot needs macOS");
         }
     }
 }
@@ -2855,11 +2831,6 @@ impl SwitcherController {
         .flatten()
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn live_focus(&self) -> Option<LiveFocus> {
-        None
-    }
-
     /// No daemon UI was installed (`install_ui` / `install_main_queue` never
     /// ran): the `headless` server. Screen-capture verbs must refuse rather
     /// than grab the real screen (F0-3).
@@ -2916,8 +2887,6 @@ impl CommandHandler for SwitcherController {
             "screenshot-permission" => {
                 #[cfg(target_os = "macos")]
                 let ok = crate::views::screenshot::screen_capture_permitted();
-                #[cfg(not(target_os = "macos"))]
-                let ok = false;
                 reply.send(if ok { "granted" } else { "denied" });
             }
             "screenshot" => self.screenshot_message(rest, reply),
@@ -3795,8 +3764,6 @@ mod daemon_ui {
                     if let Some(cfg) = plan {
                         let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    let _ = plan;
                 })
                 .ok();
         }

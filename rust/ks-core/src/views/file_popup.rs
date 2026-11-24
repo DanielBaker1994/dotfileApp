@@ -106,15 +106,6 @@ pub fn is_live() -> bool {
     appkit::is_live()
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn is_live() -> bool {
-    false
-}
-
-/// No popup off macOS.
-#[cfg(not(target_os = "macos"))]
-pub fn show(_path: &str, _over: Option<&()>) {}
-
 // ---------------------------------------------------------------------------
 // The live window (macOS)
 // ---------------------------------------------------------------------------

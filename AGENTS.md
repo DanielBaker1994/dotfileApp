@@ -194,23 +194,10 @@ An agent can drive and verify the app over the socket — no computer control:
   Requests over 2048 bytes are refused (`request too long`), not truncated. Test status and open
   strategy and the orchestrator playbook for DeepSeek test runs: `TESTING.md`; open bugs and leads: `BACKLOG.md` ("MCP / headless control", "Leads").
 
-## Linux (experimental)
+## Platform
 
-The egui/eframe frontend (the Linux/Windows UI) was removed in Nov 2026 by owner
-decision (app teardown to its minimal form). Off macOS the daemon now always runs
-**headless** (socket API only, no UI); the AppKit halves stay compiled out
-(`#[cfg(target_os = "macos")]`). The old port plans are in git history (`git log -- PLAN-cross-platform.md`);
-`BACKLOG.md` "Ports" holds the open decision.
-
-```bash
-bin/linux-check.sh check          # cargo check --workspace --all-targets in Docker
-bin/linux-check.sh test [filter]  # cargo test -p ws-rs + the plain-script Python suites
-./ws test linux-headless          # Docker `headless` smoke: state + do:open:files
-```
-
-Known: `bin/linux-check.sh check` already failed at eb76b0e (before the egui removal):
-`ks-core/src/views/files.rs` `copy_contents_entry` calls `ui::toast::show`, which only
-exists on macOS.
+macOS only. Linux and Windows support was dropped in Nov 2026 by owner decision
+(scripts, Docker image and non-macOS code removed). The old plans are in git history.
 
 ## Repo layout / code map
 

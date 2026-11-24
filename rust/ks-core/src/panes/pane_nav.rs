@@ -335,16 +335,6 @@ mod appkit {
 #[allow(unused_imports)]
 pub use appkit::PaneFocusRing;
 
-/// Non-AppKit build: the ring cannot draw.
-#[cfg(not(target_os = "macos"))]
-pub struct PaneFocusRing;
-
-#[cfg(not(target_os = "macos"))]
-impl PaneFocusRing {
-    pub fn apply(&self, _style: RingStyle) {}
-    pub fn draw(&self) {}
-}
-
 /// `layer?.cornerRadius = 6` on the ring view (`PaneNav.swift:264`).
 pub const RING_CORNER_RADIUS: f64 = 6.0;
 

@@ -987,10 +987,6 @@ impl PathsWindow {
                 .map(|w| w.isVisible())
                 .unwrap_or(false)
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
     }
 
     /// The panel's `windowNumber()` once built, else `0`.
@@ -1001,10 +997,6 @@ impl PathsWindow {
                 .as_ref()
                 .map(|w| w.windowNumber() as i64)
                 .unwrap_or(0)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            0
         }
     }
 

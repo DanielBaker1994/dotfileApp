@@ -826,10 +826,6 @@ impl ToolPanel {
         {
             self.window.as_ref().map(|w| w.isKeyWindow()).unwrap_or(false)
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
     }
 
     pub fn window_number(&self) -> i64 {
@@ -840,20 +836,12 @@ impl ToolPanel {
                 .map(|w| w.windowNumber() as i64)
                 .unwrap_or(0)
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            0
-        }
     }
 
     pub fn window_level(&self) -> i64 {
         #[cfg(target_os = "macos")]
         {
             self.window.as_ref().map(|w| w.level() as i64).unwrap_or(0)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            0
         }
     }
 
@@ -1113,10 +1101,6 @@ impl ToolPanel {
         {
             self.save_filefast_macos()
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1294,16 +1278,6 @@ impl ToolPanel {
             let mut cmd = {
                 let mut cmd = Command::new("/bin/bash");
                 cmd.arg("-c")
-                    .arg(&script)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                cmd
-            };
-            #[cfg(windows)]
-            let mut cmd = {
-                let mut cmd = Command::new("cmd");
-                cmd.arg("/C")
                     .arg(&script)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())

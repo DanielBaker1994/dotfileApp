@@ -215,11 +215,6 @@ pub fn sync_launch_agent() {
     launchctl(&["bootstrap", &gui, &plist]);
 }
 
-/// Windows: `launchd`/`launchctl` does not exist, so the Jira poller service is
-/// not supported — there is no launch agent to install or boot out.
-#[cfg(windows)]
-pub fn sync_launch_agent() {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -67,7 +67,6 @@ pub fn cmd_edit_in_popup(event: &NSEvent) -> bool {
     unsafe { app.sendAction_to_from(selector, Some(target), None) }
 }
 
-
 /// `TextEditKeys.killWordBackward` for any editable `NSText` first
 /// responder (field editors included) in the key window.
 pub fn kill_word_in_text_input(event: &NSEvent) -> bool {

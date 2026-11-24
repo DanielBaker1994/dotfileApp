@@ -189,12 +189,6 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
 fn run_quick(paths: &Paths, action: app::quick::StartAction, lock: DaemonLock) {
     #[cfg(target_os = "macos")]
     app::quick::run(paths, action, lock);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (paths, action, lock);
-        eprintln!("kitchen-sink quick: the quick agent is macOS only");
-        std::process::exit(1);
-    }
 }
 
 /// Install the menu-bar status item from the ported menu spec. The handle is
@@ -252,8 +246,6 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
         }
         // Off macOS the menus (and this dispatcher) are never installed, but
         // the match must still cover `Quit` there.
-        #[cfg(not(target_os = "macos"))]
-        MenuAction::Quit => {}
     }
 }
 
