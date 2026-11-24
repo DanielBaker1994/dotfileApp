@@ -830,9 +830,33 @@ mod appkit {
                     ..PopupConfig::default()
                 };
                 let panel = PopupPanel::create(mtm, &cfg);
+                // The Files view draws no background of its own: wrap it in the
+                // shared translucent card (as the palette does) so it reads over any app.
+                let colors = crate::ui::theme::section_colors("files");
+                let card = crate::ui::panel_frame::build(
+                    mtm,
+                    w,
+                    h,
+                    crate::ui::panel_frame::PanelSpec {
+                        colors,
+                        header_color: None,
+                        title: None,
+                        meta: "",
+                        buttons: Vec::new(),
+                        icon: None,
+                        tint_alpha: 0.92,
+                    },
+                );
+                card.chrome.setHidden(true);
+                card.content.setHidden(true);
                 if let Some(root) = win.browser.content_view() {
-                    panel.setContentView(Some(&root));
+                    root.setFrame(card.root.bounds());
+                    card.root.addSubview(&root);
                 }
+                panel.setOpaque(false);
+                panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+                panel.setHasShadow(true);
+                panel.setContentView(Some(&card.root));
                 panel.setTitle(&objc2_foundation::NSString::from_str("Recent files"));
                 // Click-off closes it (no palette), unless the preview popup took key.
                 panel.set_on_resign(Box::new(|| {
