@@ -98,8 +98,8 @@ the whole cargo workspace; module cases map to `cargo test -p ws-rs -p ks-core <
 (`filter`, `paths`, `screenshot`, `ansi`, `prose` (= `engines::ai_format`), `panes`,
 `vim-keys`, `recent`, `helper-client`),
 the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
-`WS_PYTHON`), `settings`, `jira-*`, `confluence-*`, `shot-model`,
-…). Direct: `cd rust && cargo test` (~820 tests) or
+`WS_PYTHON`), `settings`, `jira-*`, `confluence-*`,
+…). Direct: `cd rust && cargo test` (~680 tests) or
 `python3 Tests/test_x.py`.
 
 UI test suites (`ui`, `vim`, `focus`) were **deleted by owner decision** — they
@@ -288,7 +288,7 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 
 - `pylib/` — engines + codecs: `helper/` (the JSON-lines worker), `jsonmgr.py`,
   `config_text.py` (the commands.toml codec), `file_ops`,
-  `ai_format`, `ansi`, `shot_model`, `paneshot`, `shelf`,
+  `ai_format`, `shelf`,
   `status`, `ignore_rules`, `jira_*` / `confluence_*` glue,
   plus the shipped JSON homes. `text_table/` is standalone (no helper protocol):
   `python3 -m text_table IN OUT --format outlook --fallback-out FB --meta M` —
@@ -298,8 +298,8 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 - `jira/` (poller CLI + API + fake server + `com.jira.poll` launchd agent),
   `confluence/` (API/CLI), `notify/` (unread counts; uses the Rust AX helpers),
   `settings_hub/` (`ws-settings` CLI/TUI; edits commands.toml
-  line-preservingly). The app runs these through helper `script.run` (or direct
-  spawn for long jobs); they are also standalone CLIs.
+  line-preservingly). The app spawns these directly (`app/process_run.rs`);
+  they are also standalone CLIs.
 
 ### Other dirs
 
@@ -482,7 +482,7 @@ pythons, requiring ≥ 3.11. Protocol: one JSON object per line — request
 `{"id", "ok": false, "error": {"message", "traceback"}}`; out-of-order replies
 matched by id; an 8-worker pool; a killed worker restarts on the next call.
 Handle-based engines (`fileops.*`, `ignore.*`) keep
-state in the worker. `script.run` runs the Python CLIs as children.
+state in the worker. The Python CLIs are spawned by `app/process_run.rs`.
 `engines/config_text.rs` uses the helper (`config.decode`,
 `config.section_entries`, `config.line`, `config.setting`, …) and caches
 decodes as `~/.cache/kitchen-sink/config-<hash>.json`.
@@ -560,7 +560,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   `post_main` (async). Never hold the `ControllerInner` lock while waiting on
   main.
 - **Helper pool starvation + retries.** One 8-worker pool serves interactive
-  calls and long `script.run` jobs; treat helper replies as fallible; don't
+  calls; treat helper replies as fallible; don't
   memoize failures.
 - **Swift `canBecomeKey` is the ObjC selector `canBecomeKeyWindow`** (same for
   Main) — override the ObjC name in `define_class!`, or the panel never takes key.
