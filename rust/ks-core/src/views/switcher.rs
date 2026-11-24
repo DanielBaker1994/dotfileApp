@@ -1243,8 +1243,8 @@ mod macos {
 
     // -- the `show` command palette panel -----------------------------------
 
-    /// The palette is wider than the switcher: two panes side by side.
-    pub const PALETTE_WIDTH: f64 = 560.0;
+    /// Narrow, Raycast-like: one list, no side panes.
+    pub const PALETTE_WIDTH: f64 = 440.0;
 
     /// The palette's own row cap (the shared `MAX_ROWS` is the view
     /// switcher's).

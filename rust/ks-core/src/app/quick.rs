@@ -382,6 +382,10 @@ mod appkit {
         pick_return: Cell<Option<(i32, Instant)>>,
         polling: Cell<bool>,
         monitor: RefCell<Option<MonitorHandle>>,
+        /// Raycast-style navigation stack: the surface a palette pick opened
+        /// (`"paths"` or a tool name) and the app to hand back to. Esc on that
+        /// surface returns to the palette; only Esc on the palette closes.
+        back_to: RefCell<Option<(String, Option<i32>)>>,
     }
 
     impl QuickUi {
@@ -614,9 +618,13 @@ mod appkit {
             match action {
                 PaletteAction::Workspace(id) => switch_workspace(&id),
                 PaletteAction::Command(id) => match route_command(&id) {
-                    PickRoute::Paths => self.show_paths(),
+                    PickRoute::Paths => {
+                        self.set_back_to("paths");
+                        self.show_paths();
+                    }
                     PickRoute::Tool(name) => {
                         if let Some(kind) = ToolKind::from_name(name) {
+                            self.set_back_to(name);
                             self.open_tool(kind);
                         }
                     }
@@ -632,6 +640,32 @@ mod appkit {
                     PickRoute::Screenshot => self.screenshot(Vec::new(), None),
                     PickRoute::Forward(msg) => self.forward(&msg),
                 },
+            }
+        }
+
+        /// A palette pick is about to open `surface`: remember it so Esc there
+        /// comes back to the palette.
+        fn set_back_to(&self, surface: &str) {
+            let pid = self.pick_return.get().map(|(pid, _)| pid);
+            *self.back_to.borrow_mut() = Some((surface.to_string(), pid));
+        }
+
+        /// `surface` just closed. If a palette pick opened it and Esc closed it,
+        /// show the palette again (the previous view) instead of leaving.
+        fn surface_closed(&self, surface: &str, by_esc: bool) {
+            let pid = {
+                let mut b = self.back_to.borrow_mut();
+                match b.as_ref() {
+                    Some((s, _)) if s == surface => b.take().and_then(|(_, pid)| pid),
+                    _ => return,
+                }
+            };
+            if !by_esc {
+                return;
+            }
+            self.show_palette();
+            if self.palette_return.get().is_none() {
+                self.palette_return.set(pid);
             }
         }
 
@@ -686,6 +720,7 @@ mod appkit {
         fn poll_tick(&self) -> bool {
             let Some(mtm) = MainThreadMarker::new() else { return false };
             let mut any = false;
+            let mut closed: Vec<String> = Vec::new();
             if let Ok(mut tools) = self.tools.try_borrow_mut() {
                 let key_wid: i64 = NSApplication::sharedApplication(mtm)
                     .keyWindow()
@@ -703,11 +738,22 @@ mod appkit {
                             }
                         }
                     }
+                    let was_shown = panel.is_shown();
                     panel.poll();
+                    if was_shown && !panel.is_shown() {
+                        closed.push(name.clone());
+                    }
                     any |= panel.is_shown();
                 }
             } else {
                 any = true;
+            }
+            if !closed.is_empty() {
+                // Esc is the last event the app saw (a timer does not replace it).
+                let by_esc = esc_just_pressed(mtm);
+                for name in closed {
+                    self.surface_closed(&name, by_esc);
+                }
             }
             self.publish_state();
             any
@@ -746,6 +792,7 @@ mod appkit {
                         }
                         ui.paths_surface(|w| w.hide_window());
                         ui.publish_state();
+                        ui.surface_closed("paths", false);
                     });
                 }));
             }
@@ -793,6 +840,7 @@ mod appkit {
                 PathsEvent::Escape => {
                     self.paths_surface(|w| w.hide_window());
                     self.publish_state();
+                    self.surface_closed("paths", true);
                 }
                 PathsEvent::Enter => self.paths_return(),
                 PathsEvent::Click { row, double } => {
@@ -989,6 +1037,15 @@ mod appkit {
         }
     }
 
+    /// True when the app's current event is an Esc key-down from the last half second.
+    fn esc_just_pressed(mtm: MainThreadMarker) -> bool {
+        let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else { return false };
+        let uptime = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+        event.r#type() == objc2_app_kit::NSEventType::KeyDown
+            && event.keyCode() == popup::KEY_ESC
+            && uptime - event.timestamp() < 0.5
+    }
+
     /// One 30 ms poll turn; reschedules only while a tool panel is up.
     fn schedule_poll() {
         let Ok(when) = dispatch2::DispatchTime::try_from(Duration::from_millis(30)) else { return };
@@ -1064,6 +1121,7 @@ mod appkit {
             pick_return: Cell::new(None),
             polling: Cell::new(false),
             monitor: RefCell::new(None),
+            back_to: RefCell::new(None),
         });
         QUICK.with(|q| *q.borrow_mut() = Some(ui.clone()));
 
