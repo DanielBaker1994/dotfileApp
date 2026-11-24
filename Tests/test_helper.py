@@ -17,8 +17,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "pylib"))
 
-FIXTURES = os.path.join(ROOT, "Tests", "helper_fixtures")
-
 from helper import VERSION, dispatch, method
 
 import helper.methods as _methods  # noqa: F401 — registers the production methods
@@ -78,48 +76,7 @@ class Dispatch(unittest.TestCase):
         self.assertIn("kaboom", reply["error"]["traceback"])
 
 
-class ScriptBridge(unittest.TestCase):
-    def run_script(self, **params):
-        return dispatch({"id": 1, "method": "script.run", "params": params})
-
-    def test_runs_a_script_in_its_folder(self):
-        reply = self.run_script(folder=FIXTURES, script="echo_script.py",
-                                args=["a", "b"], stdin="hello\n")
-        self.assertTrue(reply["ok"], reply)
-        res = reply["result"]
-        self.assertEqual(res["code"], 0)
-        self.assertEqual(res["stderr"], "")
-        payload = json.loads(res["stdout"].strip().splitlines()[-1])
-        self.assertEqual(payload["echo"], "hello\n")
-        self.assertEqual(payload["argv"], ["a", "b"])
-
-    def test_unicode_stdin_round_trips(self):
-        reply = self.run_script(folder=FIXTURES, script="echo_script.py", stdin="héllo ✓\n")
-        payload = json.loads(reply["result"]["stdout"].strip().splitlines()[-1])
-        self.assertEqual(payload["echo"], "héllo ✓\n")
-
-    def test_a_failing_script_is_data_not_an_error(self):
-        reply = self.run_script(folder=FIXTURES, script="fail_script.py")
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["code"], 3)
-        self.assertIn("boom: fixture failure", reply["result"]["stderr"])
-
-    def test_missing_script_is_an_error(self):
-        reply = self.run_script(folder=FIXTURES, script="no_such_script.py")
-        self.assertFalse(reply["ok"])
-        self.assertIn("no such script", reply["error"]["message"])
-
-    def test_script_without_a_name_is_an_error(self):
-        reply = self.run_script(folder=FIXTURES)
-        self.assertFalse(reply["ok"])
-        self.assertIn("script is required", reply["error"]["message"])
-
-    def test_timeout_is_an_error(self):
-        reply = self.run_script(folder=FIXTURES, script="sleepy_script.py",
-                                args=["5"], timeout=0.1)
-        self.assertFalse(reply["ok"])
-        self.assertIn("timed out", reply["error"]["message"])
-
+class Methods(unittest.TestCase):
     def test_jira_paths_method(self):
         reply = dispatch({"id": 1, "method": "jira.paths"})
         self.assertTrue(reply["ok"], reply)
@@ -129,48 +86,6 @@ class ScriptBridge(unittest.TestCase):
             self.assertTrue(res[key], key)
         self.assertIn("status", res["cache"])
         self.assertIn("issues", res["cache"])
-
-    def test_jsonmgr_report_method(self):
-        # touch a lazy home through a method so the ledger has a consumer
-        dispatch({"id": 1, "method": "jira.filter_kinds", "params": {"catalog": []}})
-        reply = dispatch({"id": 2, "method": "jsonmgr.report"})
-        self.assertTrue(reply["ok"], reply)
-        rep = reply["result"]
-        homes = {h["name"]: h for h in rep["homes"]}
-        self.assertIn("pylib/shelf", homes)
-        self.assertTrue(homes["pylib/shelf"]["exists"])
-        consumers = {row["consumer"] for row in rep["ledger"]}
-        self.assertIn("jira_search", consumers)
-        self.assertIn("jira_paths", consumers)
-
-    def test_jira_style_method(self):
-        reply = dispatch({"id": 1, "method": "jira.style", "params": {
-            "values": {"status-done-words": "shipped"}}})
-        self.assertTrue(reply["ok"], reply)
-        res = reply["result"]
-        self.assertEqual(res["words"]["done"], ["shipped"])
-        self.assertEqual(res["status"][1]["words"], ["shipped"])
-        self.assertIn("key", res["dimFields"])
-
-    def test_jira_comments_method(self):
-        tmp = tempfile.mkdtemp(prefix="jira-comments-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        path = os.path.join(tmp, "issues.json")
-        with open(path, "w") as fh:
-            json.dump({"A-1": {"comments": [{"author": "a", "body": "b", "created": "c"}]}}, fh)
-        reply = dispatch({"id": 1, "method": "jira.comments", "params": {"path": path, "key": "A-1"}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["comments"], [{"author": "a", "body": "b", "created": "c"}])
-
-    def test_jira_page_methods(self):
-        reply = dispatch({"id": 1, "method": "jira.ticket_html", "params": {
-            "fields": {"key": "A-1", "status": "Done"},
-            "categories": {"Done": "done"}, "words": {}, "colors": {}, "labels": {}}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertIn("A-1", reply["result"]["html"])
-        reply = dispatch({"id": 2, "method": "jira.comments_html", "params": {"comments": []}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertIn("No comments.", reply["result"]["html"])
 
     def test_jira_search_methods(self):
         reply = dispatch({"id": 1, "method": "jira.filter_kinds", "params": {"catalog": []}})
@@ -207,35 +122,6 @@ class ScriptBridge(unittest.TestCase):
         reply = dispatch({"id": 3, "method": "jira.options", "params": {"kind": "nope"}})
         self.assertFalse(reply["ok"])
 
-    def test_jira_draft_method(self):
-        reply = dispatch({"id": 1, "method": "jira.draft", "params": {
-            "kind": "live", "maxResults": "25", "columns": "key"}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["draft"]["maxResults"], 25)
-        reply = dispatch({"id": 2, "method": "jira.draft", "params": {
-            "kind": "job", "pageSize": "x"}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertFalse(reply["result"]["ok"])
-        self.assertIn("Page size", reply["result"]["message"])
-
-    def test_jira_edit_methods(self):
-        reply = dispatch({"id": 1, "method": "jira.field_label", "params": {
-            "field": "title", "value": " Heading ", "default": "Title", "current": {}}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["value"], {"title": "Heading"})
-        reply = dispatch({"id": 2, "method": "jira.default", "params": {
-            "key": "maxResults", "value": "x"}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertFalse(reply["result"]["ok"])
-
-    def test_jira_status_text_methods(self):
-        reply = dispatch({"id": 1, "method": "jira.progress_text", "params": {"progress": {"message": "x"}}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["text"], "x")
-        reply = dispatch({"id": 2, "method": "jira.header_state", "params": {"enabled": False, "setupDone": True}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["line"], "○ Polling off")
-
     def test_jira_columns_methods(self):
         # Pinned to the CURRENT jira_fields contract: parse keeps width_px
         # (None = auto, fixed pixels when set — the round trip the Rust seam
@@ -266,50 +152,13 @@ class ScriptBridge(unittest.TestCase):
         self.assertIn("<p>hi</p>", html)
         self.assertIn("window.wsNext", html)
 
-    def test_jira_field_labels_method(self):
-        reply = dispatch({"id": 1, "method": "jira.field_labels",
-                          "params": {"team": {"field_labels": {"key": "Ticket"}}}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["labels"]["key"], "Ticket")
-
-    def test_shot_methods(self):
-        reply = dispatch({"id": 1, "method": "shot.ring",
-                          "params": {"spec": "copy, nonsense, copy, exit", "badge": False}})
-        self.assertTrue(reply["ok"], reply)
-        self.assertEqual(reply["result"]["names"], ["copy", "exit"])
-        reply = dispatch({"id": 2, "method": "shot.args", "params": {"words": ["gui", "-c", "-d", "500"]}})
-        self.assertTrue(reply["result"]["ok"], reply)
-        self.assertTrue(reply["result"]["args"]["clipboard"])
-        self.assertEqual(reply["result"]["args"]["delayMs"], 500)
-        reply = dispatch({"id": 3, "method": "shot.args", "params": {"words": ["--bogus"]}})
-        self.assertFalse(reply["result"]["ok"])
-        reply = dispatch({"id": 4, "method": "shot.region", "params": {"text": "300x200+10+20"}})
-        self.assertEqual(reply["result"]["rect"], {"x": 10.0, "y": 20.0, "w": 300.0, "h": 200.0})
-        reply = dispatch({"id": 5, "method": "shot.region", "params": {"text": "12"}})
-        self.assertIsNone(reply["result"]["rect"])
-
-    def test_ansi_and_paneshot_methods(self):
-        reply = dispatch({"id": 1, "method": "ansi.parse", "params": {"text": "a\u001b[31mb"}})
-        self.assertTrue(reply["ok"], reply)
-        rows = reply["result"]["rows"]
-        self.assertEqual(rows[0][0]["style"]["fg"], ["none"])
-        self.assertEqual(rows[0][1]["style"]["fg"], ["index", 1])
-        reply = dispatch({"id": 2, "method": "paneshot.args", "params": {"words": ["-n", "all"]}})
-        self.assertTrue(reply["result"]["ok"])
-        self.assertTrue(reply["result"]["args"]["all"])
-        reply = dispatch({"id": 3, "method": "paneshot.pane_json", "params": {"text": "{}"}})
-        self.assertFalse(reply["result"]["ok"])
-
-    def test_config_and_setup_methods(self):
+    def test_config_methods(self):
         reply = dispatch({"id": 1, "method": "config.tri", "params": {"text": "On"}})
         self.assertEqual(reply["result"]["value"], True)
         reply = dispatch({"id": 2, "method": "config.tri", "params": {"text": "maybe"}})
         self.assertIsNone(reply["result"]["value"])
         reply = dispatch({"id": 3, "method": "config.resolve_binary", "params": {"name": "/bin/sh"}})
         self.assertEqual(reply["result"]["path"], "/bin/sh")
-        reply = dispatch({"id": 4, "method": "setup.summarize", "params": {"checks": [
-            {"group": "features", "level": "optional", "ok": False}]}})
-        self.assertEqual(reply["result"]["tone"], "warning")
 
 
 class OneShot(unittest.TestCase):
@@ -403,57 +252,6 @@ class Server(unittest.TestCase):
         code, _, err = self.serve([line({"id": 1, "method": "nope"})], replies=1)
         self.assertEqual(code, 0)
         self.assertEqual(err.strip(), "")
-
-    def test_a_slow_call_does_not_block_fast_calls(self):
-        code, replies, _ = self.serve([
-            line({"id": 1, "method": "script.run", "params": {
-                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["1"]}}),
-            line({"id": 2, "method": "ping"}),
-            line({"id": 3, "method": "ping"}),
-            line({"id": 4, "method": "shutdown"}),
-        ], replies=4)
-        self.assertEqual(code, 0)
-        ids = [r["id"] for r in replies]
-        self.assertLess(ids.index(2), ids.index(1), "fast calls overtake the slow one")
-        self.assertLess(ids.index(3), ids.index(1), "fast calls overtake the slow one")
-        self.assertEqual(ids[-1], 4, "shutdown answers last, after the drain")
-        self.assertTrue(self.by_id(replies)[1]["ok"])
-
-    def test_errors_do_not_poison_other_calls(self):
-        code, replies, _ = self.serve([
-            line({"id": 1, "method": "nope"}),
-            line({"id": 2, "method": "script.run", "params": {
-                "folder": FIXTURES, "script": "fail_script.py"}}),
-            "{nope\n",
-            line({"id": 3, "method": "ping"}),
-            line({"id": 4, "method": "shutdown"}),
-        ], replies=5)
-        self.assertEqual(code, 0)
-        got = self.by_id(replies)
-        self.assertFalse(got[1]["ok"])
-        self.assertTrue(got[2]["ok"])
-        self.assertEqual(got[2]["result"]["code"], 3)
-        self.assertTrue(got[3]["ok"])
-        self.assertFalse(got[None]["ok"])
-
-    def test_shutdown_drains_in_flight(self):
-        code, replies, _ = self.serve([
-            line({"id": 1, "method": "script.run", "params": {
-                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["0.6"]}}),
-            line({"id": 2, "method": "shutdown"}),
-        ], replies=2)
-        self.assertEqual(code, 0)
-        self.assertEqual([r["id"] for r in replies], [1, 2])
-        self.assertTrue(replies[0]["ok"])
-
-    def test_eof_drains_in_flight(self):
-        code, replies, _ = self.serve([
-            line({"id": 1, "method": "script.run", "params": {
-                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["0.6"]}}),
-        ], replies=1)
-        self.assertEqual(code, 0)
-        self.assertTrue(replies[0]["ok"])
-
 
 class JsonLaziness(unittest.TestCase):
     """REVIEW #6a/#8: a lazy module's bad JSON fails the CALL, not the

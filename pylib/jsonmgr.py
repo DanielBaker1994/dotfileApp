@@ -39,9 +39,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # without importing any consumer.
 _HOMES = {
     "pylib/paths": "pylib/paths.json",
-    "pylib/shot_model": "pylib/shot_model.json",
-    "pylib/paneshot": "pylib/paneshot.json",
-    "pylib/ansi": "pylib/ansi.json",
     "pylib/shelf": "pylib/shelf.json",
     "pylib/ai_format": "pylib/ai_format.json",
     "jira/defaults": "jira/defaults.json",

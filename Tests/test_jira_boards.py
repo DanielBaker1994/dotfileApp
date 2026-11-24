@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""jira boards — column/card mapping and the board page template.
+"""jira boards — the column/card mapping.
 
     python3 Tests/test_jira_boards.py
 """
@@ -77,30 +77,6 @@ class Columns(unittest.TestCase):
         out = jb.board_columns(self.params([]))["columns"]
         self.assertEqual([c["name"] for c in out], ["To Do", "In Progress", "Done"])
         self.assertTrue(all(not c["cards"] for c in out))
-
-
-class Page(unittest.TestCase):
-    COLORS = {"bg": "#111", "col": "rgba(1,1,1,0.045)", "card": "rgba(1,1,1,0.07)",
-              "cardHover": "rgba(1,1,1,0.11)", "line": "rgba(1,1,1,0.10)",
-              "text": "#eee", "dim": "#999", "accent": "#08f", "done": "#0a0", "hot": "#f00"}
-
-    def test_colors_reach_the_css(self):
-        html = jb.board_page(self.COLORS)
-        self.assertIn("--bg: #111;", html)
-        self.assertIn("--done: #0a0;", html)
-        self.assertIn("--col: rgba(1,1,1,0.045);", html)
-
-    def test_js_template_literals_survive(self):
-        html = jb.board_page(self.COLORS)
-        self.assertIn("${esc(c.name)}", html)
-        self.assertIn("${k.cat}", html)
-        self.assertIn("render(cols)", html)
-        self.assertIn("postMessage('ready')", html)
-
-    def test_no_placeholder_left(self):
-        import re
-        html = jb.board_page({})
-        self.assertIsNone(re.search(r"@[a-zA-Z]", html), "unsubstituted placeholder")
 
 
 if __name__ == "__main__":

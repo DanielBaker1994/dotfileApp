@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import threading
 
-from . import HelperError, method, script_bridge
+from . import HelperError, method
 
 # ONE bad module/JSON must not kill the worker: import every method group
 # through this guard. A failed import becomes an _Unavailable placeholder -
@@ -11,25 +11,17 @@ from . import HelperError, method, script_bridge
 # group keep working.
 _MODULES = {
     "ai_format": "ai_format",
-    "ansi": "ansi",
-    "confluence_glue": "confluence_glue",
     "confluence_pages": "confluence_pages",
     "config_text": "config_text",
     "file_ops": "fileops",
     "ignore_rules": "ignore",
     "jira_boards": "jira_boards",
-    "jira_data": "jira_data",
-    "jira_dashboard": "jira_dashboard",
     "jira_directory": "jira_directory",
     "jira_fields": "jira_fields",
-    "jira_pages": "jira_pages",
     "jira_search": "jira_search",
     "jira_setup": "jira_setup",
     "jsonmgr": "jsonmgr",
-    "paneshot": "paneshot",
-    "setup_checks": "setup_checks",
     "shelf": "shelf",
-    "shot_model": "shot_model",
     "status": "ws_status",
 }
 
@@ -343,11 +335,6 @@ def _config_setting(params: dict) -> dict:
     return {"text": "\n".join(config_text.config_setting(lines, params.get("section") or "", kv))}
 
 
-@method("script.run")
-def _script_run(params: dict) -> dict:
-    return script_bridge.run(params)
-
-
 @method("config.decode")
 def _config_decode(params: dict) -> dict:
     out = []
@@ -379,35 +366,6 @@ def _jira_paths(params: dict) -> dict:
         "tabs": dict(jira_paths.TABS),
         "sideDirs": dict(jira_paths.SIDE_DIRS),
     }
-
-
-@method("jsonmgr.report")
-def _jsonmgr_report(params: dict) -> dict:
-    try:
-        import jsonmgr
-    except Exception as e:
-        raise HelperError("jsonmgr.report: %s" % e)
-    return jsonmgr.report(with_data=bool(params.get("withData")))
-
-
-@method("jira.style")
-def _jira_style(params: dict) -> dict:
-    return jira_data.style_rules(params.get("values") or {})
-
-
-@method("jira.comments")
-def _jira_comments(params: dict) -> dict:
-    return jira_data.comments(params.get("path") or "", params.get("key") or "")
-
-
-@method("jira.ticket_html")
-def _jira_ticket_html(params: dict) -> dict:
-    return {"html": jira_pages.ticket_html(params)}
-
-
-@method("jira.comments_html")
-def _jira_comments_html(params: dict) -> dict:
-    return {"html": jira_pages.comments_html(params.get("comments") or [])}
 
 
 @method("jira.filter_kinds")
@@ -445,51 +403,9 @@ def _jira_options(params: dict) -> dict:
     raise HelperError("jira.options: unknown kind: %s" % kind)
 
 
-@method("jira.draft")
-def _jira_draft(params: dict) -> dict:
-    if params.get("kind") == "live":
-        return jira_dashboard.live_persist(params)
-    return jira_dashboard.draft(params)
-
-
-@method("jira.custom_field")
-def _jira_custom_field(params: dict) -> dict:
-    return jira_dashboard.custom_field_entry(params)
-
-
-@method("jira.field_label")
-def _jira_field_label(params: dict) -> dict:
-    return jira_dashboard.field_label_save(params)
-
-
-@method("jira.key_value")
-def _jira_key_value(params: dict) -> dict:
-    return jira_dashboard.key_value_save(params)
-
-
-@method("jira.default")
-def _jira_default(params: dict) -> dict:
-    return jira_dashboard.default_save(params)
-
-
-@method("jira.progress_text")
-def _jira_progress_text(params: dict) -> dict:
-    return {"text": jira_dashboard.progress_text(params.get("progress"))}
-
-
-@method("jira.header_state")
-def _jira_header_state(params: dict) -> dict:
-    return jira_dashboard.header_state(params)
-
-
 @method("jira.board_columns")
 def _jira_board_columns(params: dict) -> dict:
     return jira_boards.board_columns(params)
-
-
-@method("jira.board_page")
-def _jira_board_page(params: dict) -> dict:
-    return {"html": jira_boards.board_page(params.get("colors") or {})}
 
 
 @method("jira.columns_parse")
@@ -503,137 +419,14 @@ def _jira_columns_serialize(params: dict) -> dict:
                                                   params.get("titles") is not False)}
 
 
-@method("jira.field_labels")
-def _jira_field_labels(params: dict) -> dict:
-    return {"labels": jira_fields.merged_labels(params.get("team") or {})}
-
-
 @method("jira.project_keys")
 def _jira_project_keys(params: dict) -> dict:
     return jira_setup.project_keys(params.get("raw") or "")
 
 
-@method("confluence.auth")
-def _confluence_auth(params: dict) -> dict:
-    return {"header": confluence_glue.auth_header(params.get("config") or {})}
-
-
-@method("confluence.rate_limit")
-def _confluence_rate_limit(params: dict) -> dict:
-    return confluence_glue.rate_limit(params.get("response") or {})
-
-
-@method("confluence.criteria")
-def _confluence_criteria(params: dict) -> dict:
-    return confluence_glue.criteria(params)
-
-
 @method("confluence.preview_html")
 def _confluence_preview_html(params: dict) -> dict:
     return {"html": confluence_pages.preview_html(params)}
-
-
-@method("shot.ring")
-def _shot_ring(params: dict) -> dict:
-    return {"names": shot_model.ring(params.get("spec") or "", bool(params.get("badge")))}
-
-
-@method("shot.args")
-def _shot_args(params: dict) -> dict:
-    try:
-        a = shot_model.parse_args(params.get("words") or [])
-    except shot_model.ArgsProblem as e:
-        return {"ok": False, "message": e.message}
-    return {"ok": True, "args": shot_model.args_to_dict(a)}
-
-
-@method("shot.region")
-def _shot_region(params: dict) -> dict:
-    r = shot_model.parse_region(params.get("text") or "")
-    if r is None:
-        return {"rect": None}
-    return {"rect": {"x": r.x, "y": r.y, "w": r.w, "h": r.h}}
-
-
-@method("shot.file_expand")
-def _shot_file_expand(params: dict) -> dict:
-    return {"name": shot_model.expand_pattern(params.get("pattern") or "")}
-
-
-@method("shot.file_unique")
-def _shot_file_unique(params: dict) -> dict:
-    return {"path": shot_model.unique_path(params.get("dir") or "", params.get("name") or "",
-                                           params.get("ext") or "")}
-
-
-@method("shot.file_target")
-def _shot_file_target(params: dict) -> dict:
-    return {"path": shot_model.target(params.get("path") or "", params.get("pattern") or "",
-                                      params.get("format") or "")}
-
-
-@method("shot.state_load")
-def _shot_state_load(params: dict) -> dict:
-    return {"state": shot_model.state_load(params.get("path") or "")}
-
-
-@method("shot.state_save")
-def _shot_state_save(params: dict) -> dict:
-    shot_model.state_save(params.get("path") or "", params.get("state") or {})
-    return {}
-
-
-def _ansi_style_dict(s) -> dict:
-    return {"fg": list(s.fg), "bg": list(s.bg),
-            "bold": s.bold, "dim": s.dim, "italic": s.italic,
-            "underline": s.underline, "inverse": s.inverse, "strike": s.strike}
-
-
-@method("ansi.parse")
-def _ansi_parse(params: dict) -> dict:
-    g = ansi.parse(params.get("text") or "")
-    return {"rows": [[{"text": c.text, "width": c.width, "style": _ansi_style_dict(c.style)}
-                      for c in row] for row in g.rows]}
-
-
-@method("paneshot.args")
-def _paneshot_args(params: dict) -> dict:
-    try:
-        a = paneshot.parse_args(params.get("words") or [])
-    except paneshot.Problem as e:
-        return {"ok": False, "message": e.message}
-    return {"ok": True, "args": {k: getattr(a, k) for k in paneshot.Args.__slots__}}
-
-
-@method("paneshot.config")
-def _paneshot_config(params: dict) -> dict:
-    c = paneshot.Config(params.get("entries") or {})
-    return {"config": {"lines": c.lines, "save": c.save, "copy": c.copy, "preview": c.preview,
-                       "herdrBin": c.herdr_bin, "ghosttyBin": c.ghostty_bin, "font": c.font,
-                       "fontSize": c.font_size, "background": c.background, "padding": c.padding,
-                       "savePath": c.save_path, "filenamePattern": c.filename_pattern,
-                       "toast": c.toast}}
-
-
-@method("paneshot.pane_json")
-def _paneshot_pane_json(params: dict) -> dict:
-    try:
-        p = paneshot.pane_from_json(params.get("text") or "")
-    except paneshot.HerdrFailure as e:
-        return {"ok": False, "message": e.message}
-    return {"ok": True, "pane": p}
-
-
-@method("paneshot.lines")
-def _paneshot_lines(params: dict) -> dict:
-    return {"lines": paneshot.lines_for(int(params.get("viewport") or 0),
-                                        int(params.get("history") or 0),
-                                        bool(params.get("all")))}
-
-
-@method("paneshot.environment")
-def _paneshot_environment(params: dict) -> dict:
-    return {"env": paneshot.environment(params.get("env") or {})}
 
 
 @method("config.tri")
@@ -644,16 +437,6 @@ def _config_tri(params: dict) -> dict:
 @method("config.resolve_binary")
 def _config_resolve_binary(params: dict) -> dict:
     return {"path": config_text.resolve_binary(params.get("name") or "")}
-
-
-@method("setup.parse_checks")
-def _setup_parse_checks(params: dict) -> dict:
-    return {"checks": setup_checks.parse_checks(params.get("checks"))}
-
-
-@method("setup.summarize")
-def _setup_summarize(params: dict) -> dict:
-    return setup_checks.summarize(params.get("checks"))
 
 
 @method("shelf.canonical")

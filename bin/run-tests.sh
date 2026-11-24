@@ -58,14 +58,6 @@ case "${1:-all}" in
     ansi)
         rust_test engines::ansi_render
         ;;
-    ansi-parse)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_ansi.py"
-        ;;
-    paneshot)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_paneshot.py"
-        ;;
     prose)
         rust_test engines::ai_format
         ;;
@@ -95,10 +87,6 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_jira_directory.py"
         ;;
-    jira-dashboard)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_jira_dashboard.py"
-        ;;
     jira-boards)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_jira_boards.py"
@@ -111,21 +99,9 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_jira_setup.py"
         ;;
-    confluence-glue)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_confluence_glue.py"
-        ;;
     confluence-pages)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_confluence_pages.py"
-        ;;
-    setup-checks)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_setup_checks.py"
-        ;;
-    shot-model)
-        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" "$TESTS/test_shot_model.py"
         ;;
     shelf)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
