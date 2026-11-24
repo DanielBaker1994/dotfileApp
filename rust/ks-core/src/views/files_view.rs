@@ -738,8 +738,6 @@ mod appkit {
         shown_preview_key: RefCell<String>,
         /// Cmd+Shift+P hid the preview pane (Finder's Show/Hide Preview).
         no_preview: Cell<bool>,
-        /// Torn-down mode (the quick agent's Find Recent Files): no sidebar, no Pin.
-        compact: Cell<bool>,
     }
 
     define_class!(
@@ -918,7 +916,6 @@ mod appkit {
                 tracking: RefCell::new(None),
                 shown_preview_key: RefCell::new(String::new()),
                 no_preview: Cell::new(false),
-                compact: Cell::new(false),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
@@ -1027,18 +1024,7 @@ mod appkit {
         }
 
         fn sidebar_w(&self) -> f64 {
-            if self.ivars().compact.get() {
-                return 0.0;
-            }
             self.ivars().sidebar.width(SIDEBAR_W)
-        }
-
-        /// Hide the sidebar and the Pin button (the half-size Find Recent Files window).
-        pub fn set_compact(&self, on: bool) {
-            self.ivars().compact.set(on);
-            self.ivars().sidebar.setHidden(on);
-            self.layout_panes();
-            self.setNeedsDisplay(true);
         }
 
         /// Show / hide the preview pane (Cmd+Shift+P).
@@ -1182,14 +1168,10 @@ mod appkit {
                 .iter()
                 .map(|k| cw(k.short(), true, true))
                 .fold(0.0, f64::max);
-            let compact = self.ivars().compact.get();
-            let sort = Rect::new(if compact { x0 } else { pin.max_x() + TB_GAP }, TOOLBAR_Y, sort_w, TOOLBAR_H);
+            let sort = Rect::new(pin.max_x() + TB_GAP, TOOLBAR_Y, sort_w, TOOLBAR_H);
             let order_w = cw("Asc", true, false).max(cw("Desc", true, false));
             let order = Rect::new(sort.max_x() + TB_GAP, TOOLBAR_Y, order_w, TOOLBAR_H);
             let mut out = vec![(TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)];
-            if compact {
-                out.remove(0);
-            }
             // The tab bar (two or more tabs): equal capsules under the toolbar.
             let n = self.ivars().snap.borrow().tabs.len();
             if n > 1 {

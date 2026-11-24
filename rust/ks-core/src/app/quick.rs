@@ -806,7 +806,6 @@ mod appkit {
                 browser.configure(&section);
                 browser.build(mtm);
                 if let Some(v) = &browser.view {
-                    v.set_compact(true);
                     v.set_on_event(Box::new(|ev| with_ui(|ui| ui.files_event(ev))));
                 }
                 FilesWin { browser, panel: None }
@@ -914,11 +913,18 @@ mod appkit {
         }
 
         fn files_open_selected(&self) {
-            let path = self
-                .files_surface(|b| b.visible_rows().get(b.selection()).filter(|e| !e.is_parent()).map(|e| e.path.clone()))
-                .flatten();
-            if let Some(path) = path {
-                self.files_open(&path);
+            use crate::views::files::{open_index, OpenOutcome};
+            let outcome = self.files_surface(|b| {
+                let rows = b.visible_rows().to_vec();
+                open_index(&rows, b.selection())
+            });
+            match outcome {
+                // A folder (or the `..` row) navigates inside the window.
+                Some(OpenOutcome::Cd(dir)) => {
+                    self.files_surface(|b| b.cd(&dir));
+                }
+                Some(OpenOutcome::Open(path)) => self.files_open(&path),
+                _ => {}
             }
         }
 

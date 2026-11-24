@@ -4093,6 +4093,15 @@ mod daemon_ui {
             if let Some(img) = self.ivars().icon_cache.borrow().get(&key) {
                 return img.clone();
             }
+            // Our own app: the shipped icon, not a stale `kitchen-sink.app` copy
+            // (old sink icon) that LaunchServices resolves the bundle id to.
+            if app.1 == "dev.danielbaker.kitchen-sink" || matches!(app.0.to_lowercase().as_str(), "bansho" | "kitchen-sink") {
+                let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+                if let Some(img) = crate::ui::style::image_file(&format!("{assets}/app_icon.png")) {
+                    self.ivars().icon_cache.borrow_mut().insert(key, img.clone());
+                    return img;
+                }
+            }
             let ws = NSWorkspace::sharedWorkspace();
             let mut path: Option<String> = None;
             if !app.1.is_empty() {
@@ -10103,7 +10112,7 @@ return Some(true)
             let r = list.row_rect(i);
             let x = r.x + 30.0 + list.row_indent(i);
             // A 22pt field centred on the row (rows grow with the list zoom).
-            NSRect::new(NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()), NSSize::new((r.width * 0.55 - x).max(120.0), 22.0))
+            NSRect::new(NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()), NSSize::new((r.width * 0.55 - x).max(r.width - x - 280.0).max(160.0), 22.0))
         }
 
         /// `setTextZoom(_:)` for the file browser: 0.6–3, 0.1 a step, kept
