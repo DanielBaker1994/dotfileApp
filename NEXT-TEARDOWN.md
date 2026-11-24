@@ -42,6 +42,9 @@ Written 2026-11-23 for the next agent. Delete this file when the work below is d
 
 ## Tasks, in order
 
+**Update 2026-11-24: Linux/Windows dropped (09038f3), signing/TCC/app-kill dedupe done, palette key grammar unified into
+`views/switcher.rs::palette_key` (verified with real keys). Only the remaining host.rs event-handler splits are left (optional).**
+
 **Tasks 1 and 2 are DONE** (fbf48fb, 83ab304 + the harness-text cleanup commit). Only the mic/speech TCC rows were
 left from task 2 (moved to BACKLOG.md). Tasks 3 and 4 below need the owner.
 

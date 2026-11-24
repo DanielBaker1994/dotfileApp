@@ -800,6 +800,44 @@ pub fn palette_digit(code: u16) -> Option<usize> {
     [18u16, 19, 20, 21, 23, 22, 26, 28, 25].iter().position(|&c| c == code)
 }
 
+/// What the Hyper+S palette does with one key press while it owns the keyboard.
+/// The single key grammar shared by the main daemon (`host.rs`) and the quick agent
+/// (`app/quick.rs`); everything not listed falls through to the filter field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteKey {
+    /// Esc on an empty query: close the palette.
+    Close,
+    /// Esc with a live query: clear it instead of hiding.
+    ClearQuery,
+    /// Return / Enter / Cmd+1…9: run a row (`PalettePanel::key` picks which).
+    Accept,
+    /// Up/Down, Tab, Ctrl+N/P, Cmd+Up/Down, and Left/Right on an empty query.
+    Navigate,
+    /// Not a palette key: let the field editor have it.
+    Ignore,
+}
+
+/// Classify a key press for the palette. `query_empty` = the live filter text is blank.
+pub fn palette_key(code: u16, ctrl: bool, shift: bool, cmd: bool, opt: bool, query_empty: bool) -> PaletteKey {
+    use crate::ui::popup::{KEY_DOWN, KEY_ESC, KEY_RETURN, KEY_TAB, KEY_UP};
+    let cmd_only = cmd && !ctrl && !opt && !shift;
+    if code == KEY_ESC {
+        if query_empty { PaletteKey::Close } else { PaletteKey::ClearQuery }
+    } else if code == KEY_RETURN || code == 76 || (cmd_only && palette_digit(code).is_some()) {
+        PaletteKey::Accept
+    } else if cmd_only && matches!(code, KEY_DOWN | KEY_UP) {
+        PaletteKey::Navigate
+    } else if matches!(code, KEY_DOWN | KEY_UP | KEY_TAB)
+        || (matches!(code, 45 | 35) && ctrl)
+        // Left/Right switch panes only on an empty query; otherwise they move the caret.
+        || (matches!(code, 123 | 124) && query_empty)
+    {
+        PaletteKey::Navigate
+    } else {
+        PaletteKey::Ignore
+    }
+}
+
 /// What accepting a row does (`accept(_:)`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaletteAction {
@@ -1714,6 +1752,27 @@ pub use macos::PalettePanel;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn palette_key_grammar() {
+        use super::{palette_key as k, PaletteKey as P};
+        // (code, ctrl, shift, cmd, opt, query_empty)
+        assert_eq!(k(53, false, false, false, false, true), P::Close);
+        assert_eq!(k(53, false, false, false, false, false), P::ClearQuery);
+        assert_eq!(k(36, false, false, false, false, false), P::Accept); // Return
+        assert_eq!(k(76, false, false, false, false, false), P::Accept); // Enter
+        assert_eq!(k(18, false, false, true, false, false), P::Accept); // Cmd+1
+        assert_eq!(k(18, false, false, false, false, false), P::Ignore); // plain 1 types
+        assert_eq!(k(18, false, true, true, false, false), P::Ignore); // Cmd+Shift+1
+        assert_eq!(k(125, false, false, false, false, false), P::Navigate); // Down
+        assert_eq!(k(126, false, false, true, false, false), P::Navigate); // Cmd+Up
+        assert_eq!(k(48, false, true, false, false, false), P::Navigate); // Shift+Tab
+        assert_eq!(k(45, true, false, false, false, false), P::Navigate); // Ctrl+N
+        assert_eq!(k(45, false, false, false, false, false), P::Ignore); // plain n types
+        assert_eq!(k(35, false, false, false, false, false), P::Ignore); // plain p types
+        assert_eq!(k(123, false, false, false, false, true), P::Navigate); // Left, empty
+        assert_eq!(k(124, false, false, false, false, false), P::Ignore); // Right moves the caret
+    }
     use super::*;
 
     fn views() -> Vec<SwitchView> {

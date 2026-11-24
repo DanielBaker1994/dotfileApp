@@ -949,34 +949,22 @@ mod appkit {
                 let Ok(mut g) = self.palette.try_borrow_mut() else { return false };
                 match g.as_mut() {
                     Some(p) if p.has_key() => {
-                        if code == popup::KEY_ESC {
-                            if p.live_query().trim().is_empty() {
-                                Out::Close
-                            } else {
-                                // A live query clears instead of hiding.
+                        use crate::views::switcher::{palette_key, PaletteKey};
+                        match palette_key(code, ctrl, shift, cmd, opt, p.live_query().trim().is_empty()) {
+                            PaletteKey::Close => Out::Close,
+                            PaletteKey::ClearQuery => {
                                 p.clear_query();
                                 Out::Consumed
                             }
-                        } else if code == popup::KEY_RETURN
-                            || code == 76
-                            || (cmd && !ctrl && !opt && !shift && crate::views::switcher::palette_digit(code).is_some())
-                        {
-                            // Return, or Cmd+1..9 (run the Nth row).
-                            match p.key(code, ctrl, shift, cmd, opt) {
+                            PaletteKey::Accept => match p.key(code, ctrl, shift, cmd, opt) {
                                 Some(a) => Out::Pick(a),
                                 None => Out::Consumed,
+                            },
+                            PaletteKey::Navigate => {
+                                p.key(code, ctrl, shift, cmd, opt);
+                                Out::Consumed
                             }
-                        } else if cmd && !ctrl && !opt && !shift && matches!(code, popup::KEY_DOWN | popup::KEY_UP) {
-                            p.key(code, ctrl, shift, cmd, opt);
-                            Out::Consumed
-                        } else if matches!(code, popup::KEY_DOWN | popup::KEY_UP | popup::KEY_TAB)
-                            || (matches!(code, 45 | 35) && ctrl)
-                            || (matches!(code, 123 | 124) && p.live_query().trim().is_empty())
-                        {
-                            p.key(code, ctrl, shift, cmd, opt);
-                            Out::Consumed
-                        } else {
-                            Out::NotHandled
+                            PaletteKey::Ignore => Out::NotHandled,
                         }
                     }
                     _ => Out::NotHandled,

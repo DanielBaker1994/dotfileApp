@@ -5267,42 +5267,26 @@ return Some(true)
                 let mut panels = self.ivars().panels.borrow_mut();
                 if let Some(p) = panels.palette.as_mut() {
                     if p.has_key() {
-                        if code == popup::KEY_ESC {
-                            if p.live_query().trim().is_empty() {
-                                // Hidden in the arm below, after the hand-back.
-                                Out::PaletteClosed
-                            } else {
-                                // `SwitcherController.handleEscape`: a live
-                                // query clears instead of hiding.
+                        use crate::views::switcher::{palette_key, PaletteKey};
+                        match palette_key(code, ctrl, shift, cmd, opt, p.live_query().trim().is_empty()) {
+                            // Hidden in the arm below, after the hand-back.
+                            PaletteKey::Close => Out::PaletteClosed,
+                            // `SwitcherController.handleEscape`: a live query clears instead of hiding.
+                            PaletteKey::ClearQuery => {
                                 p.clear_query();
                                 Out::Consumed
                             }
-                        } else if code == popup::KEY_RETURN
-                            || code == 76
-                            || (cmd && !ctrl && !opt && !shift && crate::views::switcher::palette_digit(code).is_some())
-                        {
                             // Return, or Cmd+1…9 (run the Nth row, Raycast style).
-                            match p.key(code, ctrl, shift, cmd, opt) {
+                            PaletteKey::Accept => match p.key(code, ctrl, shift, cmd, opt) {
                                 Some(a) => Out::Palette(a),
                                 None => Out::Consumed,
+                            },
+                            // Up/Down/Tab/Ctrl+N/P, Cmd+Up/Down, Left/Right on an empty query.
+                            PaletteKey::Navigate => {
+                                p.key(code, ctrl, shift, cmd, opt);
+                                Out::Consumed
                             }
-                        } else if cmd && !ctrl && !opt && !shift && matches!(code, popup::KEY_DOWN | popup::KEY_UP) {
-                            // Cmd+↑ / Cmd+↓: first / last row.
-                            p.key(code, ctrl, shift, cmd, opt);
-                            Out::Consumed
-                        } else if matches!(
-                            code,
-                            popup::KEY_DOWN | popup::KEY_UP | popup::KEY_TAB
-                        ) || (matches!(code, 45 | 35) && ctrl)
-                            // Left/Right switch panes only on an empty query;
-                            // otherwise they move the caret in the filter field.
-                            || (matches!(code, 123 | 124)
-                                && p.live_query().trim().is_empty())
-                        {
-                            p.key(code, ctrl, shift, cmd, opt);
-                            Out::Consumed
-                        } else {
-                            Out::NotHandled
+                            PaletteKey::Ignore => Out::NotHandled,
                         }
                     } else {
                         Out::NotHandled
