@@ -22,7 +22,6 @@ enum RowsSource {
     Sidebar,
     Files,
     Jira,
-    Confluence,
 }
 
 /// The live target behind a snapshot.
@@ -131,7 +130,6 @@ impl DaemonUi {
             }
             "files-list" => Some(Live::Rows(RowsSource::Files, None)),
             "list" if current.is_some_and(|v| v.is_jira()) => Some(Live::Rows(RowsSource::Jira, None)),
-            "results" => Some(Live::Rows(RowsSource::Confluence, None)),
             "search" | "files-filter" | "recent-filter" | "left-path" | "right-path" | "input" => None,
             _ => find_live(&pane.area),
         }
@@ -146,10 +144,6 @@ impl DaemonUi {
                 (t, b.selection(), 20)
             })?,
             RowsSource::Jira => self.jira_surface(|l| (l.vim_row_texts(), l.selection, 20))?,
-            RowsSource::Confluence => self.conf_surface(|cs| {
-                let t: Vec<String> = cs.model.rows.iter().map(|r| r.title.clone()).collect();
-                (t, cs.model.selection, 12)
-            })?,
         };
         Some(VimRows { texts, cursor, page })
     }
@@ -168,7 +162,6 @@ impl DaemonUi {
             RowsSource::Jira => {
                 self.jira_surface(|l| l.selection = row);
             }
-            RowsSource::Confluence => self.conf_load_preview(row),
         }
     }
 
@@ -506,15 +499,6 @@ impl DaemonUi {
                     .and_then(|st| st.jira.as_ref().map(|j| j.1.clone()))?;
                 view.vim_shown_rows()
             }
-            RowsSource::Confluence => {
-                let view = self
-                    .ivars()
-                    .state
-                    .borrow()
-                    .as_ref()
-                    .and_then(|st| st.confluence.as_ref().map(|cs| cs.view.clone()))?;
-                view.vim_shown_rows()
-            }
         };
         Some((view, rects, rows))
     }
@@ -601,11 +585,11 @@ impl DaemonUi {
     /// `<leader>sf`: fuzzy-pick one of the focused pane's rows and activate it
     /// like a mouse click.
     fn vim_open_find(&self, live: &Option<Live>) {
-        // Jira / Confluence / Files: the finder always lists the left sidebar,
+        // Jira / Files: the finder always lists the left sidebar,
         // whatever pane (list, preview, inspector, file list) has the keyboard.
         let current = self.ivars().controller.current();
         let sidebar_live = if current.is_some_and(|v| v.is_jira())
-            || matches!(current, Some(SlotView::Confluence) | Some(SlotView::Files))
+            || current == Some(SlotView::Files)
         {
             self.live_panes().and_then(|(_, panes)| {
                 panes
@@ -658,7 +642,6 @@ impl DaemonUi {
                 double: false,
             }),
             RowsSource::Jira => self.jira_event(JiraEvent::Click { row, double: false }),
-            RowsSource::Confluence => self.conf_load_preview(row),
         }
     }
 

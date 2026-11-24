@@ -5,7 +5,6 @@
 // not every re-export is used by every target.
 #![allow(unused_imports)]
 
-pub mod ai_format;
 pub use ks_core::engines::ansi_render;
 pub use ks_core::engines::config_text;
 pub use ks_core::engines::file_ops;

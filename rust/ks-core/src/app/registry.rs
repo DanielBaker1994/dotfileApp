@@ -13,9 +13,7 @@ pub mod nav {
     pub const HOME: i64 = 62;
     pub const BACK: i64 = 63;
     pub const FILES: i64 = 64;
-    pub const CONFLUENCE: i64 = 65;
-    pub const AI: i64 = 66;
-    pub const ALL: [i64; 6] = [JIRA, HOME, BACK, FILES, CONFLUENCE, AI];
+    pub const ALL: [i64; 4] = [JIRA, HOME, BACK, FILES];
 
     pub fn is_nav_id(id: i64) -> bool {
         ALL.contains(&id)
@@ -31,8 +29,6 @@ pub enum SlotView {
     Releases,
     Config,
     Output,
-    Confluence,
-    Ai,
 }
 
 impl SlotView {
@@ -44,8 +40,6 @@ impl SlotView {
             SlotView::Releases => "releases",
             SlotView::Config => "config",
             SlotView::Output => "output",
-            SlotView::Confluence => "confluence",
-            SlotView::Ai => "ai",
         }
     }
 
@@ -57,8 +51,6 @@ impl SlotView {
             "releases" => SlotView::Releases,
             "config" => SlotView::Config,
             "output" => SlotView::Output,
-            "confluence" => SlotView::Confluence,
-            "ai" => SlotView::Ai,
             _ => return None,
         })
     }
@@ -81,8 +73,6 @@ impl SlotView {
     pub fn nav_id(self) -> i64 {
         match self {
             SlotView::Files => nav::FILES,
-            SlotView::Confluence => nav::CONFLUENCE,
-            SlotView::Ai => nav::AI,
             v if v.is_jira() => nav::JIRA,
             _ => nav::FILES,
         }
@@ -93,8 +83,6 @@ impl SlotView {
         Some(match self {
             SlotView::Files => "files-icon",
             SlotView::Jira => "jira-icon",
-            SlotView::Confluence => "confluence-icon",
-            SlotView::Ai => "ai-icon",
             _ => return None,
         })
     }
@@ -102,8 +90,6 @@ impl SlotView {
     pub fn title(self) -> &'static str {
         match self {
             SlotView::Files => "Files",
-            SlotView::Confluence => "Confluence",
-            SlotView::Ai => "AI",
             v if v.is_jira() => "Jira",
             _ => "Output",
         }
@@ -263,8 +249,6 @@ mod tests {
     fn nav_ids_match_swift() {
         assert_eq!(SlotView::Jira.nav_id(), 61);
         assert_eq!(SlotView::Files.nav_id(), 64);
-        assert_eq!(SlotView::Confluence.nav_id(), 65);
-        assert_eq!(SlotView::Ai.nav_id(), 66);
         assert_eq!(SlotView::Detail.nav_id(), 61);
         assert_eq!(SlotView::Releases.nav_id(), 61);
         assert_eq!(SlotView::Config.nav_id(), 61);
@@ -298,8 +282,6 @@ mod tests {
             SlotView::Releases,
             SlotView::Config,
             SlotView::Output,
-            SlotView::Confluence,
-            SlotView::Ai,
         ] {
             assert_eq!(SlotView::from_raw(v.raw()), Some(v));
         }
@@ -312,8 +294,6 @@ mod tests {
     fn icon_keys_match_settings() {
         assert_eq!(SlotView::Files.icon_key(), Some("files-icon"));
         assert_eq!(SlotView::Jira.icon_key(), Some("jira-icon"));
-        assert_eq!(SlotView::Confluence.icon_key(), Some("confluence-icon"));
-        assert_eq!(SlotView::Ai.icon_key(), Some("ai-icon"));
         assert_eq!(SlotView::Detail.icon_key(), None);
     }
 
@@ -322,12 +302,11 @@ mod tests {
         let mut r = Registry::new();
         r.set_nav(vec![
             (SlotView::Files, "Files".into(), None),
-            (SlotView::Ai, "AI".into(), Some("ai.png".into())),
-            (SlotView::Jira, "Jira".into(), None),
+            (SlotView::Jira, "Jira".into(), Some("jira.png".into())),
         ]);
-        assert_eq!(r.nav_icons().len(), 3);
+        assert_eq!(r.nav_icons().len(), 2);
         assert_eq!(r.nav_on_id_for(SlotView::Detail), Some(61));
-        assert_eq!(r.nav_on_id_for(SlotView::Ai), Some(66));
+        assert_eq!(r.nav_on_id_for(SlotView::Jira), Some(61));
 
         r.add_palette(PaletteCommand::new("ai", "AI", "views"));
         r.add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());

@@ -6,7 +6,6 @@
 #![allow(unused_imports)]
 
 pub use ks_core::ui::ansi_text;
-pub use ks_core::ui::card;
 pub use ks_core::ui::chrome;
 #[cfg(target_os = "macos")]
 pub use ks_core::ui::field;

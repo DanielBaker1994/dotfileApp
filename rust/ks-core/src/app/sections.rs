@@ -4,12 +4,10 @@
 use std::collections::HashMap;
 
 /// The sections `loadCommands` never turns into commands.
-pub const COMMAND_SECTION_SKIPS: [&str; 10] = [
+pub const COMMAND_SECTION_SKIPS: [&str; 8] = [
     "icons",
     "shortcuts",
     "app",
-    "confluence",
-    "ai",
     "notifications",
     "pane-shot",
     "pane-find",

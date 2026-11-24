@@ -9,7 +9,6 @@ use std::cmp::Ordering;
 /// scan). Both share the same scoring constants.
 const SCORE_MATCH: i64 = 16;
 const BONUS_BOUNDARY_WHITE: i64 = 10; // bonusBoundary (8) + 2
-const EMPTY_RANK: i64 = i64::MAX;
 
 pub struct FuzzyIndex {
     keys: Vec<Vec<u8>>,

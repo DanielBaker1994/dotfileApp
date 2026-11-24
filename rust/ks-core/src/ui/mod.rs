@@ -1,6 +1,5 @@
 pub mod action_picker;
 pub mod ansi_text;
-pub mod card;
 pub mod chrome;
 #[cfg(target_os = "macos")]
 pub mod field;

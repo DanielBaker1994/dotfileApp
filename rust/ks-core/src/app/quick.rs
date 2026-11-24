@@ -128,7 +128,7 @@ pub fn forward_message(id: &str) -> String {
 /// Picks that bring the main app forward (it activates itself): the agent
 /// must not hand focus back to the previous app for these.
 pub fn pick_keeps_app(id: &str) -> bool {
-    matches!(id, "window" | "files" | "jira" | "confluence" | "ai" | "jira-config")
+    matches!(id, "window" | "files" | "jira" | "jira-config")
 }
 
 /// The `bin/kitchen_sink.sh` mode that cold-starts the main app when a
@@ -137,8 +137,6 @@ pub fn cold_start_mode(message: &str) -> &'static str {
     match message {
         "files" => "files",
         "jira" | "jira-dashboard" | "jira-setup" => "jira",
-        "confluence" => "confluence",
-        "ai" => "ai",
         _ => "window",
     }
 }
@@ -173,7 +171,7 @@ fn id_list(v: &str) -> Vec<String> {
 /// The Hyper+S palette's `(id, title)` rows from the config text, the same
 /// rows the main daemon builds (`build_palette` + `hyper_palette`) without a
 /// registry: enabled `in-palette` command sections in file order, the
-/// enabled confluence / ai views and "Bansho", ordered by `[app]
+/// "Bansho", ordered by `[app]
 /// palette-first`, then narrowed to `[app] palette` (empty = all).
 pub fn palette_rows(text: &str) -> Vec<(String, String)> {
     use crate::app::sections::{label_of, parse_sections, parse_sections_ordered, section_flag, tri_pure};
@@ -205,12 +203,6 @@ pub fn palette_rows(text: &str) -> Vec<(String, String)> {
             .map(|v| tri_pure(v).unwrap_or(true))
             .unwrap_or(true)
     };
-    if section_flag(&sections, "confluence", false) && listed("confluence") {
-        all.push(("confluence".into(), label("confluence", "Confluence")));
-    }
-    if section_flag(&sections, "ai", false) && listed("ai") {
-        all.push(("ai".into(), label("ai", "AI")));
-    }
     let shared_window = app.get("shared-window").and_then(|v| tri_pure(v)).unwrap_or(true);
     if shared_window {
         all.push(("window".into(), "Bansho".into()));
@@ -1247,7 +1239,7 @@ label = "AI"
         let text = CFG.replace("palette = \"paths, filefast, text-table, prettyprint, find-window\"", "palette = \"\"");
         let ids: Vec<String> = palette_rows(&text).into_iter().map(|r| r.0).collect();
         assert!(ids.starts_with(&["paths".to_string(), "filefast".to_string(), "text-table".to_string(), "prettyprint".to_string()]));
-        assert!(ids.contains(&"ai".to_string()) && ids.contains(&"window".to_string()));
+        assert!(ids.contains(&"window".to_string()));
         assert!(!ids.contains(&"hidden".to_string()), "in-palette = false stays out");
     }
 

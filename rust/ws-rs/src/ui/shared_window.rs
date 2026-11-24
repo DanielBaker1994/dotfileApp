@@ -65,7 +65,6 @@ mod appkit {
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
     use std::cell::{Cell, RefCell};
 
-    use crate::ui::card::CardNSWindow;
 
     use crate::ui::view_base::as_any;
 

@@ -255,8 +255,6 @@ pub struct AppSettings {
     pub aerospace_cli: Vec<String>,
     pub app_dirs: Vec<String>,
     pub jira_icon_name: String,
-    pub confluence_icon_name: String,
-    pub ai_icon_name: String,
     pub app_icon_name: String,
     pub files_icon_name: String,
     pub notes_socket_name: String,
@@ -323,8 +321,6 @@ impl Default for AppSettings {
                 format!("{}/Applications", home_dir()),
             ],
             jira_icon_name: "jira_icon.png".to_string(),
-            confluence_icon_name: "confluence_icon.png".to_string(),
-            ai_icon_name: String::new(),
             app_icon_name: "app_icon.png".to_string(),
             files_icon_name: String::new(),
             notes_socket_name: "ws-notes.sock".to_string(),
@@ -451,14 +447,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
         if !v.is_empty() {
             settings.jira_icon_name = v;
         }
-    }
-    if let Some(v) = strv("confluence-icon") {
-        if !v.is_empty() {
-            settings.confluence_icon_name = v;
-        }
-    }
-    if let Some(v) = strv("ai-icon") {
-        settings.ai_icon_name = v;
     }
     if let Some(v) = strv("app-icon") {
         if !v.is_empty() {
@@ -1753,12 +1741,12 @@ pub fn startup_config_report() -> (Vec<String>, Option<String>) {
     if let Some(o) = commands_override_path() {
         lines.push(format!("config: override {} ({})", tilde(&o), mark(&o)));
     }
-    for rel in ["files-favorites.json", "jira/config.json", "jira/team.json", "confluence/config.json"] {
+    for rel in ["files-favorites.json", "jira/config.json", "jira/team.json"] {
         let p = dir.join(rel);
         lines.push(format!("config: {} ({})", tilde(&p), mark(&p)));
     }
     let home = home_dir();
-    let stale: Vec<String> = [".config/jira", ".config/confluence"]
+    let stale: Vec<String> = [".config/jira"]
         .iter()
         .map(|r| PathBuf::from(format!("{home}/{r}")))
         .filter(|p| p.exists())
@@ -1953,8 +1941,6 @@ mod tests {
         assert_eq!(s.aerospace_cli.len(), 3);
         assert_eq!(s.app_dirs.len(), 6);
         assert_eq!(s.jira_icon_name, "jira_icon.png");
-        assert_eq!(s.confluence_icon_name, "confluence_icon.png");
-        assert_eq!(s.ai_icon_name, "");
         assert_eq!(s.app_icon_name, "app_icon.png");
         assert_eq!(s.files_icon_name, "");
         assert_eq!(s.notes_socket_name, "ws-notes.sock");
@@ -1986,7 +1972,6 @@ mod tests {
             ("shell-args", "--login  -i"),
             ("aerospace-cli", "/opt/homebrew/bin/aerospace, aerospace"),
             ("app-dirs", "/Applications, ~/Apps"),
-            ("ai-icon", "ai.png"),
             ("switcher-width", "200"),   // clamped up to 240
             ("shared-width", "300"),     // below 400 -> ignored
             ("margin-top", "-5"),        // clamped to 0
@@ -2008,7 +1993,6 @@ mod tests {
         assert_eq!(s.shell_args, vec!["--login", "-i"]);
         assert_eq!(s.aerospace_cli.len(), 2);
         assert_eq!(s.app_dirs[1], expand_tilde("~/Apps"));
-        assert_eq!(s.ai_icon_name, "ai.png");
         assert_eq!(s.switcher_width, 240.0);
         assert_eq!(s.shared_width, 1100.0);
         assert_eq!(s.margin_top, 0.0);
