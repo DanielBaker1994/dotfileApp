@@ -847,9 +847,7 @@ impl SwitcherController {
             &sections.get("screenshot").cloned().unwrap_or_default(),
         );
         if shot_cfg.enabled {
-            let mut controller = ScreenshotController::new();
-            controller.set_config(shot_cfg);
-            let controller = Arc::new(Mutex::new(controller));
+            let controller = ScreenshotController::shared(shot_cfg);
             crate::views::screenshot::register_controller(&mut self.registry, controller.clone());
             self.screenshot_controller = Some(controller);
         }

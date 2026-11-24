@@ -1053,9 +1053,9 @@ mod appkit {
         let text = crate::app::config::read_config_text_pure().unwrap_or_default();
         let sections = crate::app::sections::parse_sections(&text);
         crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections.clone());
-        let mut shot = ScreenshotController::new();
-        shot.set_config(QuickUi::shot_config(&text));
-        let shot = Arc::new(Mutex::new(shot));
+        // `shared` wires the weak self-ref the overlay's key monitor and mouse
+        // callbacks need; a bare `Arc::new` gives an overlay that ignores input.
+        let shot = ScreenshotController::shared(QuickUi::shot_config(&text));
 
         // "Reveal in Files" has no Files view here: ask the main app.
         {

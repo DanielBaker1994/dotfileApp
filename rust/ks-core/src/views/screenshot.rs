@@ -7310,6 +7310,27 @@ impl ScreenshotController {
         self.config = cfg;
     }
 
+    /// The only correct way to build a live controller: wrap it in its
+    /// `Arc<Mutex>` AND wire the weak self-reference. Without the self-ref the
+    /// overlay's key monitor never installs and its click/close/wheel/pinch
+    /// callbacks hold dead weak refs — a full-screen overlay that ignores all
+    /// input (the quick agent shipped exactly that and froze the screen).
+    pub fn shared(cfg: ScreenshotConfig) -> Arc<Mutex<ScreenshotController>> {
+        let mut c = ScreenshotController::new();
+        c.set_config(cfg);
+        let arc = Arc::new(Mutex::new(c));
+        #[cfg(target_os = "macos")]
+        arc.lock().unwrap().set_self_ref(Arc::downgrade(&arc));
+        arc
+    }
+
+    /// True once [`shared`](Self::shared) / [`set_self_ref`] wired the
+    /// controller; an overlay must never open without it.
+    #[cfg(target_os = "macos")]
+    pub fn is_wired(&self) -> bool {
+        self.self_ref.strong_count() > 0
+    }
+
     /// Store the weak self-reference the key monitor block captures. Called by
     /// [`register_controller`] when the controller is wrapped in its `Arc`.
     #[cfg(target_os = "macos")]
@@ -8790,6 +8811,16 @@ pub fn run_screenshot_message(
     let (finished, data) = {
         let mut c = controller.lock().unwrap();
         c.reply = None;
+        // Never open an overlay that cannot receive input (see `shared`).
+        #[cfg(target_os = "macos")]
+        if !c.is_wired() {
+            crate::app::logging::ws_log("screenshot: refused — controller not wired (use ScreenshotController::shared)");
+            drop(c);
+            if let Some(reply) = reply {
+                reply.send_bytes(b"");
+            }
+            return;
+        }
         let _ = c.handle(&words);
         #[cfg(target_os = "macos")]
         c.redraw_overlays();
@@ -8993,6 +9024,18 @@ pub fn epoch_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the quick agent built its controller with a bare
+    /// `Arc::new`, so the overlay had no key monitor and dead mouse callbacks
+    /// (Hyper+X froze the screen). `shared` must always wire the self-ref.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shared_controller_is_wired_and_bare_one_is_not() {
+        let shot = ScreenshotController::shared(ScreenshotConfig::default());
+        assert!(shot.lock().unwrap().is_wired());
+        let bare = Arc::new(Mutex::new(ScreenshotController::new()));
+        assert!(!bare.lock().unwrap().is_wired());
+    }
 
     fn ws_words(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
