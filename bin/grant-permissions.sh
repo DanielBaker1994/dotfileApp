@@ -7,12 +7,8 @@ BUNDLE_ID="${1:-$BUNDLE_ID}"
 APP_DIR="${2:-$WS_ROOT/$APP_NAME.app}"
 APP_BIN="$APP_DIR/Contents/MacOS/$APP_NAME"
 
-if [ -n "${SUDO_USER:-}" ]; then
-    REAL_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-    TCC_DB="${REAL_HOME:-/Users/$SUDO_USER}/Library/Application Support/com.apple.TCC/TCC.db"
-else
-    TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-fi
+. "$WS_ROOT/bin/lib.sh"
+TCC_DB="$(ws_tcc_db)"
 
 die() { echo "grant-permissions: $*" >&2; exit 1; }
 [ -d "$APP_DIR" ] || die "app bundle missing: $APP_DIR"

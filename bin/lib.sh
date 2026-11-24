@@ -74,6 +74,26 @@ ws_ensure_signing_identity() {
     fi
 }
 
+# ws_tcc_db: print the TCC.db path of the real user (works under sudo).
+ws_tcc_db() {
+    local home="$HOME"
+    if [ -n "${SUDO_USER:-}" ]; then
+        home="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+        home="${home:-/Users/$SUDO_USER}"
+    fi
+    printf '%s\n' "$home/Library/Application Support/com.apple.TCC/TCC.db"
+}
+
+# ws_app_running [DIR]: is the app bundle (default: any $APP_NAME.app) running?
+ws_app_running() { pgrep -f "${1:-$APP_NAME.app}/Contents/MacOS" >/dev/null 2>&1; }
+
+# ws_kill_app [DIR] [-9]: stop the app daemon (SIGTERM, or SIGKILL with -9).
+ws_kill_app() {
+    local sig=()
+    [ "${2:-}" = "-9" ] && sig=(-9)
+    pkill ${sig[@]+"${sig[@]}"} -f "${1:-$APP_NAME.app}/Contents/MacOS" 2>/dev/null || true
+}
+
 ws_cmd_dmg() {
     local notarize=1
     [ "${1:-}" = "--no-notarize" ] && notarize=0
@@ -135,37 +155,9 @@ ws_cmd_permissions() {
 
 ws_permissions_fix() {
     local APP="$WS_ROOT/$APP_NAME.app"
-    local KC="$HOME/Library/Keychains/login.keychain-db"
-    local T rc PW ff r
-
-    _ws_valid() { security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_ID\""; }
-    _ws_can_sign() {
-        ff="$(mktemp)"; cp /bin/echo "$ff"
-        perl -e 'alarm 20; exec @ARGV' codesign --force --sign "$SIGN_ID" "$ff" >/dev/null 2>&1
-        r=$?
-        rm -f "$ff"; return $r
-    }
 
     printf '\342\226\270 signing identity\n'
-    if ! _ws_valid; then
-        T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-        printf '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=%s\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n' "$SIGN_ID" > "$T/c.cnf"
-        /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$T/c.cnf" -keyout "$T/k.pem" -out "$T/c.pem" 2>/dev/null \
-          && /usr/bin/openssl pkcs12 -export -inkey "$T/k.pem" -in "$T/c.pem" -out "$T/c.p12" -passout pass:ws \
-          && security import "$T/c.p12" -k "$KC" -P ws -T /usr/bin/codesign >/dev/null \
-          && security add-trusted-cert -r trustRoot -p codeSign -k "$KC" "$T/c.pem" \
-          || ws_die "could not create/trust '$SIGN_ID'"
-        _ws_valid || ws_die "'$SIGN_ID' still not valid — Keychain Access ▸ it ▸ Trust ▸ Code Signing: Always Trust"
-        echo "  created + trusted '$SIGN_ID'"
-    fi
-    if ! _ws_can_sign; then
-        [ -t 0 ] || ws_die "codesign can't use the key and needs your login password — run in a normal Terminal"
-        read -rs -p "  login password (to authorize the key for codesign): " PW; echo
-        { security unlock-keychain -p "$PW" "$KC" \
-          && security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PW" "$KC"; } >/dev/null 2>&1
-        rc=$?; unset PW
-        [ $rc = 0 ] && _ws_can_sign || ws_die "codesign still can't use '$SIGN_ID' (wrong password?) — delete it in Keychain Access and re-run"
-    fi
+    ws_ensure_signing_identity
     echo "  \342\234\224 '$SIGN_ID' usable"
 
     echo "\342\226\270 clearing stale Screen Recording grant"
@@ -177,7 +169,7 @@ ws_permissions_fix() {
         || ws_die "app is ad-hoc signed — grants would reset on every rebuild"
     echo "  \342\234\224 signed with '$SIGN_ID'"
 
-    pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null; sleep 1
+    ws_kill_app; sleep 1
     "$WS_ROOT/bin/kitchen_sink.sh" window >/dev/null 2>&1 &
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
     echo; echo "\342\234\224 done — press Hyper+X and click Allow once (quit + reopen the app if it still complains)."
@@ -187,13 +179,8 @@ ws_permissions_ensure() {
     local APP="$WS_ROOT/$APP_NAME.app"
     [ -d "$APP" ] || return 0
 
-    if [ -n "${SUDO_USER:-}" ]; then
-        local REAL_HOME
-        REAL_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-        local TCC_DB="${REAL_HOME:-/Users/$SUDO_USER}/Library/Application Support/com.apple.TCC/TCC.db"
-    else
-        local TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-    fi
+    local TCC_DB
+    TCC_DB="$(ws_tcc_db)"
 
     [ -f "$TCC_DB" ] && command -v sqlite3 >/dev/null 2>&1 || return 0
     [ -r "$TCC_DB" ] && [ -w "$TCC_DB" ] || return 0
@@ -423,16 +410,16 @@ ws_cmd_clean() {
     done
 
     ws_step "stopping $APP_NAME"
-    if pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1; then
-        pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
+    if ws_app_running; then
+        ws_kill_app
         local i
         for i in $(seq 1 30); do
-            pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1 || break
+            ws_app_running || break
             sleep 0.1
         done
-        if pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1; then
+        if ws_app_running; then
             ws_warn "app ignores SIGTERM — SIGKILL"
-            pkill -9 -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
+            ws_kill_app "" -9
         fi
         echo "  stopped"
     else
