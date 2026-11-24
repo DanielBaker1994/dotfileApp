@@ -818,7 +818,6 @@ impl SwitcherController {
         const SKIP: [&str; COMMAND_SECTION_SKIPS.len()] = COMMAND_SECTION_SKIPS;
         let settings = self.inner.lock().unwrap().settings.clone();
         let jira = section_flag(sections, "jira", false);
-        let label_of = label_of(sections);
 
         let mut all: Vec<PaletteCommand> = Vec::new();
         for (name, vars) in parse_sections_ordered(text) {
@@ -846,13 +845,6 @@ impl SwitcherController {
             ));
         }
 
-        let listed = |section: &str| -> bool {
-            sections
-                .get(section)
-                .and_then(|m| m.get("in-palette"))
-                .map(|v| tri_pure(v).unwrap_or(true))
-                .unwrap_or(true)
-        };
         if settings.shared_window {
             all.push(PaletteCommand::new("window", "Bansho", "views"));
         }
@@ -9827,18 +9819,7 @@ mod tests {
     use super::*;
     use crate::app::registry::PaletteCommand;
 
-    /// Config *writes* go through the python codec; configure + ping the
-    /// helper (the same guard `config.rs` tests use) and report whether it
-    /// answered.
-    fn helper_ready() -> bool {
-        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
-        if !crate::app::python_helper::lib_has_helper(&lib) {
-            return false;
-        }
-        let h = crate::app::python_helper::PythonHelper::shared();
-        h.configure(&lib);
-        h.call_default("ping", json!({})).is_ok()
-    }
+    use ks_core::app::python_helper::helper_ready_for_tests as helper_ready;
 
     /// `WS_COMMANDS_CONF` is process-global: the tests that point it at a
     /// throwaway file (jira-poll, sidebar-width, inspector-width) must not

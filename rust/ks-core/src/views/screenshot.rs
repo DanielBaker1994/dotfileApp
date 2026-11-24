@@ -1522,24 +1522,8 @@ pub fn shot_key_target(
     None
 }
 
-/// The [`KeyInput`] an `NSEvent` keyDown carries, for the overlay monitor
-/// (mirrors the fields `ScreenshotOverlay.handleKey` reads).
 #[cfg(target_os = "macos")]
-pub fn key_input_from_event(event: &objc2_app_kit::NSEvent) -> KeyInput {
-    use objc2_app_kit::NSEventModifierFlags as M;
-    let mods = event.modifierFlags() & M::DeviceIndependentFlagsMask;
-    KeyInput {
-        key_code: event.keyCode(),
-        chars: event
-            .charactersIgnoringModifiers()
-            .and_then(|s| s.to_string().chars().next()),
-        cmd: mods.contains(M::Command),
-        ctrl: mods.contains(M::Control),
-        opt: mods.contains(M::Option),
-        shift: mods.contains(M::Shift),
-        esc_streak: 0,
-    }
-}
+use crate::ui::popup::key_input_from_event;
 
 /// The [`PinKey`] an `NSEvent` keyDown carries, for the pin monitor (mirrors
 /// the fields `PinPanel.handleKey` reads).

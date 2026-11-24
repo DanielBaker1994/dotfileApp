@@ -1560,15 +1560,7 @@ mod tests {
         }
     }
 
-    fn helper_ready() -> bool {
-        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
-        if !crate::app::python_helper::lib_has_helper(&lib) {
-            return false;
-        }
-        let h = PythonHelper::shared();
-        h.configure(&lib);
-        h.call_default("ping", json!({})).is_ok()
-    }
+    use ks_core::app::python_helper::helper_ready_for_tests as helper_ready;
 
     fn tmpdir(name: &str) -> String {
         let base = std::env::temp_dir().join(format!("ws-rs-jira-{}-{name}", std::process::id()));

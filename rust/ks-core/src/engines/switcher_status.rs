@@ -92,15 +92,7 @@ impl SwitcherStatus {
 mod tests {
     use super::*;
 
-    fn helper_ready() -> bool {
-        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
-        if !crate::app::python_helper::lib_has_helper(&lib) {
-            return false;
-        }
-        let h = crate::app::python_helper::PythonHelper::shared();
-        h.configure(&lib);
-        h.call_default("ping", json!({})).is_ok()
-    }
+    use crate::app::python_helper::helper_ready_for_tests as helper_ready;
 
     #[test]
     fn parses_status_payload() {

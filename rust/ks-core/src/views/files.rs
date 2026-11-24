@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::engines::file_ops::{FileOps, Outcome, UndoStack};
+use crate::engines::file_ops::FileOps;
 use crate::engines::list_filter::localized_standard_compare;
 use crate::ui::chrome::Rect;
 

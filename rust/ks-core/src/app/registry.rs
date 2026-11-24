@@ -1,7 +1,7 @@
-//! Shared registries + the `SlotView`/`SlotMember` contract.
+//! Shared registries + the `SlotView` contract.
 //!
 //! This is the frozen hub every view plugs into (mirrors `SharedWindow.swift`'s
-//! `SlotView`/`SlotMember` and `PopupChrome.navIcons`). View modules register
+//! `SlotView` and `PopupChrome.navIcons`). View modules register
 //! here instead of editing the host, which keeps parallel work conflict-free.
 
 use serde::{Deserialize, Serialize};
@@ -111,27 +111,6 @@ impl RectI {
     }
 }
 
-/// Mirrors `protocol SlotMember` in `SharedWindow.swift`.
-pub trait SlotMember {
-    fn view(&self) -> SlotView;
-    fn shown(&self) -> bool;
-    fn is_key(&self) -> bool {
-        false
-    }
-    fn frame(&self) -> Option<RectI> {
-        None
-    }
-    fn base_frame(&self) -> Option<RectI> {
-        self.frame()
-    }
-    /// Show/unpark the view. `frame` = an explicit frame, else its base frame.
-    fn slot_show(&self, frame: Option<RectI>);
-    /// Park (detach + order out) the view.
-    fn slot_park(&self, stop_voice: bool);
-    fn test_state(&self) -> Value {
-        Value::Null
-    }
-}
 
 /// One entry in the header view switcher (mirrors `PopupChrome.navIcons`).
 #[derive(Clone, Debug, Serialize)]

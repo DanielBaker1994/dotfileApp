@@ -174,10 +174,9 @@ fn id_list(v: &str) -> Vec<String> {
 /// "Bansho", ordered by `[app]
 /// palette-first`, then narrowed to `[app] palette` (empty = all).
 pub fn palette_rows(text: &str) -> Vec<(String, String)> {
-    use crate::app::sections::{label_of, parse_sections, parse_sections_ordered, section_flag, tri_pure};
+    use crate::app::sections::{parse_sections, parse_sections_ordered, section_flag, tri_pure};
     use crate::app::sections::COMMAND_SECTION_SKIPS;
     let sections = parse_sections(text);
-    let label = label_of(&sections);
     let app = sections.get("app").cloned().unwrap_or_default();
 
     let mut all: Vec<(String, String)> = Vec::new();
@@ -196,13 +195,6 @@ pub fn palette_rows(text: &str) -> Vec<(String, String)> {
         let title = vars.get("label").map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
         all.push((name.clone(), title.unwrap_or_else(|| name.clone())));
     }
-    let listed = |section: &str| -> bool {
-        sections
-            .get(section)
-            .and_then(|m| m.get("in-palette"))
-            .map(|v| tri_pure(v).unwrap_or(true))
-            .unwrap_or(true)
-    };
     let shared_window = app.get("shared-window").and_then(|v| tri_pure(v)).unwrap_or(true);
     if shared_window {
         all.push(("window".into(), "Bansho".into()));

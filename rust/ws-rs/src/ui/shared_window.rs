@@ -13,7 +13,7 @@
 //! decoration wiring and sheet handling land in a later cut.
 
 use crate::app::hotkey::{eval_true_args, AeroCall, AeroIpc};
-use crate::app::registry::{nav, RectI, SlotMember, SlotView};
+use crate::app::registry::{nav, RectI, SlotView};
 use serde_json::{json, Value};
 use std::rc::Rc;
 use std::time::Instant;

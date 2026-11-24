@@ -394,6 +394,19 @@ pub fn python_bin(lib: &str) -> Option<String> {
 }
 
 /// True when `lib` looks like a `pylib` directory with the helper package.
+/// Test support (unit tests of ks-core and ws-rs): point the shared helper at
+/// the checkout's `pylib` and ping it; `false` when the helper is unavailable.
+#[doc(hidden)]
+pub fn helper_ready_for_tests() -> bool {
+    let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
+    if !lib_has_helper(&lib) {
+        return false;
+    }
+    let h = PythonHelper::shared();
+    h.configure(&lib);
+    h.call_default("ping", serde_json::json!({})).is_ok()
+}
+
 pub fn lib_has_helper(lib: &str) -> bool {
     Path::new(lib).join("helper").join("__main__.py").is_file()
 }
