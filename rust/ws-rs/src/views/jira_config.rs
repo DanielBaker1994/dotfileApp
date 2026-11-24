@@ -617,9 +617,7 @@ mod appkit {
     /// error line to show in red.
     type WriteResult = Result<(String, bool), String>;
 
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
-        NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
-    }
+    use crate::ui::jira_setup::appkit_rect as rect;
 
     use crate::ui::view_base::{self, as_any};
 

@@ -2347,6 +2347,16 @@ fn parse_esc_close(text: &str) -> HashMap<String, i64> {
     out
 }
 
+/// `commands.toml` (with the override merged), parsed into sections.
+fn live_sections() -> HashMap<String, HashMap<String, String>> {
+    parse_sections(&crate::app::config::read_config_text().unwrap_or_default())
+}
+
+/// One section of the live config (empty when absent).
+fn live_section(name: &str) -> HashMap<String, String> {
+    live_sections().remove(name).unwrap_or_default()
+}
+
 /// The views whose left pane is resizable (`do:sidebar-width:*`).
 const SIDEBAR_VIEWS: [&str; 2] = ["jira", "confluence"];
 
@@ -2403,8 +2413,7 @@ const INSPECTOR_WIDTH_DEFAULT: f64 = 264.0;
 
 /// The `[jira] inspector-width` bounds, from config (`do:inspector-width:*`).
 fn pane_inspector_bounds() -> (f64, f64) {
-    let text = crate::app::config::read_config_text().unwrap_or_default();
-    let sections = parse_sections(&text);
+    let sections = live_sections();
     let vars = sections.get("jira");
     let min = vars
         .and_then(|m| m.get("inspector-min-width"))
@@ -2420,8 +2429,7 @@ fn pane_inspector_bounds() -> (f64, f64) {
 
 /// The `[jira] inspector-width` value, from config (clamped to its bounds).
 fn pane_inspector_width() -> f64 {
-    let text = crate::app::config::read_config_text().unwrap_or_default();
-    let sections = parse_sections(&text);
+    let sections = live_sections();
     let w = sections
         .get("jira")
         .and_then(|m| m.get("inspector-width"))
@@ -2433,8 +2441,7 @@ fn pane_inspector_width() -> f64 {
 
 /// The `[view] sidebar-min-width` / `-max-width` range, from config.
 fn pane_sidebar_bounds(view: &str) -> (f64, f64) {
-    let text = crate::app::config::read_config_text().unwrap_or_default();
-    let sections = parse_sections(&text);
+    let sections = live_sections();
     let vars = sections.get(view);
     let min = vars
         .and_then(|m| m.get("sidebar-min-width"))
@@ -2450,8 +2457,7 @@ fn pane_sidebar_bounds(view: &str) -> (f64, f64) {
 
 /// The `[view] sidebar-width` value, from config (clamped to its range).
 fn pane_sidebar_width(view: &str) -> f64 {
-    let text = crate::app::config::read_config_text().unwrap_or_default();
-    let sections = parse_sections(&text);
+    let sections = live_sections();
     let vars = sections.get(view);
     let w = vars
         .and_then(|m| m.get("sidebar-width"))
@@ -2920,12 +2926,7 @@ mod daemon_ui {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    fn now_secs() -> f64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0)
-    }
+    use ks_core::app::logging::now_secs_f64 as now_secs;
 
     const HEADER_HEIGHT: f64 = 30.0;
 
@@ -2936,9 +2937,6 @@ mod daemon_ui {
             | NSAutoresizingMaskOptions::ViewHeightSizable
     }
 
-    /// `NSApp.activate(ignoringOtherApps: true)` — the exact Swift call.
-    /// The non-deprecated `activate()` does not take focus for a
-    /// background-launched process on this OS.
     thread_local! {
         /// The app that was frontmost when Hyper+S opened the palette from
         /// outside (`None` = the user was already in kitchen-sink). Main
@@ -2955,11 +2953,7 @@ mod daemon_ui {
     /// workspaces leave the user's app focused.
     fn pick_keeps_app(action: &PaletteAction) -> bool {
         match action {
-            PaletteAction::Command(name) => matches!(
-                name.as_str(),
-                "window" | "files" | "jira" | "confluence" | "ai"
-                    | "jira-config"
-            ),
+            PaletteAction::Command(name) => ks_core::app::quick::pick_keeps_app(name),
             PaletteAction::Workspace(_) => false,
         }
     }
@@ -3136,8 +3130,7 @@ mod daemon_ui {
     /// `configureRecentFiles()` + `configurePathShelf()` at launch: the
     /// Recent engine starts and feeds the shelf (`onKept` / `onRenamed`).
     fn configure_recent_and_shelf() {
-        let text = crate::app::config::read_config_text().unwrap_or_default();
-        let sections = super::parse_sections(&text);
+        let sections = super::live_sections();
         crate::views::files::start_recent(&sections.get("files").cloned().unwrap_or_default());
         let Some(paths) = sections.get("paths") else { return };
         let limit = paths.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(500);
@@ -4407,7 +4400,7 @@ mod daemon_ui {
                     let loc = wheres.get(&key).cloned().unwrap_or_default();
                     icons.push((n.id, nav_icon_image(n.view, n.image_key.as_deref(), &assets)));
                     let mut v = SwitchView::new(n.id, &n.tip, loc);
-                    v.aliases = crate::app::pathfmt::section_value(section, "aliases")
+                    v.aliases = super::live_section(section).get("aliases").cloned()
                         .unwrap_or_default()
                         .split(',')
                         .map(|a| a.trim().to_string())
@@ -5486,8 +5479,7 @@ mod daemon_ui {
         /// sort / favorites / start page, the Recent engine, and the view's
         /// event sink routed back to [`Self::files_event`].
         fn build_files(&self, mtm: MainThreadMarker) -> Option<(FileBrowser, Retained<NSView>)> {
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let sections = super::parse_sections(&text);
+            let sections = super::live_sections();
             let section: HashMap<String, String> = sections.get("files").cloned().unwrap_or_default();
             crate::views::files::start_recent(&section);
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -5780,8 +5772,7 @@ mod daemon_ui {
                 return;
             };
             let section = theme_section(v);
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let sections = super::parse_sections(&text);
+            let sections = super::live_sections();
             let overrides: Vec<(String, String)> = sections
                 .get("themes")
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -5886,8 +5877,7 @@ mod daemon_ui {
         /// preset's colors without touching `commands.toml`.
         fn preview_theme_preset(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) {
             let kv = self.theme_preset_kv(section, p, scope);
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let mut sections = super::parse_sections(&text);
+            let mut sections = super::live_sections();
             let sec = sections.entry(section.to_string()).or_default();
             for (k, v) in kv {
                 match v {
@@ -5905,7 +5895,8 @@ mod daemon_ui {
         /// The `[section]` keys a preset writes for `scope`.
         fn theme_preset_kv(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) -> Vec<(String, Option<String>)> {
             use crate::ui::theme::HexColor;
-            let cur = |k: &str| crate::app::pathfmt::section_value(section, k).and_then(|v| HexColor::parse(v.trim()));
+            let sec = super::live_section(section);
+            let cur = |k: &str| sec.get(k).and_then(|v| HexColor::parse(v.trim()));
             // `max(current alpha, presetMinOpacity)`
             let paint = |k: &str, c: crate::ui::theme::Rgba| -> (String, Option<String>) {
                 let a = cur(k).map(|x| x.a).unwrap_or(1.0).max(0.6);
@@ -5950,8 +5941,7 @@ mod daemon_ui {
         /// the new colors.
         fn after_theme_change(&self, over: Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>) {
             let sections = over.unwrap_or_else(|| {
-                let text = crate::app::config::read_config_text().unwrap_or_default();
-                super::parse_sections(&text)
+                super::live_sections()
             });
             crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections);
             let Some(v) = self.ivars().controller.current() else { return };
@@ -6423,8 +6413,7 @@ mod daemon_ui {
         fn build_confluence(&self, mtm: MainThreadMarker) -> ConfState {
             use crate::views::confluence::macos::ConfluencePreview;
             use crate::views::confluence::{ConfluenceConfig, ConfluenceImageLoader, ConfluenceModel};
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let sections = super::parse_sections(&text);
+            let sections = super::live_sections();
             let entries: HashMap<String, String> = sections.get("confluence").cloned().unwrap_or_default();
             let range = super::divider_range_from(&entries, 140.0, 480.0);
             let config = ConfluenceConfig::from_entries(entries);
@@ -7420,8 +7409,7 @@ mod daemon_ui {
             mtm: MainThreadMarker,
         ) -> (crate::views::jira_view::JiraList, Retained<crate::views::jira_view::JiraView>) {
             use crate::views::jira_view::{JiraList, JiraView};
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let sections = super::parse_sections(&text);
+            let sections = super::live_sections();
             let section: HashMap<String, String> = sections.get("jira").cloned().unwrap_or_default();
             let paths = match crate::app::paths::JiraPaths::resolve() {
                 crate::app::paths::JiraPathsState::Resolved(p) => Some(p),
@@ -7691,8 +7679,7 @@ mod daemon_ui {
         }
 
         fn jira_section(&self) -> HashMap<String, String> {
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            super::parse_sections(&text).get("jira").cloned().unwrap_or_default()
+            super::live_section("jira")
         }
 
         fn jira_search_close(&self) {
@@ -7890,7 +7877,6 @@ mod daemon_ui {
                     if let Some(c) = st.bar.row_chip(&key) {
                         c.refresh();
                     }
-                    drop(st);
                     crate::ui::multi_picker::appkit::refresh_open();
                 });
             });
@@ -10008,8 +9994,7 @@ mod daemon_ui {
                 }
             }
             let ui = existing.unwrap_or_else(|| {
-                let text = crate::app::config::read_config_text().unwrap_or_default();
-                let sec = super::parse_sections(&text).get("pane-find").cloned().unwrap_or_default();
+                let sec = super::live_section("pane-find");
                 let u = SidebarJumpUi::new(mtm, PaneFindConfig::from_section(&sec));
                 *self.ivars().sidebar_jump.borrow_mut() = Some(u.clone());
                 u

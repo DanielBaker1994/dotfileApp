@@ -108,14 +108,7 @@ impl AIConfig {
     }
 }
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
-}
+use ks_core::app::pathfmt::expand_tilde;
 
 fn user_dir() -> String {
     crate::app::paths::Paths::from_env().user_dir().to_string()
@@ -1493,12 +1486,7 @@ pub mod macos {
 
 }
 
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
+use ks_core::app::logging::now_secs_f64 as now_secs;
 
 #[cfg(test)]
 mod tests {

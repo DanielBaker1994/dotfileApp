@@ -99,35 +99,11 @@ fn ai_string(method: &str, params: Value, key: &str, timeout_secs: u64) -> Optio
         .map(str::to_string)
 }
 
-fn read_commands_text() -> Option<String> {
-    let path = std::env::var("WS_COMMANDS_CONF")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".config/kitchen-sink/commands.toml"))
-        })?;
-    std::fs::read_to_string(path).ok()
-}
-
-// `aiSetting` / `aiNumber` from AIWindow.swift: the first `[ai]` entry with
-// this key, read through the codec's `config.section_entries`.
+/// `aiSetting` / `aiNumber` from AIWindow.swift: the `[ai]` entry with this key
+/// in the live config (override merged).
 pub fn ai_section_value(key: &str) -> Option<String> {
-    let text = read_commands_text()?;
-    let params = json!({"text": text, "section": "ai"});
-    ai_box("config.section_entries", params, 10)?
-        .get("entries")?
-        .as_array()?
-        .iter()
-        .find_map(|e| {
-            if e.get("key").and_then(Value::as_str) == Some(key) {
-                e.get("value").and_then(Value::as_str).map(str::to_string)
-            } else {
-                None
-            }
-        })
+    let text = ks_core::app::config::read_config_text().unwrap_or_default();
+    ks_core::app::sections::parse_sections(&text).get("ai")?.get(key).cloned()
 }
 
 pub fn ai_setting(key: &str, fallback: &str) -> String {
@@ -145,28 +121,9 @@ pub fn ai_number(key: &str, fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
-}
+use ks_core::app::pathfmt::expand_tilde;
 
-#[cfg(unix)]
-fn is_executable(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
-        .unwrap_or(false)
-}
-
-/// Windows twin: no mode bits, so fall back to the shared extension check.
-#[cfg(windows)]
-fn is_executable(path: &str) -> bool {
-    crate::app::python_helper::is_executable_windows_ext(Path::new(path))
-}
+use ks_core::app::python_helper::is_executable;
 
 pub struct RichText;
 

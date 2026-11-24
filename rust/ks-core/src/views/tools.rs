@@ -412,12 +412,7 @@ pub fn save_prettyprint_at(contents: &str, dir: &str, secs: i64) -> Result<Strin
 }
 
 /// Unix seconds, the clock the panel stamps with.
-pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+pub use crate::app::logging::now_unix as now_secs;
 
 #[cfg(target_os = "macos")]
 pub fn copy_text(text: &str) {

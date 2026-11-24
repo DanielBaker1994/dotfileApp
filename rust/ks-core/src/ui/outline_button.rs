@@ -316,12 +316,6 @@ mod appkit {
             self.ivars().on.get()
         }
 
-        /// NSControl-style association id for sender-less routing (the
-        /// `tag`/`setTag:` ObjC selectors read the same cell).
-        pub fn set_tag(&self, t: objc2_foundation::NSInteger) {
-            self.ivars().tag.set(t);
-        }
-
         pub fn set_on_click(&self, cb: impl Fn() + 'static) {
             *self.ivars().sink.borrow_mut() = Some(Rc::new(cb));
         }

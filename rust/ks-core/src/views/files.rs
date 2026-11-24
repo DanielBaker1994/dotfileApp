@@ -440,15 +440,7 @@ pub enum QueryMode {
     Recursive { base: String, glob: String },
 }
 
-fn expand_tilde(s: &str) -> String {
-    if s == "~" {
-        return std::env::var("HOME").unwrap_or_default();
-    }
-    if let Some(rest) = s.strip_prefix("~/") {
-        return format!("{}/{}", std::env::var("HOME").unwrap_or_default(), rest);
-    }
-    s.to_string()
-}
+use crate::app::pathfmt::expand_tilde;
 
 /// Lexical path cleanup (Swift `NSString.standardizingPath` without symlinks).
 pub fn standardize(p: &str) -> String {
@@ -1330,9 +1322,6 @@ pub fn copy_contents_entry(path: &str) -> Option<crate::ui::menu_kit::MenuEntry>
 
 // ------------------------------------------------------------------ appkit layout
 
-// `PopupFileBrowser` surface geometry (flipped, top-left origin).
-pub const BROWSER_DEFAULT_WIDTH: f64 = 760.0;
-pub const BROWSER_DEFAULT_HEIGHT: f64 = 460.0;
 pub const BROWSER_ROW_HEIGHT: f64 = 22.0;
 pub const BROWSER_TOOLBAR_HEIGHT: f64 = 30.0;
 pub const BROWSER_PREVIEW_WIDTH: f64 = 220.0;

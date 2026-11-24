@@ -1632,23 +1632,11 @@ impl ShotFiles {
     }
 
     fn expand_tilde(p: &str) -> String {
-        if p == "~" {
-            std::env::var("HOME").unwrap_or_else(|_| p.to_string())
-        } else if let Some(rest) = p.strip_prefix("~/") {
-            match std::env::var("HOME") {
-                Ok(home) => format!("{}/{}", home, rest),
-                Err(_) => p.to_string(),
-            }
-        } else {
-            p.to_string()
-        }
+        crate::app::pathfmt::expand_tilde(p)
     }
 
     fn unix_now() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
+        crate::app::logging::now_unix()
     }
 }
 

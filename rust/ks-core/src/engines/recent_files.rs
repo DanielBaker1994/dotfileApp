@@ -380,16 +380,7 @@ fn path_extension(name: &str) -> String {
     }
 }
 
-fn expand_tilde(p: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    if p == "~" {
-        return home;
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        return format!("{home}/{rest}");
-    }
-    p.to_string()
-}
+use crate::app::pathfmt::expand_tilde;
 
 fn fnmatch_str(pattern: &str, name: &str) -> bool {
     #[cfg(unix)]

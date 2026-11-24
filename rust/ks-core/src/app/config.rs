@@ -16,56 +16,11 @@ use std::sync::{Mutex, OnceLock};
 // Colors (`hexColor` / `parsePalette` from `kitchen_sink.swift`)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rgba {
-    pub r: f64,
-    pub g: f64,
-    pub b: f64,
-    pub a: f64,
-}
+pub use crate::ui::theme::Rgba;
 
-impl Rgba {
-    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
-        Rgba { r, g, b, a }
-    }
-
-    pub fn from_u8(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Rgba::new(
-            r as f64 / 255.0,
-            g as f64 / 255.0,
-            b as f64 / 255.0,
-            a as f64 / 255.0,
-        )
-    }
-}
-
-/// `hexColor(_:)`: optional `0x` / `#`, exactly 6 or 8 hex digits, alpha
-/// clamped to a minimum of 0.08 (8-digit only).
+/// `hexColor(_:)` — see [`crate::ui::theme::HexColor::parse`].
 pub fn hex_color(s: &str) -> Option<Rgba> {
-    if s.is_empty() {
-        return None;
-    }
-    let hex = s.strip_prefix("0x").unwrap_or(s);
-    let hex = hex.strip_prefix('#').unwrap_or(hex);
-    if hex.len() != 6 && hex.len() != 8 {
-        return None;
-    }
-    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let v = u32::from_str_radix(hex, 16).ok()?;
-    let has_alpha = hex.len() == 8;
-    let a = if has_alpha {
-        ((v >> 24) & 0xFF) as f64 / 255.0
-    } else {
-        1.0
-    };
-    Some(Rgba::new(
-        ((v >> 16) & 0xFF) as f64 / 255.0,
-        ((v >> 8) & 0xFF) as f64 / 255.0,
-        (v & 0xFF) as f64 / 255.0,
-        a.max(0.08),
-    ))
+    crate::ui::theme::HexColor::parse(s)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,13 +129,7 @@ pub fn csv(s: Option<&str>) -> Vec<String> {
 }
 
 /// `(s as NSString).expandingTildeInPath` (the `~` / `~/…` common cases).
-pub fn expand_tilde(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix('~') {
-        let home = std::env::var("HOME").unwrap_or_default();
-        return format!("{home}{rest}");
-    }
-    s.to_string()
-}
+pub use crate::app::pathfmt::expand_tilde;
 
 /// `num(_:)` — `CGFloat(Double(s ?? "") ?? 0)`.
 pub fn num(s: Option<&str>) -> f64 {
@@ -199,61 +148,21 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
-fn user_name() -> String {
-    std::env::var("USER").unwrap_or_default()
-}
-
-fn default_font_install_casks() -> Vec<FontCask> {
-    fn c(label: &str, cask: &str, kind: &str) -> FontCask {
-        FontCask {
-            label: label.to_string(),
-            cask: cask.to_string(),
-            kind: kind.to_string(),
-        }
-    }
-    vec![
-        c("JetBrains Mono Nerd Font", "font-jetbrains-mono-nerd-font", "nerd"),
-        c("Fira Code Nerd Font", "font-fira-code-nerd-font", "nerd"),
-        c("Iosevka Term Nerd Font", "font-iosevka-term-nerd-font", "nerd"),
-        c("IBM Plex Mono", "font-ibm-plex-mono", "mono"),
-        c("Cascadia Code", "font-cascadia-code", "mono"),
-        c("Inter", "font-inter", "sans"),
-        c("Source Serif 4", "font-source-serif-4", "serif"),
-    ]
-}
-
 // ---------------------------------------------------------------------------
 // AppSettings
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FontCask {
-    pub label: String,
-    pub cask: String,
-    pub kind: String,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub shared_window: bool,
-    pub preload: bool,
     pub shared_width: f64,
     pub shared_height: f64,
-    pub margin_top: f64,
-    pub margin_top_builtin: f64,
-    pub margin_bottom: f64,
-    pub switcher_width: f64,
     pub palette_first: Vec<String>,
     /// `[app] palette`: the Hyper+S palette lists exactly these command ids,
     /// in this order. Empty = every `in-palette` command.
     pub palette: Vec<String>,
     pub shell: String,
-    pub shell_args: Vec<String>,
     pub terminal_font: String,
-    pub terminal_font_size: f64,
-    pub font_install_casks: Vec<FontCask>,
-    pub aerospace_cli: Vec<String>,
-    pub app_dirs: Vec<String>,
     pub jira_icon_name: String,
     pub confluence_icon_name: String,
     pub ai_icon_name: String,
@@ -263,18 +172,10 @@ pub struct AppSettings {
     pub focus_file_name: String,
     pub focus_bridge_name: String,
     pub switcher_window_name: String,
-    pub detail_window_name: String,
-    pub aerospace_socket_path: String,
-    pub crash_log_path: String,
-    pub aero_debug_flag: String,
-    pub aero_log: String,
-    pub voice_locale: String,
-    pub screenshot_apps: Vec<String>,
     pub hide_on_focus_loss: bool,
     pub focus_loss_delay: f64,
     pub esc_close: i64,
     pub copy_toast: String,
-    pub terminal_app: String,
     pub header_style: HeaderStyle,
     pub preview_border: Rgba,
     pub preview_border_width: f64,
@@ -290,13 +191,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
             shared_window: true,
-            preload: true,
             shared_width: 1100.0,
             shared_height: 640.0,
-            margin_top: 0.0,
-            margin_top_builtin: 0.0,
-            margin_bottom: 0.0,
-            switcher_width: 760.0,
             palette_first: vec![
                 "paths".to_string(),
                 "filefast".to_string(),
@@ -305,23 +201,7 @@ impl Default for AppSettings {
             ],
             palette: Vec::new(),
             shell: "/opt/homebrew/bin/bash".to_string(),
-            shell_args: vec!["--login".to_string(), "-i".to_string()],
             terminal_font: "Hack Nerd Font".to_string(),
-            terminal_font_size: 13.0,
-            font_install_casks: default_font_install_casks(),
-            aerospace_cli: vec![
-                "/opt/homebrew/bin/aerospace".to_string(),
-                "/usr/local/bin/aerospace".to_string(),
-                "aerospace".to_string(),
-            ],
-            app_dirs: vec![
-                "/Applications".to_string(),
-                "/Applications/Utilities".to_string(),
-                "/System/Applications".to_string(),
-                "/System/Applications/Utilities".to_string(),
-                "/System/Library/CoreServices".to_string(),
-                format!("{}/Applications", home_dir()),
-            ],
             jira_icon_name: "jira_icon.png".to_string(),
             confluence_icon_name: "confluence_icon.png".to_string(),
             ai_icon_name: String::new(),
@@ -331,23 +211,10 @@ impl Default for AppSettings {
             focus_file_name: "kitchen-sink-focus".to_string(),
             focus_bridge_name: "ws-aerospace-focus".to_string(),
             switcher_window_name: "kitchen-sink".to_string(),
-            detail_window_name: "jira-detail".to_string(),
-            aerospace_socket_path: format!("/tmp/bobko.aerospace-{}.sock", user_name()),
-            crash_log_path: "logs/crash.log".to_string(),
-            aero_debug_flag: "logs/aero-debug.log".to_string(),
-            aero_log: "logs/aero.log".to_string(),
-            voice_locale: "en-US".to_string(),
-            screenshot_apps: vec![
-                "org.flameshot".to_string(),
-                "pl.maketheweb.cleanshotx".to_string(),
-                "cc.ffitch.shottr".to_string(),
-                "com.skitch.skitch".to_string(),
-            ],
             hide_on_focus_loss: true,
             focus_loss_delay: 0.3,
             esc_close: 0,
             copy_toast: "Copied {} to clipboard".to_string(),
-            terminal_app: String::new(),
             header_style: HeaderStyle::Flat,
             preview_border: Rgba::new(0.753, 0.753, 0.753, 1.0),
             preview_border_width: 2.0,
@@ -375,12 +242,6 @@ fn get(vars: &HashMap<String, String>, k: &str) -> Option<String> {
 /// `parseAppConfig(_:)`.
 pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, String>) {
     let strv = |k: &str| get(vars, k);
-    let list = |k: &str| -> Vec<String> {
-        csv(vars.get(k).map(String::as_str))
-            .into_iter()
-            .map(|s| if s.starts_with('~') { expand_tilde(&s) } else { s })
-            .collect()
-    };
 
     if let Some(v) = strv("shell") {
         if !v.is_empty() {
@@ -390,61 +251,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     if let Some(v) = strv("terminal-font") {
         if !v.is_empty() {
             settings.terminal_font = v;
-        }
-    }
-    if let Some(v) = strv("terminal-font-size").and_then(|v| v.parse::<f64>().ok()) {
-        if v >= 6.0 {
-            settings.terminal_font_size = v;
-        }
-    }
-    {
-        let casks: Vec<FontCask> = csv(vars.get("font-install-casks").map(String::as_str))
-            .into_iter()
-            .filter_map(|entry| {
-                let parts: Vec<String> =
-                    entry.split('|').map(|p| p.trim().to_string()).collect();
-                if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-                    Some(FontCask {
-                        label: parts[0].clone(),
-                        cask: parts[1].clone(),
-                        kind: if parts.len() > 2 {
-                            parts[2].to_lowercase()
-                        } else {
-                            "mono".to_string()
-                        },
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if !casks.is_empty() {
-            settings.font_install_casks = casks;
-        }
-    }
-    {
-        let sa: Vec<String> = vars
-            .get("shell-args")
-            .map(String::as_str)
-            .unwrap_or("")
-            .split(|c| c == ' ' || c == '\t')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        if !sa.is_empty() {
-            settings.shell_args = sa;
-        }
-    }
-    {
-        let cli = list("aerospace-cli");
-        if !cli.is_empty() {
-            settings.aerospace_cli = cli;
-        }
-    }
-    {
-        let dirs = list("app-dirs");
-        if !dirs.is_empty() {
-            settings.app_dirs = dirs;
         }
     }
     if let Some(v) = strv("jira-icon") {
@@ -488,39 +294,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
             settings.switcher_window_name = v;
         }
     }
-    if let Some(v) = strv("detail-name") {
-        if !v.is_empty() {
-            settings.detail_window_name = v;
-        }
-    }
-    if let Some(v) = strv("aerospace-socket") {
-        if !v.is_empty() {
-            settings.aerospace_socket_path = v.replace("$USER", &user_name());
-        }
-    }
-    if let Some(v) = strv("crash-log") {
-        if !v.is_empty() {
-            settings.crash_log_path = expand_tilde(&v);
-        }
-    }
-    if let Some(v) = strv("debug-flag") {
-        if !v.is_empty() {
-            settings.aero_debug_flag = expand_tilde(&v);
-        }
-    }
-    if let Some(v) = strv("aero-log") {
-        if !v.is_empty() {
-            settings.aero_log = expand_tilde(&v);
-        }
-    }
-    if let Some(v) = strv("voice-locale") {
-        if !v.is_empty() {
-            settings.voice_locale = v;
-        }
-    }
-    if vars.contains_key("screenshot-apps") {
-        settings.screenshot_apps = csv(vars.get("screenshot-apps").map(String::as_str));
-    }
     if let Some(v) = strv("hide-on-focus-loss") {
         settings.hide_on_focus_loss = config_text::tri(Some(&v)) == Some(true);
     }
@@ -535,9 +308,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     if let Some(v) = tri_of(strv("shared-window").as_deref()) {
         settings.shared_window = v;
     }
-    if let Some(v) = tri_of(strv("preload").as_deref()) {
-        settings.preload = v;
-    }
     if let Some(v) = strv("shared-width").and_then(|v| v.parse::<f64>().ok()) {
         if v >= 400.0 {
             settings.shared_width = v;
@@ -547,12 +317,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
         if v >= 300.0 {
             settings.shared_height = v;
         }
-    }
-    if let Some(v) = strv("margin-top").and_then(|v| v.parse::<f64>().ok()) {
-        settings.margin_top = v.max(0.0);
-    }
-    if let Some(v) = strv("switcher-width").and_then(|v| v.parse::<f64>().ok()) {
-        settings.switcher_width = v.max(240.0).min(1200.0);
     }
     // A repeated id would list its command twice: keep the first.
     let id_list = |v: &str| -> Vec<String> {
@@ -570,20 +334,11 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     if let Some(v) = strv("palette") {
         settings.palette = id_list(&v);
     }
-    if let Some(v) = strv("margin-top-builtin").and_then(|v| v.parse::<f64>().ok()) {
-        settings.margin_top_builtin = v.max(0.0);
-    }
-    if let Some(v) = strv("margin-bottom").and_then(|v| v.parse::<f64>().ok()) {
-        settings.margin_bottom = v.max(0.0);
-    }
     if let Some(v) = strv("esc-close").and_then(|v| v.parse::<i64>().ok()) {
         settings.esc_close = v.max(0);
     }
     if vars.contains_key("copy-toast") {
         settings.copy_toast = strv("copy-toast").unwrap_or_default();
-    }
-    if let Some(v) = strv("terminal-app") {
-        settings.terminal_app = v;
     }
     settings.preview_border = strv("preview-border")
         .and_then(|v| hex_color(&v))
@@ -696,21 +451,14 @@ impl ListColumn {
 pub struct CommandSpec {
     pub name: String,
     pub kind: CommandKind,
-    pub window_name: String,
-    pub chrome_title: String,
     pub script: Option<String>,
     pub paths: Vec<String>,
     pub sources: Vec<String>,
     pub root: Option<String>,
     pub favorites: Vec<String>,
     pub recent: bool,
-    pub recent_days: i64,
-    pub recent_limit: i64,
-    pub recent_exclude: Vec<String>,
     pub start_recent: bool,
     pub recent_everywhere: bool,
-    pub browser_background: Option<Rgba>,
-    pub background_color: Option<Rgba>,
     pub tint_alpha: Option<f64>,
     pub primary: Option<String>,
     pub content: Option<String>,
@@ -721,58 +469,32 @@ pub struct CommandSpec {
     pub filters: Vec<String>,
     pub width: f64,
     pub max_rows: i64,
-    pub content_cap: i64,
-    pub body_lines: i64,
     pub page_size: i64,
-    pub copy_fields: Vec<String>,
     pub checkbox: Option<bool>,
     pub resize: bool,
     pub drag: bool,
     pub sticky: bool,
-    pub float: Option<bool>,
     pub panel: bool,
     pub label: Option<String>,
     pub aliases: Vec<String>,
     pub in_palette: bool,
-    pub tabs_opaque: Option<bool>,
     pub sort: Option<String>,
     pub sort_descending: Option<bool>,
-    pub search_limit: Option<i64>,
-    pub search_exclude: Option<Vec<String>>,
     pub terminal_words: Option<Vec<String>>,
-    pub search_width: f64,
-    pub max_stretch: f64,
-    pub table_row_height: f64,
     pub height: f64,
-    pub max_height: f64,
     pub font: Option<String>,
     pub font_size: f64,
     pub header_color: Option<Rgba>,
-    pub voice: bool,
-    pub voice_live: bool,
     pub terminal: bool,
-    pub terminal_height: f64,
     pub inspector_width: f64,
     pub sidebar_width: f64,
-    pub terminal_dir: Option<String>,
-    pub terminal_background: Option<Rgba>,
     pub text_color: Option<Rgba>,
-    pub dim_color: Option<Rgba>,
-    pub highlight_color: Option<Rgba>,
-    pub accent_color: Option<Rgba>,
     pub palette: Option<Palette>,
-    pub terminal_foreground: Option<Rgba>,
-    pub vim_mode: bool,
-    pub vim_bin: String,
-    pub vim_init: Option<String>,
-    pub start_drawer: String,
     pub esc_close: Option<i64>,
-    pub image_rows: i64,
     pub icon: Option<String>,
     pub save_dir: String,
     pub table: bool,
     pub columns: Vec<ListColumn>,
-    pub table_sort: Option<String>,
 }
 
 impl Default for CommandSpec {
@@ -780,21 +502,14 @@ impl Default for CommandSpec {
         CommandSpec {
             name: String::new(),
             kind: CommandKind::Shell,
-            window_name: String::new(),
-            chrome_title: String::new(),
             script: None,
             paths: Vec::new(),
             sources: Vec::new(),
             root: None,
             favorites: Vec::new(),
             recent: true,
-            recent_days: 7,
-            recent_limit: 200,
-            recent_exclude: Vec::new(),
             start_recent: true,
             recent_everywhere: true,
-            browser_background: None,
-            background_color: None,
             tint_alpha: None,
             primary: None,
             content: None,
@@ -805,58 +520,32 @@ impl Default for CommandSpec {
             filters: Vec::new(),
             width: 0.0,
             max_rows: 0,
-            content_cap: 0,
-            body_lines: 0,
             page_size: 0,
-            copy_fields: Vec::new(),
             checkbox: None,
             resize: false,
             drag: true,
             sticky: true,
-            float: None,
             panel: false,
             label: None,
             aliases: Vec::new(),
             in_palette: true,
-            tabs_opaque: None,
             sort: None,
             sort_descending: None,
-            search_limit: None,
-            search_exclude: None,
             terminal_words: None,
-            search_width: 0.0,
-            max_stretch: 0.0,
-            table_row_height: 0.0,
             height: 0.0,
-            max_height: 0.0,
             font: None,
             font_size: 0.0,
             header_color: None,
-            voice: false,
-            voice_live: true,
             terminal: false,
-            terminal_height: 240.0,
             inspector_width: 340.0,
             sidebar_width: 210.0,
-            terminal_dir: None,
-            terminal_background: None,
             text_color: None,
-            dim_color: None,
-            highlight_color: None,
-            accent_color: None,
             palette: None,
-            terminal_foreground: None,
-            vim_mode: false,
-            vim_bin: "nvim".to_string(),
-            vim_init: None,
-            start_drawer: "none".to_string(),
             esc_close: None,
-            image_rows: 10,
             icon: None,
             save_dir: "/tmp/".to_string(),
             table: false,
             columns: Vec::new(),
-            table_sort: None,
         }
     }
 }
@@ -865,8 +554,6 @@ impl CommandSpec {
     pub fn new(name: impl Into<String>, kind: CommandKind, script: Option<String>) -> Self {
         let name = name.into();
         CommandSpec {
-            window_name: name.clone(),
-            chrome_title: name.clone(),
             name,
             kind,
             script,
@@ -885,13 +572,6 @@ pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
         _ => CommandKind::Shell,
     };
     let mut s = CommandSpec::new(name, kind, vars.get("script").cloned());
-    if let Some(v) = vars.get("name") {
-        s.window_name = v.clone();
-    }
-    s.chrome_title = vars
-        .get("title")
-        .cloned()
-        .unwrap_or_else(|| s.window_name.clone());
     if let Some(l) = vars.get("label").map(|v| v.trim().to_string()) {
         if !l.is_empty() {
             s.label = Some(l);
@@ -918,24 +598,15 @@ pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
     s.filter = csv(vars.get("filter").map(String::as_str));
     s.filters = csv(vars.get("filters").map(String::as_str));
     s.max_rows = int_of(vars.get("max-rows").map(String::as_str)).unwrap_or(0);
-    s.content_cap = int_of(vars.get("content-cap").map(String::as_str)).unwrap_or(0);
-    s.body_lines = int_of(vars.get("body-lines").map(String::as_str)).unwrap_or(0);
     s.page_size = int_of(vars.get("page-size").map(String::as_str)).unwrap_or(0);
-    s.copy_fields = csv(vars.get("copy-fields").map(String::as_str));
     s.checkbox = tri_of(vars.get("checkbox").map(String::as_str));
-    s.search_width = num(vars.get("search-width").map(String::as_str));
-    s.max_stretch = num(vars.get("max-row-stretch").map(String::as_str));
-    s.table_row_height = num(vars.get("row-height").map(String::as_str));
     s.table = tri_of(vars.get("table").map(String::as_str)).unwrap_or(false);
     s.columns = ListColumn::parse(vars.get("columns").map(String::as_str));
-    s.table_sort = vars.get("table-sort").cloned();
     s.width = num(vars.get("width").map(String::as_str));
     s.height = num(vars.get("height").map(String::as_str));
-    s.max_height = num(vars.get("max-height").map(String::as_str));
     s.resize = tri_of(vars.get("resize").map(String::as_str)).unwrap_or(false);
     s.drag = tri_of(vars.get("drag").map(String::as_str)).unwrap_or(true);
     s.sticky = tri_of(vars.get("sticky").map(String::as_str)).unwrap_or(true);
-    s.float = tri_of(vars.get("float").map(String::as_str));
     s.esc_close = vars
         .get("esc-close")
         .or_else(|| vars.get("vim-esc-close"))
@@ -943,8 +614,6 @@ pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
     s.font = vars.get("font").cloned();
     s.font_size = num(vars.get("font-size").map(String::as_str));
     s.header_color = vars.get("header-color").and_then(|v| hex_color(v));
-    s.browser_background = vars.get("browser-background").and_then(|v| hex_color(v));
-    s.background_color = vars.get("background-color").and_then(|v| hex_color(v));
     {
         let t = num(vars.get("tint-alpha").map(String::as_str));
         if t > 0.0 {
@@ -952,59 +621,22 @@ pub fn make_command(name: &str, vars: &HashMap<String, String>) -> CommandSpec {
         }
     }
     s.text_color = vars.get("text-color").and_then(|v| hex_color(v));
-    s.dim_color = vars.get("dim-color").and_then(|v| hex_color(v));
-    s.highlight_color = vars.get("highlight-color").and_then(|v| hex_color(v));
-    s.accent_color = vars.get("accent-color").and_then(|v| hex_color(v));
     s.palette = parse_palette(vars.get("palette").map(String::as_str));
-    s.tabs_opaque = tri_of(vars.get("tabs-opaque").map(String::as_str));
-    s.voice = tri_of(vars.get("voice").map(String::as_str)).unwrap_or(false);
-    s.voice_live = tri_of(vars.get("voice-live").map(String::as_str)).unwrap_or(true);
     s.terminal = tri_of(vars.get("terminal").map(String::as_str)).unwrap_or(false);
-    {
-        let t = num(vars.get("terminal-height").map(String::as_str));
-        if t > 0.0 {
-            s.terminal_height = t;
-        }
-    }
     if vars.contains_key("sidebar-width") {
         s.sidebar_width = num(vars.get("sidebar-width").map(String::as_str));
     }
     if vars.contains_key("inspector-width") {
         s.inspector_width = num(vars.get("inspector-width").map(String::as_str));
     }
-    s.terminal_dir = vars.get("terminal-dir").cloned();
-    s.terminal_background = vars.get("terminal-background").and_then(|v| hex_color(v));
-    s.terminal_foreground = vars.get("terminal-foreground").and_then(|v| hex_color(v));
-    s.vim_mode = tri_of(vars.get("vim-mode").map(String::as_str)).unwrap_or(false);
-    if let Some(v) = vars.get("vim-bin") {
-        s.vim_bin = v.trim().to_string();
-    }
-    if let Some(v) = vars.get("vim-init") {
-        if !v.is_empty() {
-            s.vim_init = Some(v.clone());
-        }
-    }
-    if let Some(v) = vars.get("start-drawer") {
-        if !v.is_empty() {
-            s.start_drawer = v.to_lowercase();
-        }
-    }
-    s.image_rows = int_of(vars.get("image-rows").map(String::as_str)).unwrap_or(10);
     s.sort = vars.get("sort").cloned();
     s.sort_descending = vars
         .get("sort-order")
         .map(|o| o.to_lowercase().starts_with("desc"));
-    s.search_limit = int_of(vars.get("search-limit").map(String::as_str));
-    if vars.contains_key("search-exclude") {
-        s.search_exclude = Some(csv(vars.get("search-exclude").map(String::as_str)));
-    }
     if vars.contains_key("terminal-words") {
         s.terminal_words = Some(csv(vars.get("terminal-words").map(String::as_str)));
     }
     s.recent = tri_of(vars.get("recent").map(String::as_str)).unwrap_or(true);
-    s.recent_days = int_of(vars.get("recent-days").map(String::as_str)).unwrap_or(7);
-    s.recent_limit = int_of(vars.get("recent-limit").map(String::as_str)).unwrap_or(200);
-    s.recent_exclude = csv(vars.get("recent-exclude").map(String::as_str));
     s.start_recent = vars
         .get("start")
         .map(|v| v.to_lowercase())
@@ -1030,8 +662,8 @@ pub struct ConfigIssue {
 }
 
 pub const CONFIG_BOOL_KEYS: &[&str] = &[
-    "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode",
-    "recent", "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload",
+    "enabled", "resize", "drag", "sticky", "voice", "terminal", "vim-mode",
+    "recent", "checkbox", "hide-on-focus-loss", "float", "table", "shared-window",
     "in-palette", "panel", "vim-keys", "vim-mode-badge", "show-help", "show-side-panel-button",
     "show-size-badge", "magnifier", "square-magnifier", "copy-on-double-click", "save-path-fixed",
     "save-after-copy", "copy-path-after-save", "save-last-region", "reverse-arrow",
@@ -1059,7 +691,6 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("draw-font-size", 0.0, 100.0),
     ("width", 100.0, 8000.0),
     ("height", 60.0, 8000.0),
-    ("max-height", 60.0, 8000.0),
     ("shared-width", 400.0, 8000.0),
     ("shared-height", 300.0, 8000.0),
     ("margin-top", 0.0, 400.0),
@@ -1068,7 +699,6 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("switcher-width", 240.0, 1200.0),
     ("preview-border-width", 0.0, 8.0),
     ("pane-focus-width", 0.0, 4.0),
-    ("terminal-height", 40.0, 4000.0),
     ("sidebar-width", 0.0, 600.0),
     ("sidebar-min-width", 0.0, 600.0),
     ("sidebar-max-width", 0.0, 600.0),
@@ -1079,7 +709,6 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("terminal-font-size", 6.0, 96.0),
     ("max-rows", 0.0, 10_000.0),
     ("page-size", 0.0, 100_000.0),
-    ("content-cap", 0.0, 100_000.0),
     ("body-lines", 0.0, 100.0),
     ("search-width", 0.0, 1.0),
     ("recent-days", 1.0, 365.0),
@@ -1087,10 +716,8 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("tint-alpha", 0.0, 1.0),
     ("max-row-stretch", 0.0, 1000.0),
     ("row-height", 18.0, 80.0),
-    ("image-rows", 1.0, 200.0),
     ("vim-esc-close", 0.0, 20.0),
     ("esc-close", 0.0, 20.0),
-    ("search-limit", 1.0, 1_000_000.0),
     ("dashboard-refresh", 2.0, 3600.0),
     ("split", 0.2, 0.8),
     ("context-tokens", 512.0, 1_000_000.0),
@@ -1941,17 +1568,11 @@ mod tests {
     #[test]
     fn defaults_match_swift() {
         let s = AppSettings::default();
-        assert!(s.shared_window && s.preload);
+        assert!(s.shared_window);
         assert_eq!(s.shared_width, 1100.0);
         assert_eq!(s.shared_height, 640.0);
-        assert_eq!(s.switcher_width, 760.0);
         assert_eq!(s.shell, "/opt/homebrew/bin/bash");
-        assert_eq!(s.shell_args, vec!["--login", "-i"]);
         assert_eq!(s.terminal_font, "Hack Nerd Font");
-        assert_eq!(s.terminal_font_size, 13.0);
-        assert_eq!(s.font_install_casks.len(), 7);
-        assert_eq!(s.aerospace_cli.len(), 3);
-        assert_eq!(s.app_dirs.len(), 6);
         assert_eq!(s.jira_icon_name, "jira_icon.png");
         assert_eq!(s.confluence_icon_name, "confluence_icon.png");
         assert_eq!(s.ai_icon_name, "");
@@ -1961,14 +1582,10 @@ mod tests {
         assert_eq!(s.focus_file_name, "kitchen-sink-focus");
         assert_eq!(s.focus_bridge_name, "ws-aerospace-focus");
         assert_eq!(s.switcher_window_name, "kitchen-sink");
-        assert_eq!(s.detail_window_name, "jira-detail");
-        assert!(s.aerospace_socket_path.starts_with("/tmp/bobko.aerospace-"));
-        assert_eq!(s.voice_locale, "en-US");
         assert!(s.hide_on_focus_loss);
         assert_eq!(s.focus_loss_delay, 0.3);
         assert_eq!(s.esc_close, 0);
         assert_eq!(s.copy_toast, "Copied {} to clipboard");
-        assert_eq!(s.terminal_app, "");
         assert_eq!(s.header_style, HeaderStyle::Flat);
         assert_eq!(s.preview_border_width, 2.0);
         assert_eq!(s.pane_focus_width, 1.0);
@@ -1982,14 +1599,8 @@ mod tests {
         let v = vars(&[
             ("shell", "/bin/zsh"),
             ("terminal-font", "Fira Code"),
-            ("terminal-font-size", "15"),
-            ("shell-args", "--login  -i"),
-            ("aerospace-cli", "/opt/homebrew/bin/aerospace, aerospace"),
-            ("app-dirs", "/Applications, ~/Apps"),
             ("ai-icon", "ai.png"),
-            ("switcher-width", "200"),   // clamped up to 240
             ("shared-width", "300"),     // below 400 -> ignored
-            ("margin-top", "-5"),        // clamped to 0
             ("palette-first", "Paths, filefast, paths"), // repeat dropped
             ("palette", "Text-Table, paths, text-table"),
             ("esc-close", "2"),
@@ -2004,14 +1615,8 @@ mod tests {
 
         assert_eq!(s.shell, "/bin/zsh");
         assert_eq!(s.terminal_font, "Fira Code");
-        assert_eq!(s.terminal_font_size, 15.0);
-        assert_eq!(s.shell_args, vec!["--login", "-i"]);
-        assert_eq!(s.aerospace_cli.len(), 2);
-        assert_eq!(s.app_dirs[1], expand_tilde("~/Apps"));
         assert_eq!(s.ai_icon_name, "ai.png");
-        assert_eq!(s.switcher_width, 240.0);
         assert_eq!(s.shared_width, 1100.0);
-        assert_eq!(s.margin_top, 0.0);
         assert_eq!(s.palette_first, vec!["paths", "filefast"]);
         assert_eq!(s.palette, vec!["text-table", "paths"]);
         assert_eq!(s.esc_close, 2);
@@ -2022,10 +1627,9 @@ mod tests {
         assert_eq!(s.pane_focus_color, hex_color("#445566").unwrap());
         assert_eq!(s.pane_focus_width, 4.0);
 
-        // `terminal-font-size` below 6 is ignored; absent keys keep defaults.
+        // Absent keys keep defaults.
         let mut s2 = AppSettings::default();
-        parse_app_config(&mut s2, &vars(&[("terminal-font-size", "3")]));
-        assert_eq!(s2.terminal_font_size, 13.0);
+        parse_app_config(&mut s2, &vars(&[]));
         assert_eq!(s2.shell, "/opt/homebrew/bin/bash");
     }
 
@@ -2041,14 +1645,12 @@ mod tests {
             &vars(&[
                 ("hide-on-focus-loss", "false"),
                 ("shared-window", "no"),
-                ("preload", "off"),
                 ("vim-keys", "0"),
                 ("vim-mode-badge", "false"),
             ]),
         );
         assert!(!s.hide_on_focus_loss);
         assert!(!s.shared_window);
-        assert!(!s.preload);
         assert!(!s.vim_keys);
         assert!(!s.vim_mode_badge);
     }
@@ -2065,21 +1667,14 @@ mod tests {
             ("sources", "a.json, b.json"),
             ("max-rows", "50"),
             ("page-size", "25"),
-            ("content-cap", "10"),
             ("width", "500"),
             ("height", "200"),
             ("resize", "true"),
             ("drag", "false"),
             ("sticky", "false"),
             ("esc-close", "1"),
-            ("vim-bin", " nvim "),
-            ("start-drawer", "Terminal"),
-            ("image-rows", "42"),
-            ("recent-days", "30"),
-            ("recent-limit", "500"),
             ("start", "root"),
             ("recent-scope", "home"),
-            ("terminal-height", "0"),
             ("sidebar-width", "300"),
             ("font-size", "14"),
             ("header-color", "#abcdef"),
@@ -2088,25 +1683,16 @@ mod tests {
         assert_eq!(s.name, "mylist");
         assert_eq!(s.kind, CommandKind::List);
         assert_eq!(s.script.as_deref(), Some("echo hi"));
-        assert_eq!(s.window_name, "My List");
-        assert_eq!(s.chrome_title, "Titled");
         assert_eq!(s.label.as_deref(), Some("Labelled"));
         assert_eq!(s.paths, vec!["/tmp/a", "/tmp/b"]);
         assert_eq!(s.sources, vec!["a.json", "b.json"]);
         assert_eq!(s.max_rows, 50);
         assert_eq!(s.page_size, 25);
-        assert_eq!(s.content_cap, 10);
         assert_eq!(s.width, 500.0);
         assert_eq!(s.height, 200.0);
         assert_eq!(s.esc_close, Some(1));
-        assert_eq!(s.vim_bin, "nvim"); // trimmed
-        assert_eq!(s.start_drawer, "terminal"); // lowercased
-        assert_eq!(s.image_rows, 42);
-        assert_eq!(s.recent_days, 30);
-        assert_eq!(s.recent_limit, 500);
         assert!(!s.start_recent);
         assert!(!s.recent_everywhere);
-        assert_eq!(s.terminal_height, 240.0); // 0 ignored
         assert_eq!(s.sidebar_width, 300.0);
         assert_eq!(s.font_size, 14.0);
         assert_eq!(s.header_color, hex_color("#abcdef"));
@@ -2117,7 +1703,7 @@ mod tests {
         assert_eq!(d.kind, CommandKind::Shell);
         assert!(!d.resize && d.drag && d.sticky);
         assert!(d.in_palette);
-        assert!(d.recent && d.voice_live);
+        assert!(d.recent);
     }
 
     #[test]
@@ -2130,10 +1716,7 @@ mod tests {
             ("in-palette", "false"),
             ("drag", "no"),
             ("resize", "yes"),
-            ("voice", "true"),
-            ("voice-live", "false"),
             ("checkbox", "on"),
-            ("float", "true"),
             ("esc-close", "3"),
             ("vim-esc-close", "5"),
         ]);
@@ -2141,10 +1724,7 @@ mod tests {
         assert!(!s.in_palette);
         assert!(!s.drag);
         assert!(s.resize);
-        assert!(s.voice);
-        assert!(!s.voice_live);
         assert_eq!(s.checkbox, Some(true));
-        assert_eq!(s.float, Some(true));
         assert_eq!(s.esc_close, Some(3)); // esc-close wins over vim-esc-close
     }
 

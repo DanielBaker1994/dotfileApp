@@ -339,6 +339,8 @@ pub fn prefill_notice(d: &Value, s: &SetupStrings) -> String {
 
 #[cfg(target_os = "macos")]
 pub use appkit::{JiraSetupFormView, SetupOutcome};
+#[cfg(target_os = "macos")]
+pub(crate) use appkit::rect as appkit_rect;
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -383,7 +385,8 @@ mod appkit {
         Projects(String),
     }
 
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+    /// A frame with at least 1x1 size (AppKit rejects empty frames for some views).
+    pub(crate) fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
         NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
     }
 

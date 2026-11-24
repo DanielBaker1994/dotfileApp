@@ -1198,12 +1198,7 @@ impl ShotHistory {
     }
 }
 
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::app::logging::now_unix as unix_now;
 
 fn now_millis() -> i64 {
     SystemTime::now()
@@ -3769,7 +3764,6 @@ enum ChromePress {
 pub struct ShotRecentButton;
 
 impl ShotRecentButton {
-    pub const SIZE: f64 = 28.0;
 
     /// `layoutChrome`'s recent-button origin: right of the mode pill and 3pt
     /// below its top edge (the pill starts at `top + 16`, the button at
@@ -4195,17 +4189,7 @@ impl ShotSidePanel {
     }
 }
 
-fn expand_tilde(p: &str) -> String {
-    if p == "~" {
-        return std::env::var("HOME").unwrap_or_else(|_| p.to_string());
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    p.to_string()
-}
+use crate::app::pathfmt::expand_tilde;
 
 fn abbreviate_tilde(p: &str) -> String {
     if let Ok(home) = std::env::var("HOME") {

@@ -1,10 +1,16 @@
 //! Small path / config helpers shared by the views (moved out of the removed
-//! notes view): `~` spelling for display, a terminal selection as a path, and
-//! a single `commands.toml` value read through the helper's config codec.
+//! notes view): `~` spelling for display and a terminal selection as a path.
 
-use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::time::Duration;
+/// `~` → `$HOME`, `~/x` → `$HOME/x`; anything else (including `~user`) unchanged.
+pub fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix('~') {
+        if rest.is_empty() || rest.starts_with('/') {
+            let home = std::env::var("HOME").unwrap_or_default();
+            return format!("{home}{rest}");
+        }
+    }
+    path.to_string()
+}
 
 /// `/Users/me/x` → `~/x` for display.
 pub fn tilde_path(path: &str, home: &str) -> String {
@@ -47,40 +53,6 @@ pub fn terminal_path(sel: &str, home: &str, exists: &dyn Fn(&str) -> bool) -> Op
     }
     let p = abs(base);
     exists(&p).then_some(p)
-}
-
-fn read_commands_text() -> Option<String> {
-    let path = std::env::var("WS_COMMANDS_CONF")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".config/kitchen-sink/commands.toml"))
-        })?;
-    std::fs::read_to_string(path).ok()
-}
-
-/// `configSectionValue(section, key)`: the first entry of that section, read
-/// through the ONE codec's `config.section_entries`.
-pub fn section_value(section: &str, key: &str) -> Option<String> {
-    let text = read_commands_text()?;
-    let params = json!({"text": text, "section": section});
-    crate::app::python_helper::PythonHelper::shared()
-        .call("config.section_entries", params, Duration::from_secs(10), Duration::from_secs(5))
-        .inspect_err(|e| crate::app::logging::ws_log(&format!("helper config.section_entries failed: {e}")))
-        .ok()?
-        .get("entries")?
-        .as_array()?
-        .iter()
-        .find_map(|e| {
-            if e.get("key").and_then(Value::as_str) == Some(key) {
-                e.get("value").and_then(Value::as_str).map(str::to_string)
-            } else {
-                None
-            }
-        })
 }
 
 #[cfg(test)]

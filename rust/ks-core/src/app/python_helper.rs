@@ -238,7 +238,7 @@ pub fn is_executable_windows_ext(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn is_executable(path: &str) -> bool {
+pub fn is_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(path) {
         Ok(m) => m.is_file() && (m.permissions().mode() & 0o111) != 0,
@@ -247,7 +247,7 @@ fn is_executable(path: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn is_executable(path: &str) -> bool {
+pub fn is_executable(path: &str) -> bool {
     is_executable_windows_ext(Path::new(path))
 }
 

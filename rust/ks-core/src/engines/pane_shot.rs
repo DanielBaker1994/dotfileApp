@@ -7,7 +7,6 @@
 //! the helper. Process spawning goes through `run_process`.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::app::process_run::run_process;
 
@@ -334,30 +333,9 @@ fn current_environment() -> HashMap<String, String> {
         .collect()
 }
 
-pub fn expand_tilde(bin: &str) -> String {
-    if let Some(rest) = bin.strip_prefix('~') {
-        if rest.is_empty() || rest.starts_with('/') {
-            let home = std::env::var("HOME").unwrap_or_default();
-            return format!("{home}{rest}");
-        }
-    }
-    bin.to_string()
-}
+pub use crate::app::pathfmt::expand_tilde;
 
-#[cfg(unix)]
-pub fn is_executable_file(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(Path::new(path)) {
-        Ok(m) => m.is_file() && (m.permissions().mode() & 0o111) != 0,
-        Err(_) => false,
-    }
-}
-
-/// Windows twin: no mode bits, so fall back to the shared extension check.
-#[cfg(windows)]
-pub fn is_executable_file(path: &str) -> bool {
-    crate::app::python_helper::is_executable_windows_ext(Path::new(path))
-}
+pub use crate::app::python_helper::is_executable as is_executable_file;
 
 #[cfg(test)]
 mod tests {

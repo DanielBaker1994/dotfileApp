@@ -172,12 +172,7 @@ fn spawn_self_detached(mode: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn is_executable(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
+use crate::app::python_helper::is_executable;
 
 /// The client pass. `args` is the full argv.
 pub fn run(args: &[String], paths: &Paths) -> Outcome {

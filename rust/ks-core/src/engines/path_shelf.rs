@@ -784,16 +784,7 @@ impl ClipboardPaths {
     }
 }
 
-fn expand_tilde(p: &str) -> String {
-    let home = home_dir();
-    if p == "~" {
-        return home;
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        return format!("{home}/{rest}");
-    }
-    p.to_string()
-}
+use crate::app::pathfmt::expand_tilde;
 
 fn file_url_path(rest: &str) -> Option<String> {
     let path = if rest.starts_with('/') {
