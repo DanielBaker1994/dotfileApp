@@ -167,10 +167,6 @@ impl SidebarJumpUi {
         self.panel.isVisible()
     }
 
-    pub fn has_key(&self) -> bool {
-        self.panel.isKeyWindow()
-    }
-
     pub fn show(&self, items: Vec<JumpItem>) {
         *self.all.borrow_mut() = items;
         self.reload();
@@ -218,10 +214,6 @@ impl SidebarJumpUi {
         let s = (self.selection.get() as i64 + d).rem_euclid(n) as usize;
         self.selection.set(s);
         self.list.set_rows(n as usize, s);
-    }
-
-    pub fn selection(&self) -> usize {
-        self.selection.get()
     }
 
     pub fn open(&self, i: usize) {
@@ -353,14 +345,6 @@ impl PaneFindUi {
 
     pub fn is_shown(&self) -> bool {
         self.panel.isVisible()
-    }
-
-    pub fn has_key(&self) -> bool {
-        self.panel.isKeyWindow()
-    }
-
-    pub fn selection(&self) -> usize {
-        self.selection.get()
     }
 
     /// Show (or re-raise) over `items`, resetting the query.

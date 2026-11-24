@@ -22,7 +22,3 @@ pub use ks_core::app::registry;
 pub use ks_core::app::socket;
 pub mod synth_input;
 
-/// Entry point. Phase 0 scaffold: no AppKit yet.
-pub fn run() {
-    println!("ws-rs {} (scaffold)", env!("CARGO_PKG_VERSION"));
-}

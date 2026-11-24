@@ -38,7 +38,6 @@ use crate::panes::vim_keys::VimKeys;
 use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
 use crate::views::tools::ToolKind;
 
-
 /// Every `SlotView`, in `testQuery`'s order (`kitchen_sink.swift:3111`).
 pub const ALL_VIEWS: [SlotView; 8] = [
     SlotView::Files,
@@ -232,8 +231,6 @@ pub(crate) fn poll_due(last: f64, now: f64, interval: f64) -> bool {
     now - last >= interval - 0.005
 }
 
-
-
 /// The Hyper+S palette's rows: `[app] palette` picks and orders them (an id
 /// with no enabled command is skipped); an empty list keeps every palette
 /// command. The Ctrl+B W `/` commands keep the full list.
@@ -400,16 +397,6 @@ impl ControllerInner {
         if !v.is_jira() {
             self.stack.retain(|x| *x != v);
         }
-        self.present(v);
-    }
-
-    fn push(&mut self, v: SlotView) {
-        match self.current {
-            Some(cur) if cur != v => self.stack.push(cur),
-            Some(_) => {}
-            None => self.stack = vec![v],
-        }
-        self.stack.retain(|x| *x != v);
         self.present(v);
     }
 
@@ -793,10 +780,6 @@ impl SwitcherController {
         &self.registry
     }
 
-    pub fn registry_mut(&mut self) -> &mut Registry {
-        &mut self.registry
-    }
-
     /// The shared screenshot controller (held so `do:screenshot:*` works).
     pub fn screenshot_controller(&self) -> Option<Arc<Mutex<ScreenshotController>>> {
         self.screenshot_controller.clone()
@@ -1056,10 +1039,6 @@ impl SwitcherController {
         self.inner.lock().unwrap().key_window = title.into();
     }
 
-    pub fn set_activations(&self, n: i64) {
-        self.inner.lock().unwrap().activations = n;
-    }
-
     /// One app activation (mirrors Swift's `appActivations` counter).
     pub fn bump_activations(&self) {
         self.inner.lock().unwrap().activations += 1;
@@ -1094,18 +1073,6 @@ impl SwitcherController {
         self.inner.lock().unwrap().member(v).state = state;
     }
 
-    pub fn set_panes(&self, panes: Vec<PaneSpec>) {
-        self.inner.lock().unwrap().panes = panes;
-    }
-
-    pub fn set_esc_hides(&self, v: SlotView, on: bool) {
-        self.inner
-            .lock()
-            .unwrap()
-            .esc_sections
-            .insert(v.raw().to_string(), i64::from(on));
-    }
-
     /// `state.windows` — pushed by the daemon UI after ordering windows.
     pub fn set_window_count(&self, n: i64) {
         self.inner.lock().unwrap().window_count = n;
@@ -1119,11 +1086,6 @@ impl SwitcherController {
     /// `state.viewSwitcher.rows` — `["Name|location"]`, pushed on palette build.
     pub fn set_switcher_rows(&self, rows: Vec<String>) {
         self.inner.lock().unwrap().switcher_rows = rows;
-    }
-
-    /// `state.paths` — the live `PathsWindow.testState` document.
-    pub fn set_paths_state(&self, state: Value) {
-        self.inner.lock().unwrap().paths_state = state;
     }
 
     /// Publish the shelf's live document: `state.paths` plus the
@@ -1166,11 +1128,6 @@ impl SwitcherController {
 
     pub fn remove_tool_state(&self, name: &str) {
         self.inner.lock().unwrap().tools.remove(name);
-    }
-
-    /// `[paths] enabled` — gates `do:paths:show` (Swift `pathsCommand`).
-    pub fn set_paths_enabled(&self, on: bool) {
-        self.inner.lock().unwrap().paths_enabled = on;
     }
 
     pub fn paths_enabled(&self) -> bool {
@@ -1237,29 +1194,15 @@ impl SwitcherController {
             .collect()
     }
 
-    /// Whether the palette is currently shown (`state.palette`).
-    pub fn is_palette_visible(&self) -> bool {
-        self.inner.lock().unwrap().palette_visible
-    }
-
     /// `controller.escHideCount(v)` — the per-view Esc-close count.
     pub fn esc_hide_count(&self, v: SlotView) -> i64 {
         self.inner.lock().unwrap().esc_hide_count(v)
-    }
-
-    pub fn logs(&self) -> Vec<String> {
-        self.inner.lock().unwrap().logs.clone()
     }
 
     // -- the shared-window verbs -------------------------------------------
 
     pub fn open(&self, v: SlotView) {
         self.inner.lock().unwrap().open(v);
-    }
-
-    /// Push a sub-view (a Jira detail / releases page).
-    pub fn push_view(&self, v: SlotView) {
-        self.inner.lock().unwrap().push(v);
     }
 
     pub fn toggle(&self) {
@@ -1320,13 +1263,6 @@ impl SwitcherController {
     pub fn hotkey(&self, v: SlotView) {
         let in_it = self.user_in_it();
         self.inner.lock().unwrap().hotkey(v, in_it);
-    }
-
-    /// `PaneNav.shared.move(_:in:)` — move the focus ring one pane over.
-    pub fn pane_move(&self, dir: PaneDir) {
-        let mut inner = self.inner.lock().unwrap();
-        let panes = inner.panel_list();
-        inner.pane_nav.move_dir(dir, &panes);
     }
 
     /// `kitchen-sink jira-poll on|off|toggle` (`enableJiraChecked` /
@@ -2422,11 +2358,6 @@ fn parse_esc_close(text: &str) -> HashMap<String, i64> {
     out
 }
 
-
-
-
-
-
 /// The views whose left pane is resizable (`do:sidebar-width:*`).
 const SIDEBAR_VIEWS: [&str; 2] = ["jira", "confluence"];
 
@@ -2557,8 +2488,6 @@ fn fmt_width(w: f64) -> String {
     }
 }
 
-
-
 /// `loadCommands().count` — sections with `enabled = "true"` outside the skip
 /// list, plus top-level `key = value` shell commands (the Swift `commands`
 /// array's length, which `reload` reports).
@@ -2587,17 +2516,6 @@ fn count_commands(text: &str) -> usize {
         }
     }
     n
-}
-
-/// Count `[section]` headers.
-fn count_sections(text: &str) -> usize {
-    crate::engines::config_text::config_lines(text)
-        .iter()
-        .filter(|l| {
-            let t = l.trim();
-            t.starts_with('[') && t.ends_with(']') && !t.starts_with('#')
-        })
-        .count()
 }
 
 /// What [`FocusWatch::tick`] asks the daemon UI to do.
@@ -2795,20 +2713,6 @@ pub(crate) struct LiveFocus {
     pub frontmost: i32,
     /// The primary screen's height (AppKit → top-left screen points).
     pub main_h: f64,
-}
-
-/// The header ✕ button's frame in the flipped host root (x, y, w, h).
-const HEADER_CLOSE_FRAME: (f64, f64, f64, f64) = (4.0, 4.0, 26.0, 22.0);
-
-/// `closeButtonRect` in global top-left screen points (what `cliclick`
-/// takes), for a window `frame` [x, y, w, h] in AppKit coordinates.
-fn header_close_point(frame: &[f64], main_h: f64) -> [i64; 2] {
-    let (cx, cy, cw, ch) = HEADER_CLOSE_FRAME;
-    let (x, y, h) = (frame[0], frame[1], frame[3]);
-    [
-        (x + cx + cw / 2.0).round() as i64,
-        (main_h - (y + h - (cy + ch / 2.0))).round() as i64,
-    ]
 }
 
 impl ControllerInner {
@@ -3024,10 +2928,6 @@ mod daemon_ui {
     }
 
     const HEADER_HEIGHT: f64 = 30.0;
-    const NAV_X0: f64 = 36.0;
-    const NAV_STEP: f64 = 68.0;
-    const NAV_WIDTH: f64 = 64.0;
-    const NAV_HEIGHT: f64 = 22.0;
 
     use crate::ui::view_base::as_any;
 
@@ -3879,14 +3779,6 @@ mod daemon_ui {
         crate::ui::menu_kit::MenuEntry::item("Copy Absolute Path", move || {
             copy_text_to_pasteboard(&p);
             crate::ui::toast::show(&format!("Copied {}", tilde_path(&p)), "doc.on.clipboard");
-        })
-    }
-
-    /// "Copy File": the file itself on the pasteboard (so Finder pastes it).
-    fn file_action_copy_file(path: &str) -> crate::ui::menu_kit::MenuEntry {
-        let p = path.to_string();
-        crate::ui::menu_kit::MenuEntry::item("Copy File", move || {
-            copy_files_toast(&[p]);
         })
     }
 
@@ -10866,7 +10758,6 @@ mod daemon_ui {
             }
         }
 
-
         /// File-browser modified keys (`FilePopup` subset).
         fn route_file_browser(&self, action: popup::FileBrowserAction) -> bool {
             if self.ivars().controller.current() != Some(SlotView::Files) {
@@ -11639,27 +11530,6 @@ mod daemon_ui {
         crate::platform::open_path(std::path::Path::new(path));
     }
 
-    /// Build a `$HOME`-rooted file browser and hand back the model + its view
-    /// (the host keeps the model so list keys stay addressable).
-    fn build_files_browser(
-        mtm: MainThreadMarker,
-    ) -> Option<(FileBrowser, Retained<NSView>)> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        build_files_browser_at(mtm, &home)
-    }
-
-    /// Build a file browser rooted at `dir` (used by the accept-key descent).
-    fn build_files_browser_at(
-        mtm: MainThreadMarker,
-        dir: &str,
-    ) -> Option<(FileBrowser, Retained<NSView>)> {
-        let mut browser = FileBrowser::new(dir);
-        browser.reload();
-        browser.build(mtm);
-        let view = browser.content_view()?;
-        Some((browser, view))
-    }
-
     /// `clampToScreen`: keep the frame inside the window's screen's visible
     /// frame (Swift `PopupWindow.clampToScreen`).
     fn clamp_to_screen(f: &mut NSRect) {
@@ -11690,7 +11560,6 @@ mod daemon_ui {
             f.origin.y = vf.origin.y + vf.size.height - f.size.height;
         }
     }
-
 
     fn placeholder(mtm: MainThreadMarker, v: SlotView) -> Retained<NSView> {
         let colors = PopupColors::default();
@@ -11913,38 +11782,6 @@ mod tests {
     }
 
     #[test]
-    fn cycle_walks_the_header_views_both_ways() {
-        use SlotView::*;
-        let views = [Files, Jira, Confluence, Ai];
-        assert_eq!(cycle_target(&views, Some(Files), 1), Some(Jira));
-        assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Files), "wraps forward");
-        assert_eq!(cycle_target(&views, Some(Files), -1), Some(Ai), "wraps back");
-        assert_eq!(cycle_target(&views, Some(Detail), 1), Some(Confluence), "a Jira sub view is Jira");
-        assert_eq!(cycle_target(&views, Some(Releases), -1), Some(Files), "a Jira sub view counts as Jira");
-        assert_eq!(cycle_target(&views, None, 1), Some(Files));
-        assert_eq!(cycle_target(&[], Some(Files), 1), None);
-
-        let mut c = controller();
-        c.registry_mut().set_nav(vec![
-            (Files, "Files".into(), None),
-            (Jira, "Jira".into(), None),
-            (Confluence, "Confluence".into(), None),
-            (Ai, "AI".into(), None),
-        ]);
-        c.open(Files);
-        let mut seen = vec![];
-        for _ in 0..4 {
-            assert_eq!(c.do_action("cycle"), None);
-            seen.push(c.current().unwrap());
-        }
-        assert_eq!(seen, [Jira, Confluence, Ai, Files]);
-        assert_eq!(c.do_action("cycle-back"), None);
-        assert_eq!(c.current(), Some(Ai));
-        assert_eq!(c.do_action("cycle-back"), None);
-        assert_eq!(c.current(), Some(Confluence));
-    }
-
-    #[test]
     fn cycle_and_cycle_back_fall_back_to_files() {
         // With no header views registered, both cycle verbs land on Files.
         let c = controller();
@@ -11964,18 +11801,6 @@ mod tests {
         assert_eq!(c.do_action("open:notes").unwrap()["error"], json!("unknown view"));
         let err = c.do_action("open:bogus").unwrap();
         assert_eq!(err["error"], json!("unknown view"));
-    }
-
-    #[test]
-    fn dispatch_unknown_delegates_to_registry() {
-        let mut c = controller();
-        c.registry_mut()
-            .register_test_do(|a| (a == "custom:open").then(|| json!({ "ok": true })));
-        assert_eq!(c.do_action("custom:open"), Some(json!({ "ok": true })));
-        assert_eq!(
-            c.do_action("totally-unknown").unwrap()["error"],
-            json!("unknown action totally-unknown")
-        );
     }
 
     #[test]
@@ -12017,32 +11842,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_hide_count_reads_sections_and_app_default() {
-        let c = controller();
-        assert_eq!(c.esc_hide_count(SlotView::Ai), 0, "app default esc-close");
-        c.set_esc_hides(SlotView::Ai, true);
-        assert_eq!(c.esc_hide_count(SlotView::Ai), 1);
-        c.set_esc_hides(SlotView::Ai, false);
-        assert_eq!(c.esc_hide_count(SlotView::Ai), 0);
-    }
-
-    #[test]
-    fn dispatch_tool_open_and_close() {
-        let c = controller();
-        install_gui(&c);
-        // Without an enabled [paths] command, `tool:paths` is not a tool panel.
-        let err = c.do_action("tool:paths").unwrap();
-        assert_eq!(err["error"], json!("not a tool panel: paths"));
-        c.set_paths_enabled(true);
-        assert_eq!(c.do_action("tool:paths"), None);
-        assert_eq!(c.state_json()["tools"]["paths"]["shown"], json!(true));
-        assert_eq!(c.state_json()["paths"]["shown"], json!(true));
-        assert_eq!(c.do_action("tool-close:paths"), None);
-        assert_eq!(c.state_json()["tools"]["paths"]["shown"], json!(false));
-        assert_eq!(c.state_json()["paths"]["shown"], json!(false));
-    }
-
-    #[test]
     fn tool_close_rejects_an_unknown_panel() {
         // `tool-close:` accepts exactly the set `tool:` accepts; a bogus (or
         // empty) name is an error instead of a silent no-op.
@@ -12053,40 +11852,6 @@ mod tests {
         let err = c.do_action("tool-close:").unwrap();
         assert_eq!(err["error"], json!("not a tool panel: "));
         assert_eq!(c.do_action("tool-close:health"), None);
-    }
-
-    #[test]
-    fn paths_grammar_gates_on_enabled_and_queues() {
-        let c = controller();
-        let q = install_gui(&c);
-        let err = c.do_action("paths:show").unwrap();
-        assert_eq!(err["error"], json!("[paths] not enabled"));
-        c.set_paths_enabled(true);
-        assert_eq!(c.do_action("paths:show"), None);
-        assert_eq!(c.state_json()["paths"]["shown"], json!(true));
-        // Selection is bounds-checked against the reported rows (F3).
-        c.set_paths_state(json!({ "shown": true, "rows": [{}, {}, {}] }));
-        assert_eq!(c.do_action("paths:select:2"), None);
-        assert_eq!(c.state_json()["paths"]["selection"], json!(2));
-        assert_eq!(c.do_action("paths:select:x").unwrap()["error"], json!("paths:select:N"));
-        assert_eq!(c.do_action("paths:select:-1").unwrap()["error"], json!("paths:select:N"));
-        assert_eq!(
-            c.do_action("paths:select:9").unwrap()["error"],
-            json!("paths:select: out of range")
-        );
-        assert_eq!(c.do_action("paths:hide"), None);
-        assert_eq!(c.state_json()["paths"]["shown"], json!(false));
-        let err = c.do_action("paths:bogus").unwrap();
-        assert_eq!(err["error"], json!("paths:show|hide|return|select:N"));
-        let cmds = q.lock().unwrap().clone();
-        assert_eq!(
-            cmds,
-            vec![
-                UiCommand::Paths(PathsCmd::Show),
-                UiCommand::Paths(PathsCmd::Select(2)),
-                UiCommand::Paths(PathsCmd::Hide),
-            ]
-        );
     }
 
     #[test]
@@ -12199,129 +11964,6 @@ mod tests {
         assert_eq!(c.state_json()["palette"], json!(false));
         c.toggle_command("term");
         assert_eq!(c.state_json()["terminalPanel"]["shown"], json!(true));
-    }
-
-    #[test]
-    fn dispatch_pane_focus_and_move() {
-        let c = controller();
-        // `pane:*` needs a shown view (Swift guards `slot.current`).
-        let err = c.do_action("pane:focus:editor").unwrap();
-        assert_eq!(err["error"], json!("no view shown"));
-        c.open(SlotView::Ai);
-        c.set_panes(vec![
-            PaneSpec { id: "sidebar".into(), rect: RectI::new(0.0, 0.0, 200.0, 600.0) },
-            PaneSpec { id: "editor".into(), rect: RectI::new(200.0, 0.0, 700.0, 600.0) },
-        ]);
-        assert_eq!(c.do_action("pane:focus:editor"), None);
-        assert_eq!(c.state_json()["pane"]["focused"], json!("editor"));
-        assert_eq!(c.do_action("pane:h"), None);
-        assert_eq!(c.state_json()["pane"]["focused"], json!("sidebar"));
-        let err = c.do_action("pane:focus:nope").unwrap();
-        assert_eq!(err["error"], json!("no such pane"));
-    }
-
-    #[test]
-    fn palette_commands_are_listed() {
-        let mut c = controller();
-        c.registry_mut()
-            .add_palette(PaletteCommand::new("ai", "AI", "views"));
-        c.registry_mut()
-            .add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
-        let s = c.state_json();
-        assert_eq!(s["paletteCommands"], json!(["AI"]));
-    }
-
-    #[test]
-    fn hyper_palette_lists_only_the_configured_commands() {
-        let mut c = controller();
-        for (id, title) in [
-            ("paths", "Find Recent Files"),
-            ("jira", "Jira"),
-            ("filefast", "Create File"),
-            ("prettyprint", "Pretty Print"),
-            ("text-table", "Text to Table"),
-            ("window", "Bansho"),
-        ] {
-            c.registry_mut().add_palette(PaletteCommand::new(id, title, "views"));
-        }
-        // Unset: every palette command.
-        assert_eq!(c.hyper_palette_commands().len(), 6);
-        c.inner.lock().unwrap().settings.palette = ["paths", "filefast", "text-table", "prettyprint", "gone"]
-            .map(String::from)
-            .to_vec();
-        let titles: Vec<String> = c.hyper_palette_commands().into_iter().map(|(_, t)| t).collect();
-        assert_eq!(
-            titles,
-            vec!["Find Recent Files", "Create File", "Text to Table", "Pretty Print"],
-            "config order, unknown ids skipped, nothing else"
-        );
-        assert_eq!(c.state_json()["paletteCommands"], json!(titles));
-        // Ctrl+B W's `/` commands keep the full list.
-        assert_eq!(c.registry().palette_commands().len(), 6);
-    }
-
-    #[test]
-    fn palette_screenshot_has_a_handler() {
-        // `/screenshot` must dispatch (`screenshot:show`), not hit the
-        // `no Rust handler yet` fallback log.
-        let c = controller();
-        c.run_palette_command("screenshot");
-        assert!(
-            !c.logs().iter().any(|l| l.contains("no Rust handler")),
-            "palette 'screenshot' must dispatch"
-        );
-        c.run_palette_command("definitely-not-a-command");
-        assert!(c.logs().iter().any(|l| l.contains("no Rust handler")));
-    }
-
-    #[test]
-    fn jira_config_hook_selects_the_config_tab_and_reports_state() {
-        let c = controller();
-        // Unknown verbs still return `{"error": …}`.
-        assert!(c.do_action("jira-nope").unwrap()["error"].is_string());
-        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
-        // The hook is handled (no error) and switches the surface, so it is
-        // verifiable headless.
-        assert_eq!(c.do_action("jira-dashboard"), None);
-        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("config"));
-        // The palette name is an alias for the same hook.
-        assert_eq!(c.do_action("jira-config"), None);
-        c.run_palette_command("jira-config");
-        assert!(
-            !c.logs().iter().any(|l| l.contains("no Rust handler")),
-            "palette 'jira-config' must dispatch"
-        );
-        // The pill's own selection is recorded the same way.
-        c.set_jira_tab(crate::views::jira_view::JiraSurface::Tickets);
-        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
-    }
-
-    #[test]
-    fn reload_reads_disk_and_reports() {
-        let dir = std::env::temp_dir().join(format!("ws-rs-host-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let conf = dir.join("commands.toml");
-        std::fs::write(
-            &conf,
-            "[app]\nesc-close = 2\n\n[files]\nesc-close = 1\n",
-        )
-        .unwrap();
-
-        let mut settings = AppSettings::default();
-        settings.shared_width = 1100.0;
-        let c = SwitcherController::new(settings);
-        // Point the controller's config path at the fixture via reload's own
-        // path resolution: AppSettings reads $WS_COMMANDS_CONF indirectly is
-        // not available here, so drive parse + count through reload_config's
-        // helpers directly.
-        let text = std::fs::read_to_string(&conf).unwrap();
-        let sections = parse_esc_close(&text);
-        assert_eq!(sections.get("app"), Some(&2));
-        assert_eq!(sections.get("files"), Some(&1));
-        assert_eq!(count_sections(&text), 2);
-
-        let _ = c;
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L2: an invalid config is rejected (`ok: false`), parked as

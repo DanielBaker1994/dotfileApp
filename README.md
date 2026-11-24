@@ -124,13 +124,9 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
 
 ### Linux (experimental)
 
-kitchen-sink also builds and runs on Linux per `PLAN-cross-platform.md`: the daemon
-plus a second **egui/eframe** frontend over the same socket API and view models, with
-AppKit compiled out (macOS stays AppKit, pixel-identical). Compile and test without a
-Linux host, inside Docker: `bin/linux-check.sh check|test`, `./ws test linux` and
-`./ws test linux-headless`. On macOS the same frontend runs for development with
-`--features egui` + `WS_FRONTEND=egui`. See `AGENTS.md` ▸ "Linux (experimental)" for
-what works, the window-manager-key → CLI-mode mapping, and the known gaps.
+The egui (Linux/Windows) frontend was removed in Nov 2026. Off macOS the daemon runs
+headless only (socket API, no UI); `bin/linux-check.sh check|test` compiles it in Docker.
+See `AGENTS.md` ▸ "Linux (experimental)".
 
 ### Headless control + MCP
 

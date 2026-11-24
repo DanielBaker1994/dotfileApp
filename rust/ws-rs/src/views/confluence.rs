@@ -22,9 +22,6 @@ use crate::ui::theme::{PopupColors, PopupTone, Rgba};
 // `[confluence]` config (`confluenceSetting` / `confluenceEnabled`)
 // ---------------------------------------------------------------------------
 
-/// `confluenceSetting` defaults (`confluenceSetting` never fails).
-pub const DEFAULT_WIDTH: f64 = 1400.0;
-pub const DEFAULT_HEIGHT: f64 = 900.0;
 pub const DEFAULT_SPLIT: f64 = 0.42;
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 210.0;
 
@@ -38,52 +35,11 @@ impl ConfluenceConfig {
         ConfluenceConfig { entries }
     }
 
-    /// `configSectionValue("confluence", key)` decided from the section's
-    /// decoded entries (the caller has already read commands.toml).
-    pub fn string(&self, key: &str, fallback: &str) -> String {
-        match self.entries.get(key) {
-            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-            _ => fallback.to_string(),
-        }
-    }
-
     pub fn number(&self, key: &str, fallback: f64) -> f64 {
         self.entries
             .get(key)
             .and_then(|v| v.trim().parse::<f64>().ok())
             .unwrap_or(fallback)
-    }
-
-    pub fn bool(&self, key: &str, fallback: bool) -> bool {
-        self.entries
-            .get(key)
-            .and_then(|v| tri_value(v))
-            .unwrap_or(fallback)
-    }
-
-    /// `confluenceEnabled()` — `tri(...) == true`, so only an explicit truthy
-    /// value enables it.
-    pub fn enabled(&self) -> bool {
-        self.entries.get("enabled").and_then(|v| tri_value(v)) == Some(true)
-    }
-
-    pub fn in_palette(&self) -> bool {
-        self.entries
-            .get("in-palette")
-            .and_then(|v| tri_value(v))
-            .unwrap_or(true)
-    }
-
-    pub fn label(&self) -> String {
-        self.string("label", "Confluence Search")
-    }
-
-    pub fn width(&self) -> f64 {
-        self.number("width", DEFAULT_WIDTH)
-    }
-
-    pub fn height(&self) -> f64 {
-        self.number("height", DEFAULT_HEIGHT)
     }
 
     pub fn split(&self) -> f64 {
@@ -109,16 +65,6 @@ pub fn clamp_split(f: f64) -> f64 {
     }
 }
 
-/// `config.tri` for the common spellings (helper-free so config parsing is
-/// deterministic in tests).
-pub fn tri_value(v: &str) -> Option<bool> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => Some(true),
-        "false" | "no" | "off" | "0" => Some(false),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Search model (`ConfluenceRow`, `Scope`, criteria)
 // ---------------------------------------------------------------------------
@@ -131,12 +77,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub fn index(self) -> i64 {
-        match self {
-            Scope::Search => 0,
-            Scope::Favorites => 1,
-        }
-    }
 }
 
 /// `NSRange` over the UTF-16 view the python ranges are expressed in.
@@ -244,32 +184,6 @@ impl ConfluenceRow {
         }
     }
 
-    /// The meta line `ConfResultCell` draws (`spaceName · path/on container ·
-    /// author · modifiedText`).
-    pub fn meta(&self) -> String {
-        let mut meta: Vec<String> = Vec::new();
-        let head = if self.space_name.is_empty() {
-            self.space.clone()
-        } else {
-            self.space_name.clone()
-        };
-        meta.push(head);
-        if !self.path.is_empty() {
-            meta.push(self.path.clone());
-        } else if !self.container.is_empty() {
-            meta.push(format!("on {}", self.container));
-        }
-        if !self.author.is_empty() {
-            meta.push(self.author.clone());
-        }
-        if !self.modified_text.is_empty() {
-            meta.push(self.modified_text.clone());
-        }
-        meta.into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("  ·  ")
-    }
 }
 
 /// `static let modes` from `confluence/defaults.json`.
@@ -357,26 +271,6 @@ pub fn criteria(p: &CriteriaParams) -> Value {
     c
 }
 
-/// `confluence_glue.auth_header` — the Authorization header for the image
-/// loader's fetches. Empty when no token.
-pub fn auth_header(config: &Value) -> String {
-    let as_str = |k: &str| config.get(k).and_then(Value::as_str).unwrap_or("");
-    let token = as_str("token");
-    let email = as_str("email");
-    let mut auth = as_str("auth").to_ascii_lowercase();
-    if auth != "bearer" && auth != "basic" {
-        auth = if email.is_empty() { "bearer" } else { "basic" }.to_string();
-    }
-    if token.is_empty() {
-        return String::new();
-    }
-    if auth == "basic" {
-        format!("Basic {}", base64_encode(format!("{email}:{token}").as_bytes(), false))
-    } else {
-        format!("Bearer {token}")
-    }
-}
-
 /// `confluence_glue.rate_limit` — the cooldown decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateLimitDecision {
@@ -404,38 +298,6 @@ pub fn rate_limit(response: &Value) -> RateLimitDecision {
 // Rate-limit cooldown (`cooldownUntil` / `tickCooldown` / ratelimit.json)
 // ---------------------------------------------------------------------------
 
-/// The python writer stores `{site, until, seconds, why, at}` in
-/// `~/.cache/confluence/ratelimit.json`; the app-side cooldown is in-memory
-/// and this reads the shared file when a fresh process starts.
-pub fn cooldown_file_path() -> String {
-    if let Ok(dir) = std::env::var("CONFLUENCE_CACHE_DIR") {
-        if !dir.is_empty() {
-            return format!("{dir}/ratelimit.json");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/.cache/confluence/ratelimit.json")
-}
-
-/// `cooldown_left(site)`: the seconds left for `site` from the shared file.
-pub fn cooldown_left_in(path: &str, site: &str, now: f64) -> i64 {
-    let Ok(data) = std::fs::read(path) else {
-        return 0;
-    };
-    let Ok(j) = serde_json::from_slice::<Value>(&data) else {
-        return 0;
-    };
-    if j.get("site").and_then(Value::as_str) != Some(site) {
-        return 0;
-    }
-    let until = j.get("until").and_then(Value::as_f64).unwrap_or(0.0);
-    ((until - now).max(0.0)).round() as i64
-}
-
-pub fn cooldown_left(site: &str, now: f64) -> i64 {
-    cooldown_left_in(&cooldown_file_path(), site, now)
-}
-
 /// `cooldownUntil` + `coolingDown`, driven by an injected clock.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cooldown {
@@ -462,16 +324,6 @@ impl Cooldown {
         self.until = None;
     }
 
-    /// `tickCooldown()`'s decision: `true` when the cooldown just lifted.
-    pub fn tick(&mut self, now: f64) -> bool {
-        match self.until {
-            Some(u) if u <= now => {
-                self.until = None;
-                true
-            }
-            _ => false,
-        }
-    }
 }
 
 /// `tickCooldown()`'s outcome.
@@ -638,114 +490,6 @@ impl ConfluenceModel {
         }
     }
 
-    /// The X7 frontend contract: everything the view draws, read from existing
-    /// model fields only. Pure and callable with no live view (macOS still
-    /// builds the full snapshot in `host::conf_snapshot`, untouched). The
-    /// preview pane is view state (`ConfState.pstate`), not model state, so it
-    /// defaults here.
-    pub fn snapshot(&self) -> crate::views::confluence_view::ConfSnapshot {
-        use crate::ui::sidebar::{SidebarModel, SidebarRow};
-        use crate::views::confluence_view::{title_for, ConfSnapshot, MODIFIED, SORTS, TYPES};
-        let picker_text = |p: &PickerModel| -> String {
-            if p.is_all() {
-                p.all_title.clone()
-            } else if p.selected.is_empty() {
-                p.placeholder.clone()
-            } else {
-                p.selected.join(", ")
-            }
-        };
-        let empty = if !self.configured {
-            String::new()
-        } else if self.showing_favorites {
-            self.favorites_empty_hint()
-        } else if self.has_criteria() && !self.searching {
-            String::new()
-        } else {
-            format!(
-                "Type to search {}, then Return.\n★ Star the pages you open often to keep them here.",
-                if self.site.is_empty() { "Confluence" } else { self.site.as_str() }
-            )
-        };
-        ConfSnapshot {
-            sidebar: SidebarModel {
-                section_title: "Confluence".into(),
-                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Starred", "star")],
-                selected: Some(if self.scope == Scope::Favorites { 1 } else { 0 }),
-                ..Default::default()
-            },
-            mode: self.mode_index,
-            title_only: self.title_only,
-            query: self.query.clone(),
-            spaces: picker_text(&self.spaces),
-            spaces_all: self.spaces.is_all(),
-            people: picker_text(&self.contributors),
-            people_all: self.contributors.is_all(),
-            type_label: format!("Type: {}", title_for(&TYPES, &self.type_choice)),
-            mod_label: format!("Modified: {}", title_for(&MODIFIED, &self.modified)),
-            sort_label: format!("Sort: {}", title_for(&SORTS, &self.sort)),
-            rows: self.rows.clone(),
-            selection: (!self.rows.is_empty()).then_some(self.selection),
-            empty,
-            status: self.status.clone(),
-            tone: Some(self.status_tone),
-            searching: self.searching,
-            can_more: !self.next_link.is_empty(),
-            has_cql: !self.last_cql.is_empty(),
-            has_curl: !self.last_curl.is_empty(),
-            preview: Default::default(),
-            favorites_scope: self.scope == Scope::Favorites,
-        }
-    }
-
-    /// The X7 frontend contract: apply a user event by calling the same model
-    /// methods the AppKit dispatch (`host::conf_event`) calls today. Pure; the
-    /// API search, chip popups, clipboard, browser and web-view work stay with
-    /// the frontend.
-    pub fn handle(&mut self, ev: crate::views::confluence_view::ConfEvent) {
-        use crate::ui::sidebar::SidebarEvent;
-        use crate::views::confluence_view::ConfEvent as E;
-        let now = now_secs();
-        match ev {
-            E::Sidebar(SidebarEvent::Select(i)) => {
-                self.set_scope(if i == 0 { Scope::Search } else { Scope::Favorites }, now);
-            }
-            E::Query(q) => {
-                self.query = q;
-                if self.scope == Scope::Favorites {
-                    self.show_favorites(false, now);
-                }
-            }
-            E::Escape => {
-                self.escape();
-            }
-            E::Move(d) => {
-                let n = self.rows.len() as i64;
-                if n > 0 {
-                    self.selection = (self.selection as i64 + d).clamp(0, n - 1) as usize;
-                }
-            }
-            E::Mode(i) => self.mode_index = i,
-            E::TitleOnly(on) => self.title_only = on,
-            E::Select { row, .. } => {
-                if row < self.rows.len() {
-                    self.selection = row;
-                }
-            }
-            E::Star(row) => {
-                let _ = self.toggle_favorite(row);
-            }
-            E::PreviewStar => {
-                let i = self.selection;
-                let _ = self.toggle_favorite(i);
-            }
-            // Enter / Search / Chip / RowMenu / LoadMore / CopyCql / CopyCurl /
-            // Setup / Open / CopyLink / PrevHit / NextHit drive the API, popups,
-            // the clipboard, the browser or the web view — the frontend's job.
-            _ => {}
-        }
-    }
-
     /// `var hasCriteria`.
     pub fn has_criteria(&self) -> bool {
         !self.query.trim().is_empty()
@@ -773,15 +517,6 @@ impl ConfluenceModel {
 
     pub fn criteria(&self) -> Value {
         criteria(&self.criteria_params())
-    }
-
-    /// `saveCriteria()` — the persisted JSON drops `favorites`.
-    pub fn saved_criteria(&self) -> Value {
-        let mut c = self.criteria();
-        if let Some(obj) = c.as_object_mut() {
-            obj.remove("favorites");
-        }
-        c
     }
 
     pub fn set_status(&mut self, s: impl Into<String>, tone: StatusTone) {
@@ -1009,29 +744,6 @@ impl ConfluenceModel {
         }
     }
 
-    /// `toggleFavorite(row:)`'s pure half: flip the row, return the API add
-    /// flag (`Some(add)`), or `None` when the index is bad.
-    pub fn toggle_favorite(&mut self, i: usize) -> Option<bool> {
-        let row = self.rows.get(i)?.clone();
-        let add = !row.favorite;
-        if let Some(k) = self.rows.iter().position(|r| r.id == row.id) {
-            self.rows[k].favorite = add;
-        }
-        if self.showing_favorites && !add {
-            let _ = self.show_favorites(true, now_secs());
-        }
-        Some(add)
-    }
-
-    /// `updatePreviewStar()`: whether the preview's page is favorited.
-    pub fn preview_star(&self, preview_id: &str) -> bool {
-        self.rows
-            .iter()
-            .find(|r| r.id == preview_id)
-            .map(|r| r.favorite)
-            .unwrap_or(false)
-    }
-
     /// `escape()` — clear the query first, else hide (returns `true` when the
     /// caller should ask the host to `escapeAtTop`).
     pub fn escape(&mut self) -> bool {
@@ -1045,67 +757,6 @@ impl ConfluenceModel {
             false
         } else {
             true
-        }
-    }
-
-    /// The `testQuery`-style `do:confluence:*` hooks.
-    pub fn handle_do(&mut self, action: &str) -> Option<Value> {
-        let rest = action.strip_prefix("confluence:")?;
-        let now = now_secs();
-        match rest {
-            "state" => Some(self.test_state()),
-            "search" => {
-                self.set_scope(Scope::Search, now);
-                Some(self.test_state())
-            }
-            "favorites" => {
-                self.set_scope(Scope::Favorites, now);
-                Some(self.test_state())
-            }
-            "clear" => {
-                self.query.clear();
-                self.show_search_empty();
-                Some(self.test_state())
-            }
-            "escape" => {
-                self.escape();
-                Some(self.test_state())
-            }
-            _ => {
-                if let Some(v) = rest.strip_prefix("query:") {
-                    self.query = v.to_string();
-                    if self.scope == Scope::Favorites {
-                        self.show_favorites(false, now);
-                    }
-                    return Some(self.test_state());
-                }
-                if let Some(v) = rest.strip_prefix("select:") {
-                    if let Ok(i) = v.parse::<usize>() {
-                        if i < self.rows.len() {
-                            self.selection = i;
-                        }
-                        return Some(self.test_state());
-                    }
-                    return None;
-                }
-                if let Some(v) = rest.strip_prefix("star:") {
-                    if let Ok(i) = v.parse::<usize>() {
-                        self.toggle_favorite(i);
-                        return Some(self.test_state());
-                    }
-                    return None;
-                }
-                if let Some(v) = rest.strip_prefix("tick:") {
-                    if let Ok(secs) = v.parse::<i64>() {
-                        if let Some(u) = self.cooldown.until.as_mut() {
-                            *u += secs as f64;
-                        }
-                        return Some(self.test_state());
-                    }
-                    return None;
-                }
-                None
-            }
         }
     }
 
@@ -1180,14 +831,6 @@ impl SlotMember for ConfluenceModel {
     }
 }
 
-/// Register the Confluence palette entry (only while enabled, mirroring
-/// `paletteCommands()`).
-pub fn register(reg: &mut Registry, enabled: bool, listed: bool) {
-    if enabled && listed {
-        reg.add_palette(PaletteCommand::new("confluence", "Confluence Search", "views"));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Preview (python + the WKWebView / wsconf:// scheme handler are real; the
 // window's search strip / table / splitter surfaces are deferred)
@@ -1213,27 +856,11 @@ pub fn preview_html(params: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `ConfluenceImageLoader.wrap` — the `wsconf://fetch/<b64url>` URL.
-pub fn wsconf_wrap(real: &str) -> String {
-    format!("wsconf://fetch/{}", base64_encode(real.as_bytes(), true))
-}
-
 /// `ConfluenceImageLoader.unwrap`.
 pub fn wsconf_unwrap(url: &str) -> Option<String> {
     let b = url.rsplit('/').next()?;
     let bytes = base64_decode(b)?;
     String::from_utf8(bytes).ok()
-}
-
-/// `loadAuth(_:)` — the derivation lives in `pylib/confluence_glue.py`; this
-/// mirrors it directly so the loader works without a worker round trip.
-pub fn load_auth(config: &Value) -> Option<String> {
-    let header = auth_header(config);
-    if header.is_empty() {
-        None
-    } else {
-        Some(header)
-    }
 }
 
 /// The user script that turns an `<a href>` activation into a `ws` message (so
@@ -1283,16 +910,6 @@ impl ConfluenceImageLoader {
         }
     }
 
-    /// `loadAuth(_:)`'s result: adopt the Authorization header (and push it to
-    /// a live handler).
-    pub fn set_auth(&mut self, header: Option<String>) {
-        #[cfg(target_os = "macos")]
-        if let Some(h) = &self.handler {
-            h.set_auth(header.clone());
-        }
-        self.auth_header = header;
-    }
-
     /// The live `WKURLSchemeHandler` to install on a `WKWebViewConfiguration`
     /// (created on first use, with the current auth header).
     #[cfg(target_os = "macos")]
@@ -1308,17 +925,6 @@ impl ConfluenceImageLoader {
         self.handler.clone().expect("handler")
     }
 
-    /// `webView(_:start:)` — record the requested `wsconf://` URL.
-    pub fn start(&mut self, url: &str) {
-        if !self.inflight.iter().any(|u| u == url) {
-            self.inflight.push(url.to_string());
-        }
-    }
-
-    /// `webView(_:stop:)` — drop the URL from the in-flight set.
-    pub fn stop(&mut self, url: &str) {
-        self.inflight.retain(|u| u != url);
-    }
 }
 
 impl Default for ConfluenceImageLoader {
@@ -1330,164 +936,6 @@ impl Default for ConfluenceImageLoader {
 // ---------------------------------------------------------------------------
 // The embeddable content surface (`ConfluenceWindow.build` / `layoutAll`)
 // ---------------------------------------------------------------------------
-
-/// `JiraTheme.height`-derived strip height: `10 + height*2 + 8 + 10`.
-pub const CONF_STRIP_ROW_HEIGHT: f64 = 24.0;
-/// The footer height `layoutAll` calls `footH`.
-pub const CONF_FOOTER_HEIGHT: f64 = 32.0;
-/// `ConfResultCell.height` — one result row.
-pub const CONF_RESULT_ROW_HEIGHT: f64 = 44.0;
-/// The draggable splitter's width.
-pub const CONF_SPLITTER_WIDTH: f64 = 6.0;
-/// The sidebar's section width when `[confluence] sidebar-width` is unset.
-pub const CONF_SIDEBAR_DEFAULT: f64 = DEFAULT_SIDEBAR_WIDTH;
-
-/// The regions of the Confluence content surface, mirroring `layoutAll`. All
-/// rects are root-relative except the preview-relative `p_*` / `hit_*` / `web`
-/// / `hint` / `setup` fields.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ConfluenceLayout {
-    pub sidebar: Rect,
-    pub strip: Rect,
-    pub table: Rect,
-    pub rows_height: f64,
-    pub empty_hint: Rect,
-    pub spinner: Rect,
-    pub status: Rect,
-    pub more: Rect,
-    pub cql: Rect,
-    pub curl: Rect,
-    pub splitter: Rect,
-    pub preview: Rect,
-    // preview-relative:
-    pub p_title: Rect,
-    pub p_meta: Rect,
-    pub p_star: Rect,
-    pub p_open: Rect,
-    pub p_copy: Rect,
-    pub hits_bar: Rect,
-    pub hit_prev: Rect,
-    pub hit_next: Rect,
-    pub hit_label: Rect,
-    pub web: Rect,
-    pub hint: Rect,
-    pub setup: Rect,
-}
-
-/// `ConfluenceWindow.layoutAll(_:)` — search strip across the top, results
-/// list on the left, splitter, preview on the right. The sidebar occupies the
-/// left `sidebar_width`; the content area starts after it.
-pub fn content_layout(
-    width: f64,
-    height: f64,
-    split: f64,
-    sidebar_width: f64,
-    row_count: usize,
-) -> ConfluenceLayout {
-    let width = width.max(0.0);
-    let height = height.max(0.0);
-    let sidebar_w = sidebar_width.max(0.0).min(width);
-    let sidebar = Rect::new(0.0, 0.0, sidebar_w, height);
-    // `b = NSRect(x: 0, y: 0, width: max(300, full.width - left), …)`, then the
-    // `defer` shifts every column by `left`; fold that into `body.x`.
-    let body = Rect::new(sidebar_w, 0.0, (width - sidebar_w).max(300.0), height);
-
-    let strip_h = 10.0 + CONF_STRIP_ROW_HEIGHT * 2.0 + 8.0 + 10.0;
-    let strip = Rect::new(body.x, 0.0, body.width, strip_h);
-    let body_y = strip_h;
-    let body_h = (body.height - strip_h).max(0.0);
-
-    let split = clamp_split(split);
-    let left_w = (body.width * split).round();
-    let table_h = (body_h - CONF_FOOTER_HEIGHT - 4.0).max(0.0);
-    let table = Rect::new(body.x, body_y + 4.0, left_w, table_h);
-    let rows_height = (row_count as f64 * CONF_RESULT_ROW_HEIGHT).max(table_h);
-    let empty_hint = Rect::new(
-        body.x + 8.0,
-        body_y + 12.0,
-        (left_w - 16.0).max(0.0),
-        40.0,
-    );
-
-    let fy = body.height - CONF_FOOTER_HEIGHT + 5.0;
-    let spinner = Rect::new(body.x + 12.0, fy + 3.0, 16.0, 16.0);
-
-    // The footer buttons lay out right-to-left: curl (rightmost), cql, more.
-    let mut x = body.x + left_w - 10.0;
-    x -= 56.0;
-    let curl = Rect::new(x, fy, 56.0, 22.0);
-    x -= 6.0;
-    x -= 56.0;
-    let cql = Rect::new(x, fy, 56.0, 22.0);
-    x -= 6.0;
-    x -= 64.0;
-    let more = Rect::new(x, fy, 64.0, 22.0);
-    let status = Rect::new(
-        body.x + 32.0,
-        fy + 3.0,
-        (x - (body.x + 36.0)).max(40.0),
-        16.0,
-    );
-
-    let splitter = Rect::new(body.x + left_w, body_y, CONF_SPLITTER_WIDTH, body_h);
-    let preview = Rect::new(
-        body.x + left_w + CONF_SPLITTER_WIDTH,
-        body_y,
-        (body.width - left_w - CONF_SPLITTER_WIDTH).max(0.0),
-        body_h,
-    );
-
-    let pw = preview.width.max(1.0);
-    let ph = preview.height.max(1.0);
-    // Preview header: copy, open, star from the right edge inward.
-    let mut bx = pw - 12.0;
-    bx -= 84.0;
-    let p_copy = Rect::new(bx, 12.0, 84.0, 22.0);
-    bx -= 6.0;
-    bx -= 64.0;
-    let p_open = Rect::new(bx, 12.0, 64.0, 22.0);
-    bx -= 6.0;
-    bx -= 22.0;
-    let p_star = Rect::new(bx, 12.0, 22.0, 22.0);
-    bx -= 6.0;
-
-    let p_title = Rect::new(16.0, 10.0, (bx - 22.0).max(40.0), 20.0);
-    let p_meta = Rect::new(16.0, 32.0, (pw - 32.0).max(0.0), 16.0);
-    let hits_bar = Rect::new(0.0, 56.0, pw, 28.0);
-    let hit_prev = Rect::new(10.0, 3.0, 26.0, 22.0);
-    let hit_next = Rect::new(38.0, 3.0, 26.0, 22.0);
-    let hit_label = Rect::new(72.0, 6.0, (pw - 84.0).max(0.0), 16.0);
-    let web = Rect::new(0.0, 84.0, pw, (ph - 84.0).max(0.0));
-    let hint = Rect::new(40.0, ph / 2.0 - 60.0, (pw - 80.0).max(0.0), 60.0);
-    let setup = Rect::new((pw - 180.0) / 2.0, ph / 2.0 + 8.0, 180.0, 30.0);
-
-    ConfluenceLayout {
-        sidebar,
-        strip,
-        table,
-        rows_height,
-        empty_hint,
-        spinner,
-        status,
-        more,
-        cql,
-        curl,
-        splitter,
-        preview,
-        p_title,
-        p_meta,
-        p_star,
-        p_open,
-        p_copy,
-        hits_bar,
-        hit_prev,
-        hit_next,
-        hit_label,
-        web,
-        hint,
-        setup,
-    }
-}
 
 /// `ConfluenceWindow.pageColors(_:)` — the preview template's `rgba()` color
 /// strings, keyed by the keys `pylib/confluence_pages.py` substitutes.
@@ -1519,45 +967,6 @@ pub fn page_colors(colors: &PopupColors) -> HashMap<&'static str, String> {
     m.insert("warn75", rgba(warn, 0.75));
     m.insert("info", rgba(colors.tone(PopupTone::Info), 1.0));
     m
-}
-
-/// A themed placeholder preview page (a reduced `_PAGE` from
-/// `pylib/confluence_pages.py`) so the embeddable surface renders without the
-/// python worker or network. The title is HTML-escaped; the body is trusted
-/// caller markup.
-pub fn placeholder_html(colors: &PopupColors, title: &str, body: &str) -> String {
-    let c = page_colors(colors);
-    let get = |k: &str| c.get(k).map(String::as_str).unwrap_or("");
-    let esc = title
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\n<style>\n\
-:root {{ color-scheme: {light}; }}\n\
-html, body {{ background: transparent; }}\n\
-body {{ font: 14px/1.6 -apple-system, \"SF Pro Text\", sans-serif; color: {text};\n\
-  margin: 0; padding: 14px 22px 80px; overflow-wrap: anywhere; }}\n\
-h1, h2, h3 {{ line-height: 1.3; margin: 1.2em 0 .4em; }}\n\
-a {{ color: {accent}; }}\n\
-p, li {{ color: {text92}; }}\n\
-.dim {{ color: {dim}; }}\n\
-code {{ font: 12.5px ui-monospace, \"SF Mono\", monospace; background: {mantle};\n\
-  padding: 1px 4px; border-radius: 4px; }}\n\
-pre {{ font: 12.5px/1.45 ui-monospace, \"SF Mono\", monospace; background: {mantle};\n\
-  padding: 10px 12px; border-radius: 6px; overflow: auto; border: 1px solid {hairline}; }}\n\
-.ws-title {{ font-size: 1.6em; font-weight: 650; margin: .2em 0 .6em; }}\n\
-</style></head><body><div class=\"ws-title\">{title}</div>{body}</body></html>",
-        light = get("light"),
-        text = get("text"),
-        text92 = get("text92"),
-        accent = get("accent"),
-        dim = get("dim"),
-        mantle = get("mantle"),
-        hairline = get("hairline"),
-        title = esc,
-        body = body,
-    )
 }
 
 /// The `WKWebView` surface of the Confluence preview and the `wsconf://`
@@ -1913,114 +1322,6 @@ pub mod macos {
     // The embeddable content view (`ConfluenceWindow.build` + `layoutAll`).
     // -----------------------------------------------------------------------
 
-    pub struct ConfRootIvars;
-
-    define_class!(
-        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
-        #[thread_kind = MainThreadOnly]
-        #[name = "WSConfluenceFlippedView"]
-        #[ivars = ConfRootIvars]
-        pub struct ConfFlippedView;
-
-        impl ConfFlippedView {
-        }
-
-        unsafe impl NSObjectProtocol for ConfFlippedView {}
-    );
-
-    impl ConfFlippedView {
-        fn new(mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(ConfRootIvars);
-            unsafe {
-                msg_send![
-                    super(this),
-                    initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
-                ]
-            }
-        }
-    }
-
-    fn nsrect(r: Rect) -> NSRect {
-        NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
-    }
-
-    fn set_background(view: &NSView, color: Rgba) {
-        view.setWantsLayer(true);
-        if let Some(layer) = view.layer() {
-            layer.setBackgroundColor(Some(&color.to_nscolor().CGColor()));
-        }
-    }
-
-    fn label(
-        mtm: MainThreadMarker,
-        s: &str,
-        size: f64,
-        bold: bool,
-        color: Rgba,
-    ) -> Retained<NSTextField> {
-        let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);
-        let font = if bold {
-            NSFont::boldSystemFontOfSize(size)
-        } else {
-            NSFont::systemFontOfSize(size)
-        };
-        l.setFont(Some(&font));
-        l.setTextColor(Some(&color.to_nscolor()));
-        l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        l
-    }
-
-    fn button(mtm: MainThreadMarker, title: &str) -> Retained<NSButton> {
-        let b = unsafe {
-            NSButton::buttonWithTitle_target_action(&NSString::from_str(title), None, None, mtm)
-        };
-        b.setControlSize(NSControlSize::Small);
-        b.setFont(Some(&NSFont::systemFontOfSize(11.5)));
-        b
-    }
-
-    fn tone_color(colors: &PopupColors, tone: StatusTone) -> Rgba {
-        match tone {
-            StatusTone::Dim => colors.dim,
-            StatusTone::Success => colors.tone(PopupTone::Success),
-            StatusTone::Warning => colors.tone(PopupTone::Warning),
-            StatusTone::Danger => colors.tone(PopupTone::Danger),
-        }
-    }
-
-    thread_local! {
-        static LIVE_WINDOWS: RefCell<Vec<(Retained<crate::ui::card::CardNSWindow>, ConfluenceImageLoader, ConfluencePreview)>>
-            = const { RefCell::new(Vec::new()) };
-        /// Keeps the embeddable surface's preview + scheme/script handlers alive
-        /// for the life of the main thread (the host retains the root view; the
-        /// `WKWebView` configuration does not retain its handlers reliably).
-        static LIVE_CONTENT: RefCell<Vec<ConfluencePreview>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// `ConfluenceWindow`'s AppKit build: a themed card hosting the preview.
-    /// The full search strip / table / splitter are separate surfaces; the
-    /// preview + scheme handler are the part this module owns. The window is
-    /// kept alive for the life of the main thread (a real controller would own
-    /// it; the model here is headless).
-    pub fn build_confluence_window() {
-        use crate::ui::card::{create_card_window, CardConfig};
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let mut loader = ConfluenceImageLoader::new();
-        let preview = ConfluencePreview::new(mtm, &mut loader);
-        let config = CardConfig {
-            title: "Confluence".to_string(),
-            min_size: (480.0, 360.0),
-            ..Default::default()
-        };
-        let window = create_card_window(mtm, &config);
-        window.setContentView(Some(&preview.web));
-        window.center();
-        window.makeKeyAndOrderFront(None);
-        LIVE_WINDOWS.with(|w| w.borrow_mut().push((window, loader, preview)));
-    }
-
 }
 
 /// The raw `confluence_api.py` runner (via `run_process`, mirroring
@@ -2074,43 +1375,9 @@ fn find_python3() -> Option<String> {
     None
 }
 
-/// `ConfluenceWindow` — host the `WKWebView` preview + `wsconf://` handler.
-pub fn build_window() {
-    #[cfg(target_os = "macos")]
-    macos::build_confluence_window();
-}
-
-
 // ---------------------------------------------------------------------------
 // base64 (std-only; matches NSData.base64EncodedString + the url-safe wrap)
 // ---------------------------------------------------------------------------
-
-const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const B64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-pub fn base64_encode(data: &[u8], urlsafe: bool) -> String {
-    let table = if urlsafe { B64_URL } else { B64_STD };
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(table[((triple >> 18) & 0x3F) as usize] as char);
-        out.push(table[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(table[((triple >> 6) & 0x3F) as usize] as char);
-        } else if !urlsafe {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(table[(triple & 0x3F) as usize] as char);
-        } else if !urlsafe {
-            out.push('=');
-        }
-    }
-    out
-}
 
 pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let mut vals: Vec<u8> = Vec::new();
@@ -2163,35 +1430,6 @@ mod tests {
     }
 
     #[test]
-    fn config_parse_defaults_and_overrides() {
-        let empty = ConfluenceConfig::default();
-        assert_eq!(empty.width(), DEFAULT_WIDTH);
-        assert_eq!(empty.height(), DEFAULT_HEIGHT);
-        assert_eq!(empty.split(), DEFAULT_SPLIT);
-        assert_eq!(empty.sidebar_width(), DEFAULT_SIDEBAR_WIDTH);
-        assert!(!empty.enabled());
-        assert!(empty.in_palette(), "in-palette defaults true");
-        assert_eq!(empty.label(), "Confluence Search");
-
-        let c = ConfluenceConfig::from_entries(entries(&[
-            ("enabled", "true"),
-            ("width", "1000"),
-            ("height", "700"),
-            ("split", "0.7"),
-            ("sidebar-width", "180"),
-            ("label", "Wiki"),
-            ("in-palette", "no"),
-        ]));
-        assert!(c.enabled());
-        assert_eq!(c.width(), 1000.0);
-        assert_eq!(c.height(), 700.0);
-        assert_eq!(c.split(), 0.7);
-        assert_eq!(c.sidebar_width(), 180.0);
-        assert_eq!(c.label(), "Wiki");
-        assert!(!c.in_palette());
-    }
-
-    #[test]
     fn split_is_clamped_like_the_splitter() {
         // UserDefaults garbage resets to the section default.
         assert_eq!(clamp_split(0.5), 0.5);
@@ -2201,33 +1439,6 @@ mod tests {
             ConfluenceConfig::from_entries(entries(&[("split", "0.05")])).split_clamped(),
             DEFAULT_SPLIT
         );
-    }
-
-    #[test]
-    fn row_parses_json_and_hits() {
-        // hits are UTF-16 ranges as [location, length] pairs.
-        let j = json!({
-            "id": "42", "type": "blogpost", "title": "Deploy \u{1f680}",
-            "excerpt": "deploy notes", "space": "ENG", "spaceName": "Engineering",
-            "path": "Home/Deploy", "author": "Ada", "modifiedText": "yesterday",
-            "url": "https://x/wiki/p", "favorite": true, "missing": false,
-            "titleHits": [[0, 6]], "hits": [[0, 6], [7, 5]]
-        });
-        let r = ConfluenceRow::from_json(&j);
-        assert_eq!(r.id, "42");
-        assert_eq!(r.type_label(), "Blog");
-        assert!(r.favorite);
-        assert_eq!(r.hits.len(), 2);
-        assert_eq!(r.hits[1], HitRange { location: 7, length: 5 });
-        assert_eq!(r.to_json()["type"], "blogpost");
-        assert_eq!(r.meta(), "Engineering  \u{00b7}  Home/Deploy  \u{00b7}  Ada  \u{00b7}  yesterday");
-
-        // missing entries fall back / stringify numbers.
-        let sparse = ConfluenceRow::from_json(&json!({"id": 7, "hits": [[1]]}));
-        assert_eq!(sparse.id, "7");
-        assert_eq!(sparse.kind, "page");
-        assert!(sparse.hits.is_empty(), "ragged ranges dropped");
-        assert_eq!(sparse.type_label(), "");
     }
 
     #[test]
@@ -2290,33 +1501,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_header_matches_the_glue() {
-        // mirrors Tests/test_confluence_glue.py Auth cases.
-        assert_eq!(
-            auth_header(&json!({"email": "a@x", "token": "tok"})),
-            "Basic YUB4OnRvaw=="
-        );
-        assert_eq!(auth_header(&json!({"token": "tok"})), "Bearer tok");
-        assert_eq!(
-            auth_header(&json!({"auth": "bearer", "email": "a@x", "token": "t"})),
-            "Bearer t"
-        );
-        assert_eq!(
-            auth_header(&json!({"auth": "BASIC", "email": "", "token": "t"})),
-            "Basic OnQ="
-        );
-        assert_eq!(
-            auth_header(&json!({"auth": "oauth", "email": "a@x", "token": "t"}))
-                .split(' ')
-                .next(),
-            Some("Basic")
-        );
-        assert_eq!(auth_header(&json!({"email": "a@x", "token": ""})), "");
-        assert_eq!(auth_header(&json!({})), "");
-        assert_eq!(auth_header(&Value::Null), "");
-    }
-
-    #[test]
     fn rate_limit_decision_matches_the_glue() {
         assert_eq!(rate_limit(&json!({})), RateLimitDecision { limited: false, seconds: 0 });
         assert_eq!(
@@ -2345,23 +1529,6 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_lifecycle() {
-        let mut c = Cooldown::default();
-        assert!(!c.active(1000.0));
-        assert!(!c.tick(1000.0), "idle tick never lifts");
-
-        c.activate(45, 1000.0);
-        assert!(c.active(1000.0));
-        assert_eq!(c.remaining(1000.0), 45);
-        assert_eq!(c.remaining(1030.0), 15);
-        assert!(!c.tick(1030.0), "still counting");
-        assert!(c.active(1044.0));
-        assert!(c.tick(1045.0), "lifts at/after the deadline");
-        assert!(!c.active(1045.0));
-        assert!(!c.tick(1045.0));
-    }
-
-    #[test]
     fn model_rate_limited_starts_and_ticks() {
         let mut m = ConfluenceModel::default();
         assert!(!m.handle_rate_limited(&json!({"ok": false}), 1000.0));
@@ -2375,24 +1542,6 @@ mod tests {
         m.tick_cooldown(1091.0);
         assert!(!m.cooling_down(1091.0));
         assert_eq!(m.status, "Resuming\u{2026}");
-    }
-
-    #[test]
-    fn cooldown_file_left_for_site() {
-        let dir = std::env::temp_dir().join(format!("ws-conf-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("ratelimit.json");
-        std::fs::write(
-            &file,
-            serde_json::to_vec(&json!({"site": "https://x/wiki", "until": 1100.0})).unwrap(),
-        )
-        .unwrap();
-        let f = file.to_string_lossy().into_owned();
-        assert_eq!(cooldown_left_in(&f, "https://x/wiki", 1000.0), 100);
-        assert_eq!(cooldown_left_in(&f, "https://other", 1000.0), 0, "site mismatch");
-        assert_eq!(cooldown_left_in(&f, "https://x/wiki", 1200.0), 0, "expired");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2478,72 +1627,11 @@ mod tests {
     }
 
     #[test]
-    fn toggle_favorite_and_preview_star() {
-        let mut m = ConfluenceModel::default();
-        m.rows = vec![ConfluenceRow::from_json(&json!({"id": "1", "title": "a"}))];
-        assert_eq!(m.toggle_favorite(0), Some(true));
-        assert!(m.rows[0].favorite);
-        assert!(m.preview_star("1"));
-        assert!(!m.preview_star("missing"));
-        assert_eq!(m.toggle_favorite(0), Some(false));
-        assert!(!m.rows[0].favorite);
-        assert_eq!(m.toggle_favorite(9), None);
-    }
-
-    #[test]
-    fn model_do_hooks_and_state() {
-        let mut m = ConfluenceModel::default();
-        m.favorites = vec![ConfluenceRow::from_json(&json!({"id": "1", "title": "a"}))];
-        let st = m.handle_do("confluence:favorites").unwrap();
-        assert_eq!(st["scope"], "favorites");
-        assert_eq!(st["showingFavorites"], true);
-
-        m.handle_do("confluence:search");
-        let st = m.handle_do("confluence:query:deploy").unwrap();
-        assert_eq!(st["query"], "deploy");
-        assert_eq!(st["where"], "\u{201c}deploy\u{201d}");
-
-        assert!(m.handle_do("confluence:nope").is_none());
-        assert!(m.handle_do("confluence:select:x").is_none());
-        assert!(m.handle_do("other:thing").is_none());
-
-        let st = m.handle_do("confluence:state").unwrap();
-        assert_eq!(st["configured"], false);
-        assert_eq!(st["rows"].as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn wsconf_round_trip_and_base64() {
-        let url = "https://x.atlassian.net/wiki/images/a.png?a=1&b=2";
-        let wrapped = wsconf_wrap(url);
-        assert!(wrapped.starts_with("wsconf://fetch/"));
-        assert_eq!(wsconf_unwrap(&wrapped).as_deref(), Some(url));
-        assert_eq!(base64_encode(b"a\"b\\c", false), "YSJiXGM=");
-        assert_eq!(base64_encode("\u{1f680}".as_bytes(), false), "8J+agA==");
-        // url-safe: no padding, - _ instead of + /
-        assert_eq!(wsconf_wrap("a?b").contains('='), false);
-    }
-
-    #[test]
     fn link_user_script_posts_to_the_ws_handler() {
         let js = link_user_script();
         assert!(js.contains("messageHandlers.ws.postMessage"));
         assert!(js.contains("closest('a[href]')"));
         assert!(js.contains("JSON.stringify"));
-    }
-
-    #[test]
-    fn loader_tracks_inflight_wsconf_urls() {
-        let mut l = ConfluenceImageLoader::new();
-        assert!(l.inflight.is_empty());
-        let u = wsconf_wrap("https://x/a.png");
-        l.start(&u);
-        l.start(&u);
-        assert_eq!(l.inflight, vec![u.clone()], "duplicate starts dedupe");
-        l.stop(&u);
-        assert!(l.inflight.is_empty());
-        l.set_auth(Some("Bearer t".to_string()));
-        assert_eq!(l.auth_header.as_deref(), Some("Bearer t"));
     }
 
     #[test]
@@ -2556,42 +1644,6 @@ mod tests {
         assert!(m.shown());
         m.slot_park(false);
         assert!(!m.shown());
-    }
-
-    #[test]
-    fn content_layout_regions() {
-        let l = content_layout(1400.0, 900.0, 0.42, 210.0, 0);
-        // The sidebar owns the left column; the content area starts after it.
-        assert_eq!(l.sidebar.width, 210.0);
-        assert_eq!(l.strip.x, 210.0);
-        assert_eq!(l.strip.y, 0.0);
-        assert!(l.strip.height > CONF_STRIP_ROW_HEIGHT * 2.0);
-        // table -> splitter -> preview left to right.
-        assert!(l.table.max_x() <= l.splitter.x);
-        assert_eq!(l.splitter.x, l.table.max_x());
-        assert!(l.preview.x >= l.splitter.max_x());
-        assert!(l.preview.width > 0.0);
-        assert!(l.splitter.height > 0.0);
-        // the footer buttons sit along the bottom of the left column.
-        assert!(l.cql.max_x() <= l.curl.x);
-        assert!(l.more.max_x() <= l.cql.x);
-        assert!(l.more.max_x() <= l.table.max_x());
-        assert!(l.status.max_x() <= l.more.x);
-        // preview children: header, hits bar, then the web view.
-        assert!(l.p_title.y < l.p_meta.y);
-        assert!(l.p_meta.y < l.hits_bar.y);
-        assert!(l.hits_bar.y < l.web.y.max(0.0) || l.hits_bar.max_y() <= l.web.y);
-        assert_eq!(l.web.width, l.preview.width);
-        assert_eq!(l.web.x, 0.0);
-        assert!(l.p_title.max_x() <= l.p_open.x);
-        // a short listing fills the visible table.
-        assert_eq!(l.rows_height, l.table.height);
-        let tall = content_layout(1400.0, 900.0, 0.42, 210.0, 50);
-        assert!(tall.rows_height >= 50.0 * CONF_RESULT_ROW_HEIGHT);
-        // an out-of-range split clamps to the section default.
-        let clamped = content_layout(1400.0, 900.0, 0.95, 210.0, 0);
-        let default = content_layout(1400.0, 900.0, DEFAULT_SPLIT, 210.0, 0);
-        assert_eq!(clamped.table.width, default.table.width);
     }
 
     #[test]
@@ -2609,50 +1661,4 @@ mod tests {
         assert_eq!(m["light"], "dark", "the default palette is dark");
     }
 
-    #[test]
-    fn placeholder_html_themes_and_escapes() {
-        let c = crate::ui::theme::PopupThemeDefaults::colors();
-        let html = placeholder_html(&c, "A & B <x>", "<p class=dim>hi</p>");
-        assert!(html.contains("<!doctype html>"));
-        assert!(html.contains("color-scheme: dark"));
-        assert!(html.contains("<div class=\"ws-title\">"));
-        assert!(html.contains("A &amp; B &lt;x&gt;"), "title is escaped");
-        assert!(html.contains("<p class=dim>hi</p>"), "body is trusted markup");
-        assert!(html.contains("rgba("), "colors are inlined");
-    }
-
-    #[test]
-    fn confluence_handle_contract() {
-        use crate::views::confluence_view::ConfEvent;
-        let mut m = ConfluenceModel::default();
-        m.configured = true;
-        let before = m.snapshot();
-
-        // Query changes the snapshot.
-        m.handle(ConfEvent::Query("roadmap".into()));
-        let after = m.snapshot();
-        assert_ne!(after, before, "Query changed the snapshot");
-        assert_eq!(after.query, "roadmap");
-
-        // Mode / TitleOnly are plain model fields.
-        m.handle(ConfEvent::Mode(1));
-        m.handle(ConfEvent::TitleOnly(true));
-        let configured = m.snapshot();
-        assert_eq!(configured.mode, 1);
-        assert!(configured.title_only);
-
-        // Move / Star / Select act on the rows.
-        m.rows = vec![
-            ConfluenceRow { id: "1".into(), title: "a".into(), ..Default::default() },
-            ConfluenceRow { id: "2".into(), title: "b".into(), ..Default::default() },
-        ];
-        m.handle(ConfEvent::Move(1));
-        assert_eq!(m.snapshot().selection, Some(1));
-        m.handle(ConfEvent::Star(0));
-        assert!(m.snapshot().rows[0].favorite);
-
-        // Escape clears the query.
-        m.handle(ConfEvent::Escape);
-        assert!(m.snapshot().query.is_empty());
-    }
 }

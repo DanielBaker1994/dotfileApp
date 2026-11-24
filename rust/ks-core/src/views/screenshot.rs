@@ -2557,10 +2557,6 @@ impl ShotSession {
         ShotGeom::rect(Point::new(min_x, min_y), Point::new(max_x, max_y))
     }
 
-    fn handle_points(s: Rect) -> [Point; 8] {
-        selection_handles(s)
-    }
-
     fn handle_at(&self, p: Point) -> Option<i64> {
         let s = self.selection?;
         selection_handle_at(s, p, self.cfg.button_size)
@@ -4922,7 +4918,6 @@ mod shot_cg {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // ShotOverlayPanel / ShotOverlayView — the live AppKit overlay (macOS only)
 // ---------------------------------------------------------------------------
@@ -7051,8 +7046,6 @@ fn monitor_key_down(
     }
 }
 
-
-
 /// A history PNG as a [`ShotImage`] (`ShotHistory.thumbnail(path, 100_000)`).
 #[cfg(target_os = "macos")]
 fn recent_image(path: &str) -> Option<ShotImage> {
@@ -8857,7 +8850,6 @@ pub fn register_controller(reg: &mut Registry, controller: Arc<Mutex<ScreenshotC
         Some(controller_test_do(&controller, rest))
     });
 }
-
 
 // ---------------------------------------------------------------------------
 // pane-shot (`ScreenshotController.paneShot`)

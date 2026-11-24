@@ -179,11 +179,6 @@ impl RichText {
         is_executable(&Self::pandoc_bin())
     }
 
-    pub fn tables_as_text(md: &str) -> String {
-        ai_string("ai.tables_as_text", json!({"md": md}), "text", 60)
-            .unwrap_or_else(|| md.to_string())
-    }
-
     pub fn markdown(md: &str, target: PasteTarget) -> String {
         ai_string(
             "ai.markdown",
@@ -192,24 +187,6 @@ impl RichText {
             60,
         )
         .unwrap_or_else(|| md.to_string())
-    }
-
-    pub fn pandoc_html(md: &str, highlight: bool) -> Option<String> {
-        if !Self::available() {
-            return None;
-        }
-        let params = json!({"md": md, "highlight": highlight, "pandoc": Self::pandoc_bin()});
-        ai_string("ai.pandoc_html", params, "html", 60)
-    }
-
-    pub fn styled(fragment: &str, target: PasteTarget) -> String {
-        ai_string(
-            "ai.styled",
-            json!({"fragment": fragment, "target": target.key()}),
-            "html",
-            60,
-        )
-        .unwrap_or_else(|| fragment.to_string())
     }
 
     pub fn html(md: &str, target: PasteTarget) -> Option<String> {
@@ -377,10 +354,6 @@ impl CodeGuard {
         }
     }
 
-    pub fn token(n: i64) -> String {
-        format!("[[CODE{n}]]")
-    }
-
     pub fn restore(&self, s: &str) -> (String, i64) {
         let params = json!({"codes": self.codes, "s": s});
         match ai_box("ai.code_restore", params, 60) {
@@ -431,14 +404,6 @@ impl TokenBudget {
                 })
             })
             .unwrap_or_else(|| vec![s.to_string()])
-    }
-}
-
-pub struct Reflow;
-
-impl Reflow {
-    pub fn instructions(s: &str) -> String {
-        ai_string("ai.reflow", json!({"s": s}), "text", 60).unwrap_or_else(|| s.to_string())
     }
 }
 
@@ -645,53 +610,6 @@ impl AIRule {
     }
 }
 
-pub struct CSVTables;
-
-impl CSVTables {
-    pub fn cells(line: &str) -> Option<Vec<String>> {
-        ai_box("ai.csv_cells", json!({"line": line}), 60)?
-            .get("cells")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-    }
-
-    pub fn convert(s: &str) -> String {
-        ai_string("ai.csv_convert", json!({"s": s}), "text", 60).unwrap_or_else(|| s.to_string())
-    }
-}
-
-pub struct WordGuard;
-
-impl WordGuard {
-    pub fn words(s: &str) -> Vec<String> {
-        ai_box("ai.words", json!({"s": s}), 60)
-            .and_then(|b| {
-                b.get("words").and_then(Value::as_array).map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn check(input: &str, output: &str) -> (bool, Vec<String>, Vec<String>) {
-        let params = json!({"input": input, "output": output});
-        match ai_box("ai.word_check", params, 60) {
-            Some(boxed) => (
-                boxed.get("ok").and_then(Value::as_bool).unwrap_or(true),
-                str_vec(boxed.get("added")),
-                str_vec(boxed.get("dropped")),
-            ),
-            None => (true, Vec::new(), Vec::new()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,24 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn prose_fences_highlight_only_when_asked() {
-        // Port of Tests/test_prose_pdf.swift (the pandoc highlight contract).
-        if !RichText::available() || !helper_ready() {
-            eprintln!("pandoc / python helper missing: highlight checks skipped");
-            return;
-        }
-        let fence = "```cpp\n#include <iostream>\nint main(){ std::cout << \"hello\"; }\n```\n";
-        let hl = RichText::pandoc_html(fence, true).unwrap_or_default();
-        assert!(hl.contains("sourceCode cpp"), "prose fence is a sourceCode block: {hl}");
-        assert!(hl.contains("class=\"dt\""), "int is a type token: {hl}");
-        let plain = RichText::pandoc_html(fence, false).unwrap_or_default();
-        assert!(
-            plain.contains("<pre class=\"cpp\"><code>") && !plain.contains("<span"),
-            "pastes stay unhighlighted: {plain}"
-        );
-    }
-
-    #[test]
     fn pane_mode_shape() {
         assert_eq!(PaneMode::Diff.as_str(), "diff");
         assert_eq!(PaneMode::Markdown.title(), "Markdown");
@@ -735,15 +635,6 @@ mod tests {
         assert_eq!(all[0], PaneMode::Diff);
         assert_eq!(PaneMode::all(false), vec![PaneMode::Markdown, PaneMode::Outlook, PaneMode::Webex]);
         assert_eq!(PasteTarget::Webex.key(), "webex");
-    }
-
-    #[test]
-    fn code_guard_token_and_document() {
-        assert_eq!(CodeGuard::token(7), "[[CODE7]]");
-        assert_eq!(
-            RichText::document("<b>x</b>"),
-            "<html><head><meta charset=\"utf-8\"></head><body><b>x</b></body></html>"
-        );
     }
 
     #[test]
@@ -768,24 +659,6 @@ mod tests {
     fn estimate_short_ascii() {
         // ceil(4 / 3.2) == 2 via the helper or its fallback.
         assert_eq!(TokenBudget::estimate("abcd"), 2);
-    }
-
-    #[test]
-    fn code_guard_round_trip_when_helper_present() {
-        if !helper_ready() {
-            eprintln!("skipping: no python 3.11+ or pylib/helper not found");
-            return;
-        }
-        let guarded = CodeGuard::new("hi `x` there");
-        assert!(guarded.text.contains(&CodeGuard::token(1)));
-        assert_eq!(guarded.codes, vec!["`x`".to_string()]);
-        let (restored, missing) = guarded.restore(&guarded.text);
-        assert_eq!(restored, "hi `x` there");
-        assert_eq!(missing, 0);
-
-        let (ok, added, dropped) = WordGuard::check("the cat sat", "the cat sat");
-        assert!(ok);
-        assert!(added.is_empty() && dropped.is_empty());
     }
 
     /// `RichText::rtf` builds an RTF document from the HTML wrapper. The

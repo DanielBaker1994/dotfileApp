@@ -5,7 +5,7 @@ edition = "2021"
 description = "kitchen-sink shared core: platform seams, UI framework, engines and the views the quick agent uses (no dependency on ws-rs / host.rs)"
 license = "MIT"
 
-# Features: the egui frontend stays in ws-rs; ks-core only carries the AppKit /
+# ks-core carries the AppKit /
 # portable code. (Modules here must never reference ws-rs.)
 
 # Portable dependencies (build on every target).

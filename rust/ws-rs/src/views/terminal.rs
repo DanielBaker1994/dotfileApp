@@ -16,7 +16,6 @@ use objc2_app_kit::NSView;
 
 pub const DEFAULT_FRAME_WIDTH: f64 = 760.0;
 pub const DEFAULT_FRAME_HEIGHT: f64 = 460.0;
-pub const HEADER_HEIGHT: f64 = 30.0;
 pub const MIN_WIDTH: f64 = 360.0;
 pub const MIN_HEIGHT: f64 = 200.0;
 pub const MIN_FONT_SIZE: f64 = 8.0;
@@ -88,21 +87,6 @@ pub struct TerminalConfig {
 }
 
 impl TerminalConfig {
-    pub fn new(
-        shell: impl Into<String>,
-        args: Vec<String>,
-        font_name: impl Into<String>,
-        font_size: f64,
-    ) -> Self {
-        TerminalConfig {
-            shell: shell.into(),
-            args,
-            font_name: font_name.into(),
-            font_size: clamp_font_size(font_size),
-            frame: TerminalFrame::default(),
-            start_open: true,
-        }
-    }
 
     /// Build from `[app]` settings (`shell` / `shell-args` / `terminal-font` /
     /// `terminal-font-size`), the values `TerminalPanel.swift` is seeded with.
@@ -134,21 +118,6 @@ impl Default for TerminalConfig {
 /// Clamp to the Swift panel's `min(36, max(8, size))`.
 pub fn clamp_font_size(size: f64) -> f64 {
     size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
-}
-
-/// Parse a `"Menlo 13"`-style descriptor; a missing size falls back to the
-/// default, a non-positive size is rejected.
-pub fn parse_font_descriptor(s: &str) -> (String, f64) {
-    let s = s.trim();
-    match s.rsplit_once(char::is_whitespace) {
-        Some((name, size)) if !name.trim().is_empty() => {
-            match size.trim().parse::<f64>() {
-                Ok(n) if n > 0.0 => (name.trim().to_string(), clamp_font_size(n)),
-                _ => (s.to_string(), DEFAULT_FONT_SIZE),
-            }
-        }
-        _ => (s.to_string(), DEFAULT_FONT_SIZE),
-    }
 }
 
 /// Session state the Swift panel reads from the SwiftTerm view + its delegate.
@@ -207,20 +176,6 @@ impl TerminalPanel {
         }
     }
 
-    pub fn config(&self) -> &TerminalConfig {
-        &self.config
-    }
-
-    pub fn session(&self) -> &TerminalSession {
-        &self.session
-    }
-
-    /// The shim view once [`Self::build`] has run.
-    #[cfg(target_os = "macos")]
-    pub fn view(&self) -> Option<&NSView> {
-        self.view.as_deref()
-    }
-
     #[cfg(not(target_os = "macos"))]
     pub fn view(&self) -> Option<&()> {
         None
@@ -228,10 +183,6 @@ impl TerminalPanel {
 
     pub fn is_shown(&self) -> bool {
         self.shown
-    }
-
-    pub fn is_key(&self) -> bool {
-        self.key
     }
 
     /// `reclaimToolKey` for the terminal: a shown panel that lost the
@@ -243,18 +194,6 @@ impl TerminalPanel {
             if self.shown && panel.isVisible() && !panel.isKeyWindow() {
                 panel.makeKeyAndOrderFront(None);
             }
-        }
-    }
-
-    pub fn frame(&self) -> TerminalFrame {
-        self.config.frame
-    }
-
-    pub fn toggle(&mut self) {
-        if self.shown && self.key {
-            self.hide();
-        } else {
-            self.show();
         }
     }
 
@@ -305,38 +244,6 @@ impl TerminalPanel {
         }
         self.shown = false;
         self.key = false;
-    }
-
-    /// Test/state seam for the key-window flag the real panel reads off `NSPanel`.
-    pub fn set_key(&mut self, key: bool) {
-        self.key = key;
-    }
-
-    /// Apply a SwiftTerm delegate hook (`WSShimDelegate.shimEvent`).
-    pub fn handle_event(&mut self, kind: &str, value: &str) {
-        match kind {
-            "size" => {
-                if let Some((c, r)) = value.split_once('x') {
-                    if let (Ok(c), Ok(r)) = (c.parse(), r.parse()) {
-                        self.session.cols = c;
-                        self.session.rows = r;
-                    }
-                }
-            }
-            "title" => self.session.title = value.to_string(),
-            "cwd" => {
-                self.session.cwd = if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                };
-            }
-            "exit" => {
-                self.session.running = false;
-                self.session.exit_code = value.parse().unwrap_or(NO_EXIT_CODE);
-            }
-            _ => {}
-        }
     }
 
     /// `place()`'s live inputs: the visible frame of the screen under the
@@ -477,41 +384,10 @@ impl TerminalPanel {
         self.view = Some(view);
     }
 
-    /// `TerminalAutoRestart`: `exit` in the panel's shell starts a new one in
-    /// the same view (Swift restarts in `$HOME`). True when it restarted.
-    #[cfg(target_os = "macos")]
-    pub fn poll_restart(&mut self) -> bool {
-        let Some(shim) = self.shim() else {
-            return false;
-        };
-        let home = std::env::var("HOME").ok();
-        swiftterm_shim::restart_if_exited(&shim, &self.config.shell, &self.config.args, home.as_deref())
-    }
-
     /// The shim handle behind [`Self::view`] (it IS the returned `NSView`).
     #[cfg(target_os = "macos")]
     fn shim(&self) -> Option<Retained<swiftterm_shim::WSShim>> {
         self.view.as_ref()?.clone().downcast::<swiftterm_shim::WSShim>().ok()
-    }
-
-    /// Send raw keys/text to the shell (shim `sendKeys:`).
-    pub fn send_keys(&mut self, text: &str) {
-        #[cfg(target_os = "macos")]
-        if let Some(shim) = self.shim() {
-            swiftterm_shim::send_text(&shim, text);
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = text;
-    }
-
-    /// `setFont(name:size:)` — updates the config now, applies it when built.
-    pub fn set_font(&mut self, name: &str, size: f64) {
-        self.config.font_name = name.to_string();
-        self.config.font_size = clamp_font_size(size);
-        #[cfg(target_os = "macos")]
-        if let Some(shim) = self.shim() {
-            swiftterm_shim::set_font(&shim, &self.config.font_name, self.config.font_size);
-        }
     }
 
     /// The panel `testState()` JSON (socket `terminalPanel`), read live from
@@ -571,20 +447,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_defaults_and_clamp() {
-        let cfg = TerminalConfig::default();
-        assert_eq!(cfg.frame, TerminalFrame::default());
-        assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
-        assert_eq!(cfg.args, vec!["-l".to_string()]);
-
-        let cfg = TerminalConfig::new("/bin/bash", vec![], "Menlo", 100.0);
-        assert_eq!(cfg.font_size, MAX_FONT_SIZE);
-        let cfg = TerminalConfig::new("/bin/bash", vec![], "Menlo", 1.0);
-        assert_eq!(cfg.font_size, MIN_FONT_SIZE);
-        assert_eq!(clamp_font_size(13.0), 13.0);
-    }
-
-    #[test]
     fn config_from_settings_maps_app_values() {
         let mut settings = crate::app::config::AppSettings::default();
         settings.shell = "/bin/fish".to_string();
@@ -597,70 +459,6 @@ mod tests {
         assert_eq!(cfg.args, vec!["-l".to_string()]);
         assert_eq!(cfg.font_name, "Fira Code");
         assert_eq!(cfg.font_size, MAX_FONT_SIZE);
-    }
-
-    #[test]
-    fn font_descriptor_parsing() {
-        assert_eq!(
-            parse_font_descriptor("Menlo 13"),
-            ("Menlo".to_string(), 13.0)
-        );
-        assert_eq!(
-            parse_font_descriptor("JetBrains Mono 100"),
-            ("JetBrains Mono".to_string(), MAX_FONT_SIZE)
-        );
-        assert_eq!(
-            parse_font_descriptor("Menlo"),
-            ("Menlo".to_string(), DEFAULT_FONT_SIZE)
-        );
-        assert_eq!(
-            parse_font_descriptor("Menlo nope"),
-            ("Menlo nope".to_string(), DEFAULT_FONT_SIZE)
-        );
-    }
-
-    #[test]
-    fn toggle_tracks_shown_and_key() {
-        let mut p = TerminalPanel::new(TerminalConfig::default());
-        assert!(!p.is_shown());
-        p.toggle();
-        assert!(p.is_shown());
-        // Shown but not key (the panel model doesn't own the key window).
-        p.toggle();
-        assert!(p.is_shown());
-        p.set_key(true);
-        p.toggle();
-        assert!(!p.is_shown());
-        assert!(!p.is_key());
-    }
-
-    #[test]
-    fn delegate_events_update_session() {
-        let mut p = TerminalPanel::new(TerminalConfig::default());
-        p.handle_event("size", "120x40");
-        p.handle_event("title", "zsh");
-        p.handle_event("cwd", "/tmp");
-        p.handle_event("exit", "0");
-        let s = p.session();
-        assert_eq!((s.cols, s.rows), (120, 40));
-        assert_eq!(s.title, "zsh");
-        assert_eq!(s.cwd.as_deref(), Some("/tmp"));
-        assert_eq!(s.exit_code, 0);
-        assert!(!s.running);
-
-        p.handle_event("cwd", "");
-        assert_eq!(p.session().cwd, None);
-        p.handle_event("size", "garbage");
-        assert_eq!(p.session().rows, 40);
-    }
-
-    #[test]
-    fn set_font_updates_config_only() {
-        let mut p = TerminalPanel::new(TerminalConfig::default());
-        p.set_font("Fira Code", 200.0);
-        assert_eq!(p.config().font_name, "Fira Code");
-        assert_eq!(p.config().font_size, MAX_FONT_SIZE);
-        assert!(p.view().is_none());
     }
 
     #[test]
@@ -704,21 +502,7 @@ mod tests {
         assert_eq!(placed.x, (1000.0 - DEFAULT_FRAME_WIDTH) / 2.0);
     }
 
-    #[test]
-    fn test_state_json_shape() {
-        let mut p = TerminalPanel::new(TerminalConfig::default());
-        p.show();
-        p.handle_event("size", "80x24");
-        let v = p.test_state();
-        assert_eq!(v["shown"], true);
-        assert_eq!(v["running"], false);
-        assert_eq!(v["exitCode"], -1);
-        assert_eq!(v["cols"], 80);
-        assert_eq!(v["rows"], 24);
-        assert_eq!(v["frame"], json!([0, 0, 760, 460]));
-    }
 }
-
 
 /// `TerminalHeader` (TerminalPanel.swift): ✕ at the left, the centered dim
 /// title, a hairline; a drag elsewhere moves the panel.

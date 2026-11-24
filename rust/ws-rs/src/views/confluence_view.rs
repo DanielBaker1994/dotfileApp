@@ -164,7 +164,6 @@ mod appkit {
 
     type Sink = Rc<dyn Fn(ConfEvent)>;
 
-
     fn tone_rgba(c: &PopupColors, t: Option<StatusTone>) -> Rgba {
         match t {
             Some(StatusTone::Success) => c.tone(PopupTone::Success),
@@ -565,10 +564,6 @@ mod appkit {
             if let Some(s) = s {
                 s(ev);
             }
-        }
-
-        pub fn search_field(&self) -> Retained<NSTextField> {
-            self.ivars().search.clone()
         }
 
         /// The draggable divider on the sidebar's right edge.

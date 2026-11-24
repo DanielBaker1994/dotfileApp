@@ -36,12 +36,8 @@ pub const KEY_KEYPAD_ENTER: u16 = 76;
 // `[ai]` config (`aiSetting` / `aiNumber` / `aiEnabled`)
 // ---------------------------------------------------------------------------
 
-pub const DEFAULT_WIDTH: f64 = 900.0;
-pub const DEFAULT_HEIGHT: f64 = 600.0;
 pub const DEFAULT_SPLIT: f64 = 0.5;
 pub const DEFAULT_SIDEBAR_WIDTH: f64 = 210.0;
-pub const DEFAULT_CONTEXT_TOKENS: i64 = 4096;
-pub const DEFAULT_COPY_TOAST: &str = "Copied to clipboard";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AIConfig {
@@ -67,40 +63,6 @@ impl AIConfig {
             .unwrap_or(fallback)
     }
 
-    pub fn bool(&self, key: &str, fallback: bool) -> bool {
-        self.entries
-            .get(key)
-            .and_then(|v| crate::views::confluence::tri_value(v))
-            .unwrap_or(fallback)
-    }
-
-    /// `aiEnabled()` — `tri(...) == true`.
-    pub fn enabled(&self) -> bool {
-        self.entries
-            .get("enabled")
-            .and_then(|v| crate::views::confluence::tri_value(v))
-            == Some(true)
-    }
-
-    pub fn in_palette(&self) -> bool {
-        self.entries
-            .get("in-palette")
-            .and_then(|v| crate::views::confluence::tri_value(v))
-            .unwrap_or(true)
-    }
-
-    pub fn label(&self) -> String {
-        self.string("label", "AI View")
-    }
-
-    pub fn width(&self) -> f64 {
-        self.number("width", DEFAULT_WIDTH)
-    }
-
-    pub fn height(&self) -> f64 {
-        self.number("height", DEFAULT_HEIGHT)
-    }
-
     pub fn split(&self) -> f64 {
         let f = self.number("split", DEFAULT_SPLIT);
         if !(0.2..=0.8).contains(&f) {
@@ -122,23 +84,6 @@ impl AIConfig {
     pub fn rules_dir(&self) -> String {
         let fallback = format!("{}/rules", user_dir());
         expand_tilde(&self.string("rules-dir", &fallback))
-    }
-
-    pub fn context_tokens(&self) -> i64 {
-        self.number("context-tokens", DEFAULT_CONTEXT_TOKENS as f64) as i64
-    }
-
-    pub fn font(&self) -> String {
-        self.string("font", "")
-    }
-
-    /// `max(9, min(32, aiNumber("font-size", 14)))`.
-    pub fn font_size(&self) -> f64 {
-        self.number("font-size", 14.0).clamp(9.0, 32.0)
-    }
-
-    pub fn copy_toast(&self) -> String {
-        self.string("copy-toast", DEFAULT_COPY_TOAST)
     }
 
     /// Parse the `[ai]` section out of a full `commands.toml` text (pure — the
@@ -195,23 +140,6 @@ pub fn rule_files(dir: &str) -> Vec<String> {
         .collect();
     names.sort_by(|a, b| localized_standard_cmp(a, b));
     names
-}
-
-/// Build [`AIRule`]s from a directory listing alone — each rule's name is its
-/// file stem. This deliberately skips `AIRule::load`, which would call the
-/// python helper (`ai.rule_load`); the rules list must build with no helper
-/// running.
-pub fn rules_from_dir(dir: &str) -> Vec<AIRule> {
-    rule_files(dir)
-        .iter()
-        .map(|n| {
-            let stem = Path::new(n)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| n.clone());
-            AIRule::new(&format!("{dir}/{n}"), &stem)
-        })
-        .collect()
 }
 
 /// `String.localizedStandardCompare` — Finder's case-insensitive natural sort
@@ -891,17 +819,6 @@ pub struct KeyInputLike {
 }
 
 impl KeyInputLike {
-    pub fn new(key_code: u16) -> Self {
-        KeyInputLike { key_code, cmd: false, ctrl: false }
-    }
-    pub fn cmd(mut self) -> Self {
-        self.cmd = true;
-        self
-    }
-    pub fn ctrl(mut self) -> Self {
-        self.ctrl = true;
-        self
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,12 +1260,6 @@ impl AIWindowModel {
         self.process.is_some() || self.run.running
     }
 
-    /// `showPreview()` — load `RichText.html` into the right-pane `WKWebView`.
-    pub fn show_preview(&mut self) {
-        #[cfg(target_os = "macos")]
-        self.show_preview_macos();
-    }
-
     #[cfg(target_os = "macos")]
     fn show_preview_macos(&mut self) {
         use objc2::MainThreadMarker;
@@ -1390,70 +1301,6 @@ impl AIWindowModel {
         }
     }
 
-    /// `handleKey(_:)`.
-    pub fn handle_key(&mut self, key: KeyInputLike) -> AIKeyAction {
-        let action = route_ai_key(key, self.run.running);
-        match action {
-            AIKeyAction::Stop => self.cancel_run(),
-            AIKeyAction::Run => {
-                let input = self.input.clone();
-                let _ = self.begin_run(&input);
-            }
-            _ => {}
-        }
-        action
-    }
-
-    /// `do:ai:*` hooks.
-    pub fn handle_do(&mut self, action: &str) -> Option<Value> {
-        let rest = action.strip_prefix("ai:")?;
-        match rest {
-            "state" => Some(self.test_state()),
-            "run" => {
-                let input = self.input.clone();
-                let _ = self.begin_run(&input);
-                Some(self.test_state())
-            }
-            "stop" => {
-                self.cancel_run();
-                Some(self.test_state())
-            }
-            "apply-modes" => {
-                self.apply_rule_modes();
-                Some(self.test_state())
-            }
-            _ => {
-                if let Some(v) = rest.strip_prefix("select:") {
-                    if let Ok(i) = v.parse::<usize>() {
-                        self.select(i);
-                        return Some(self.test_state());
-                    }
-                    return None;
-                }
-                if let Some(v) = rest.strip_prefix("mode:") {
-                    self.set_mode(match v {
-                        "diff" => PaneMode::Diff,
-                        "markdown" => PaneMode::Markdown,
-                        "outlook" => PaneMode::Outlook,
-                        "webex" => PaneMode::Webex,
-                        _ => return None,
-                    });
-                    return Some(self.test_state());
-                }
-                if let Some(v) = rest.strip_prefix("input:") {
-                    self.input = v.to_string();
-                    return Some(self.test_state());
-                }
-                if let Some(v) = rest.strip_prefix("answer:") {
-                    self.run.answer = v.to_string();
-                    self.run.answer_input = self.input.clone();
-                    return Some(self.test_state());
-                }
-                None
-            }
-        }
-    }
-
     pub fn test_state(&self) -> Value {
         json!({
             "shown": self.shown.get(),
@@ -1488,126 +1335,6 @@ impl AIWindowModel {
         })
     }
 
-    /// The X7 frontend contract: everything the view draws, read from existing
-    /// model fields only. Pure and callable with no live view (macOS still
-    /// builds the full snapshot in `host::ai_snapshot`, untouched). The command
-    /// line, token count and pending input live in view state (`AIState`), and
-    /// the sidebar's mtime meta is formatted with `NSDateFormatter` on macOS, so
-    /// those fields default / stay empty here.
-    pub fn snapshot(&self) -> crate::views::ai_view::AISnapshot {
-        use crate::ui::sidebar::{SidebarModel, SidebarRow};
-        use crate::views::ai_view::{AISnapshot, StepState};
-        let rule = self.rule();
-        let rows: Vec<SidebarRow> = self
-            .rules
-            .iter()
-            .map(|r| SidebarRow {
-                title: r.name.clone(),
-                icon: "wand.and.stars".into(),
-                tip: r.path.replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1),
-                ..Default::default()
-            })
-            .collect();
-        let chain = rule.map(AIRule::chain).unwrap_or_default();
-        let running = self.is_running();
-        let steps = chain
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let st = if running {
-                    if i < self.run.step_index {
-                        StepState::Done
-                    } else if i == self.run.step_index {
-                        StepState::Running
-                    } else {
-                        StepState::Waiting
-                    }
-                } else if !self.run.answer.is_empty() {
-                    if self.status_tone == AITone::Danger {
-                        StepState::Failed
-                    } else {
-                        StepState::Done
-                    }
-                } else {
-                    StepState::Waiting
-                };
-                (r.name.clone(), st)
-            })
-            .collect();
-        let modes = self.modes();
-        let output = if self.mode.target().is_some() {
-            None
-        } else if running {
-            Some(vec![(0, self.run.so_far().0)])
-        } else if self.run.answer.is_empty() {
-            Some(Vec::new())
-        } else if self.run.answer_diff && self.mode == PaneMode::Diff {
-            Some(diff_ops(&self.run.answer_input, &self.run.answer))
-        } else {
-            Some(vec![(0, self.run.answer.clone())])
-        };
-        AISnapshot {
-            sidebar: SidebarModel {
-                section_title: "Rules".into(),
-                rows,
-                selected: (!self.rules.is_empty()).then_some(self.selected),
-                add_button: true,
-                ..Default::default()
-            },
-            command: rule.map(|r| r.file()).unwrap_or_default(),
-            warning: rule.map(|r| r.warnings.join(", ")).unwrap_or_default(),
-            steps,
-            right_title: if rule.is_some_and(|r| r.diff()) { "Changes".into() } else { "Answer".into() },
-            mode: modes.iter().position(|x| *x == self.mode).unwrap_or(0),
-            modes: modes.iter().map(|x| x.title()).collect(),
-            copy_title: self.copy_title(),
-            placeholder: rule
-                .map(|r| if r.placeholder.is_empty() { "Type or paste your text \u{2014} Ctrl+Enter runs it".to_string() } else { r.placeholder.clone() })
-                .unwrap_or_default(),
-            output,
-            running,
-            status: self.status.clone(),
-            tone: match self.status_tone {
-                AITone::Dim => 0,
-                AITone::Success => 1,
-                AITone::Warning => 2,
-                AITone::Danger => 3,
-            },
-            tokens: String::new(),
-            tokens_warn: false,
-            set_input: None,
-        }
-    }
-
-    /// The X7 frontend contract: apply a user event by calling the same model
-    /// methods the AppKit dispatch (`host::ai_event`) calls today. Pure; the
-    /// rule sheet, context menu, pasteboard and `fm` command line stay with the
-    /// frontend.
-    pub fn handle(&mut self, ev: crate::views::ai_view::AIEvent) {
-        use crate::ui::sidebar::SidebarEvent;
-        use crate::views::ai_view::AIEvent as E;
-        match ev {
-            E::Sidebar(SidebarEvent::Select(i)) => self.select(i),
-            E::InputChanged(text) => self.input = text,
-            E::Mode(i) => {
-                if let Some(m) = self.modes().get(i).copied() {
-                    self.set_mode(m);
-                }
-            }
-            E::Run => {
-                if self.is_running() {
-                    self.cancel_run();
-                } else {
-                    let text = self.input.clone();
-                    let _ = self.start_run(&text);
-                    self.render_answer();
-                }
-            }
-            // Sidebar Add / MenuRow / Rail are UI actions; Copy / CopyCommand
-            // touch the pasteboard and the command line.
-            E::Sidebar(_) | E::Copy | E::CopyCommand => {}
-        }
-    }
 }
 
 impl Drop for AIWindowModel {
@@ -1646,21 +1373,6 @@ impl SlotMember for AIWindowModel {
         AIWindowModel::test_state(self)
     }
 }
-
-/// Register the AI palette entry (only while enabled, mirroring
-/// `paletteCommands()`).
-pub fn register(reg: &mut Registry, enabled: bool, listed: bool) {
-    if enabled && listed {
-        reg.add_palette(PaletteCommand::new("ai", "AI View", "views"));
-    }
-}
-
-/// `AIWindow` — host the right-pane `WKWebView` preview.
-pub fn build_window() {
-    #[cfg(target_os = "macos")]
-    macos::build_ai_window();
-}
-
 
 /// The right pane's `WKWebView` (Markdown / Outlook / Webex) and its link
 /// handling.
@@ -1779,26 +1491,6 @@ pub mod macos {
             = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    /// `AIWindow`'s AppKit build: a themed card hosting the preview pane (the
-    /// input / rule sidebar are separate surfaces).
-    pub fn build_ai_window() {
-        use crate::ui::card::{create_card_window, CardConfig};
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let preview = AIPreview::new(mtm);
-        let config = CardConfig {
-            title: "AI".to_string(),
-            min_size: (480.0, 360.0),
-            ..Default::default()
-        };
-        let window = create_card_window(mtm, &config);
-        window.setContentView(Some(&preview.web));
-        window.center();
-        window.makeKeyAndOrderFront(None);
-        LIVE_WINDOWS.with(|w| w.borrow_mut().push((window, preview)));
-    }
-
 }
 
 fn now_secs() -> f64 {
@@ -1834,54 +1526,6 @@ mod tests {
     }
 
     #[test]
-    fn config_parse_defaults_and_overrides() {
-        let empty = AIConfig::default();
-        assert_eq!(empty.width(), DEFAULT_WIDTH);
-        assert_eq!(empty.height(), DEFAULT_HEIGHT);
-        assert_eq!(empty.split(), DEFAULT_SPLIT);
-        assert_eq!(empty.sidebar_width(), DEFAULT_SIDEBAR_WIDTH);
-        assert_eq!(empty.fm_bin(), "/usr/bin/fm");
-        assert_eq!(empty.context_tokens(), DEFAULT_CONTEXT_TOKENS);
-        assert_eq!(empty.copy_toast(), DEFAULT_COPY_TOAST);
-        assert_eq!(empty.font_size(), 14.0);
-        assert!(!empty.enabled());
-        assert!(empty.in_palette());
-        assert_eq!(empty.label(), "AI View");
-
-        let c = AIConfig::from_entries(entries(&[
-            ("enabled", "yes"),
-            ("width", "1234"),
-            ("height", "777"),
-            ("split", "0.6"),
-            ("sidebar-width", "180"),
-            ("fm-bin", "/usr/local/bin/fm"),
-            ("context-tokens", "8192"),
-            ("font", "Menlo"),
-            ("font-size", "40"),
-            ("copy-toast", "Copied {}"),
-            ("label", "Writer"),
-            ("in-palette", "false"),
-        ]));
-        assert!(c.enabled());
-        assert_eq!(c.width(), 1234.0);
-        assert_eq!(c.height(), 777.0);
-        assert_eq!(c.split(), 0.6);
-        assert_eq!(c.sidebar_width(), 180.0);
-        assert_eq!(c.fm_bin(), "/usr/local/bin/fm");
-        assert_eq!(c.context_tokens(), 8192);
-        assert_eq!(c.font(), "Menlo");
-        assert_eq!(c.font_size(), 32.0, "clamped to 32");
-        assert_eq!(c.copy_toast(), "Copied {}");
-        assert_eq!(c.label(), "Writer");
-        assert!(!c.in_palette());
-
-        // a garbage split resets to the default.
-        assert_eq!(AIConfig::from_entries(entries(&[("split", "5")])).split(), DEFAULT_SPLIT);
-        // a tiny font clamps up to 9.
-        assert_eq!(AIConfig::from_entries(entries(&[("font-size", "2")])).font_size(), 9.0);
-    }
-
-    #[test]
     fn rule_files_sorted_and_filtered() {
         let dir = temp_dir("rules");
         for name in ["b.md", "A.md", "a10.md", "a2.md", ".hidden.md", "c.txt", "notes.MD"] {
@@ -1913,62 +1557,6 @@ mod tests {
         assert_eq!(files, vec!["a.md", "b.md"]);
         assert_eq!(m.where_text(), "a", "the name falls back to the file stem");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn config_from_config_text_reads_only_the_ai_section() {
-        if !helper_ready() {
-            return;
-        }
-        let text = "[app]\nfoo = 1\n\n[ai]\nenabled = yes\nwidth = 800\nrules-dir = ~/myrules\n\n[files]\nwidth = 12\n";
-        let c = AIConfig::from_config_text(text);
-        assert!(c.enabled(), "yes is truthy");
-        assert_eq!(c.width(), 800.0);
-        assert_eq!(c.string("rules-dir", ""), "~/myrules");
-        assert_eq!(c.height(), DEFAULT_HEIGHT, "keys from other sections don't leak");
-    }
-
-    #[test]
-    fn rules_from_dir_uses_file_stems_without_the_helper() {
-        let dir = temp_dir("rules-from-dir");
-        std::fs::write(dir.join("b.md"), "").unwrap();
-        std::fs::write(dir.join("a.md"), "").unwrap();
-        std::fs::write(dir.join("skip.txt"), "").unwrap();
-        let rules = rules_from_dir(dir.to_str().unwrap());
-        let files: Vec<String> = rules.iter().map(|r| r.file()).collect();
-        assert_eq!(files, vec!["a.md", "b.md"], "listing order, only .md");
-        let names: Vec<String> = rules.iter().map(|r| r.name.clone()).collect();
-        assert_eq!(names, vec!["a", "b"], "no `ai.rule_load` → the file stem");
-        assert_eq!(rules[0].path, format!("{}/a.md", dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn key_routing_matches_handle_key() {
-        // Esc stops a run, else asks the host to escapeAtTop.
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_ESC), true), AIKeyAction::Stop);
-        assert_eq!(
-            route_ai_key(KeyInputLike::new(KEY_ESC), false),
-            AIKeyAction::EscapeAtTop
-        );
-        // Ctrl/Cmd+Return and keypad Enter run.
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_RETURN).ctrl(), false), AIKeyAction::Run);
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_RETURN).cmd(), false), AIKeyAction::Run);
-        assert_eq!(
-            route_ai_key(KeyInputLike::new(KEY_KEYPAD_ENTER).cmd(), false),
-            AIKeyAction::Run
-        );
-        // a bare Return is not consumed.
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_RETURN), false), AIKeyAction::Pass);
-        // Cmd+L focuses the input; Cmd+/ shows the shortcuts card.
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_L).cmd(), false), AIKeyAction::FocusInput);
-        assert_eq!(
-            route_ai_key(KeyInputLike::new(KEY_SLASH).cmd(), false),
-            AIKeyAction::ShowShortcuts
-        );
-        // plain L / / are not consumed.
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_L), false), AIKeyAction::Pass);
-        assert_eq!(route_ai_key(KeyInputLike::new(KEY_SLASH), false), AIKeyAction::Pass);
     }
 
     #[test]
@@ -2146,35 +1734,6 @@ mod tests {
     }
 
     #[test]
-    fn do_hooks_and_state() {
-        let mut m = AIWindowModel::default();
-        m.rules = vec![AIRule::new("/tmp/r.md", "r")];
-        m.apply_rule_modes();
-        let st = m.handle_do("ai:state").unwrap();
-        assert_eq!(st["where"], "r");
-        assert_eq!(st["mode"], "markdown", "plain rule defaults to Markdown");
-
-        m.handle_do("ai:mode:outlook");
-        assert_eq!(m.mode, PaneMode::Outlook);
-        assert_eq!(m.target, PasteTarget::Outlook);
-
-        m.handle_do("ai:input:hello world");
-        let st = m.handle_do("ai:run").unwrap();
-        assert_eq!(st["running"], true);
-        assert_eq!(st["input"], "hello world");
-
-        m.handle_do("ai:answer:the answer");
-        assert_eq!(m.run.answer, "the answer");
-
-        let st = m.handle_do("ai:stop").unwrap();
-        assert_eq!(st["running"], false);
-
-        assert!(m.handle_do("ai:mode:nope").is_none());
-        assert!(m.handle_do("ai:select:x").is_none());
-        assert!(m.handle_do("other:thing").is_none());
-    }
-
-    #[test]
     fn preview_page_wraps_fragment_for_target() {
         let o = preview_page("<p>hi</p>", PasteTarget::Outlook);
         assert!(o.contains("OUTLOOK \u{00b7} AS IT WILL PASTE"));
@@ -2339,30 +1898,4 @@ mod tests {
         assert!(pending.is_empty());
     }
 
-    #[test]
-    fn ai_handle_contract() {
-        use crate::views::ai_view::AIEvent;
-        let mut m = AIWindowModel::default();
-        let before = m.snapshot();
-
-        // InputChanged writes the model's input.
-        m.handle(AIEvent::InputChanged("draft".into()));
-        assert_eq!(m.input, "draft");
-
-        // Mode moves the segmented control.
-        assert!(m.modes().len() > 2);
-        m.handle(AIEvent::Mode(2));
-        let after = m.snapshot();
-        assert_ne!(after, before, "Mode changed the snapshot");
-        assert_eq!(after.mode, 2);
-
-        // Copy is the frontend's pasteboard job; the model is untouched.
-        let copied = m.snapshot();
-        m.handle(AIEvent::Copy);
-        assert_eq!(m.snapshot(), copied);
-
-        // Run with no rules fails validation without spawning anything.
-        m.handle(AIEvent::Run);
-        assert!(!m.is_running());
-    }
 }
