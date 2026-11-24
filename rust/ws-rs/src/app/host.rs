@@ -1729,10 +1729,10 @@ impl SwitcherController {
         json!({ "view": view, (format!("{kind}Width")): width, "min": min, "max": max })
     }
 
-    /// The `do:` verbs that carry an argument after a `prefix:`. `None` = no
-    /// prefix matched (fall through to the exact-name verbs); `Some(reply)` =
-    /// handled, with the reply `do_host_action` returns.
-    fn do_prefixed_action(&self, action: &str) -> Option<Option<Value>> {
+    /// `do:` verbs that carry an argument after a `prefix:` (views, panes, widths,
+    /// rails, screenshot). `None` = no prefix matched (try the next group);
+    /// `Some(reply)` = handled, with the reply `do_host_action` returns.
+    fn do_view_prefix_action(&self, action: &str) -> Option<Option<Value>> {
         if let Some(v) = action.strip_prefix("open:").or_else(|| action.strip_prefix("show:")) {
             
 return Some(match SlotView::from_raw(v) {
@@ -1902,6 +1902,12 @@ return Some(Some(json!({ "error": format!("rail: <on|off|toggle>, got '{m}'") })
 return Some(Some(json!({ "view": view, "rail": on })))
 ;
         }
+        None
+    }
+
+    /// Second half of the prefixed `do:` verbs: input / key / paths / header style /
+    /// esc-hides / hide-on-focus-loss / tool panels. Same contract as `do_view_prefix_action`.
+    fn do_ui_prefix_action(&self, action: &str) -> Option<Option<Value>> {
         if let Some(rest) = action.strip_prefix("input:") {
             
 return Some(match crate::app::synth_input::parse(rest) {
@@ -2102,7 +2108,7 @@ return Some(None)
         if self.is_headless() && needs_window(action) {
             return Some(json!({ "error": format!("{action} unavailable in headless mode") }));
         }
-        if let Some(reply) = self.do_prefixed_action(action) {
+        if let Some(reply) = self.do_view_prefix_action(action).or_else(|| self.do_ui_prefix_action(action)) {
             return reply;
         }
 
