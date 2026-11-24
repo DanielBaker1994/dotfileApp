@@ -29,8 +29,8 @@ ws — kitchen-sink entry point
   ws home app|repo|stack|status     the ~/.config/kitchen-sink home
   ws help                           this
 
-Old names (bin/make-dmg.sh, bin/fix-permissions.sh,
-bin/fake-confluence.sh, bin/fake-jira-tab.sh) are thin shims.
+bin/fake-confluence.sh is a thin shim around `ws fake confluence`
+(bundled into the app).
 EOF
 }
 

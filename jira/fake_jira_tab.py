@@ -6,7 +6,7 @@
 Same row shape as the poller's tabs (<outDir>/all.json): key, title,
 description, status, assignee, reporter, priority, labels, project, release,
 releaseLabel, releaseStatus, releaseDate, updated. Seeded, so the same N gives
-the same file. Used by bin/fake-jira-tab.sh to reproduce a big work-sized list
+the same file. Used by `ws fake jira` to reproduce a big work-sized list
 (typing lag in the filter box) without a Jira server. Needs `faker`.
 """
 import argparse

@@ -99,8 +99,7 @@ menu, or pass a command. `./ws help` lists everything.
 ./ws dmg                 # the distributable disk image
 ```
 
-The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
-`bin/fake-*.sh`) still work as thin shims around the same functions.
+`bin/fake-confluence.sh` is a thin shim around `ws fake confluence`.
 
 - `rust/ws-rs` — the app (`kitchen-sink` binary): `app/` host, socket, CLI
   client, config, Python helper client; `ui/` popup framework + shared
