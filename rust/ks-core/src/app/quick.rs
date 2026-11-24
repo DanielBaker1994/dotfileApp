@@ -364,6 +364,11 @@ mod appkit {
         }
     }
 
+    /// [`with_ui`] returning a value (`None` before the UI exists).
+    fn with_ui_ret<R>(f: impl FnOnce(&Rc<QuickUi>) -> R) -> Option<R> {
+        QUICK.with(|q| q.borrow().clone()).map(|ui| f(&ui))
+    }
+
     /// Defer `f` to a fresh main-queue turn (out of an AppKit callback).
     fn defer(f: impl FnOnce(&Rc<QuickUi>) + Send + 'static) {
         crate::platform::run_on_main(move || with_ui(f));
@@ -892,6 +897,101 @@ mod appkit {
             self.publish_state();
         }
 
+        /// Inline rename of `row` (or the selected row): the same editor the main app's
+        /// Files view uses, sized to the name column.
+        fn files_begin_rename(&self, row: Option<usize>) {
+            let Some(Some((i, path, is_dir, list))) = self.files_surface(|b| {
+                b.begin_rename(row);
+                let (path, _) = b.rename.clone()?;
+                let i = b.list.selection;
+                let is_dir = b.list.rows.get(i).is_some_and(|e| e.is_dir);
+                Some((i, path, is_dir, b.view.as_ref()?.list_view()))
+            }) else {
+                return;
+            };
+            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let r = list.row_rect(i);
+            let x = r.x + 30.0 + list.row_indent(i);
+            let rect = NSRect::new(
+                NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()),
+                NSSize::new((r.width * 0.55 - x).max(r.width - x - 280.0).max(160.0), 22.0),
+            );
+            let wl = objc2::rc::Weak::from_retained(&list);
+            crate::ui::inline_rename::begin(
+                &list,
+                rect,
+                &name,
+                is_dir,
+                crate::ui::theme::section_colors("files"),
+                12.0,
+                Box::new(move |text| {
+                    let old_path = path.clone();
+                    let msg = with_ui_ret(|ui| {
+                        ui.files_surface(|b| match &text {
+                            Some(t) => {
+                                if let Some((p, _)) = b.rename.clone() {
+                                    b.rename = Some((p, t.clone()));
+                                }
+                                let m = b.commit_rename();
+                                if m.as_deref().is_some_and(|m| m.starts_with("renamed")) {
+                                    // Keep the Recent engine's entry on the new name.
+                                    let dir = std::path::Path::new(&old_path).parent().map(|d| d.to_path_buf()).unwrap_or_default();
+                                    let dst = dir.join(t.trim()).to_string_lossy().into_owned();
+                                    crate::views::files::with_recent(|r| r.own_change(Some(&old_path), &dst));
+                                    b.reload();
+                                    b.select_path(&dst);
+                                }
+                                m
+                            }
+                            None => {
+                                b.cancel_rename();
+                                None
+                            }
+                        })
+                    });
+                    if let Some(Some(Some(m))) = msg {
+                        crate::ui::toast::show(&m, "pencil");
+                    }
+                    // Back to the list, unless the rename ended in another text field.
+                    if let Some(l) = wl.load() {
+                        if let Some(w) = l.window() {
+                            let typing = w
+                                .firstResponder()
+                                .is_some_and(|r| objc2_foundation::NSObjectProtocol::isKindOfClass(&*r, <objc2_app_kit::NSTextView as objc2::ClassType>::class()));
+                            if !typing {
+                                w.makeFirstResponder(Some(&l));
+                            }
+                        }
+                    }
+                }),
+            );
+        }
+
+        fn files_trash(&self, path: String) {
+            let o = crate::engines::file_ops::FileOps::trash(&[path], crate::engines::file_ops::FileOps::shared());
+            match o.failed {
+                Some(m) => crate::ui::toast::show(&m, "exclamationmark.triangle.fill"),
+                None => crate::ui::toast::show("Moved to the Trash", "trash"),
+            }
+            self.files_surface(|b| b.reload());
+        }
+
+        fn files_compress(&self, path: String) {
+            crate::ui::toast::show("Compressing\u{2026}", "doc.zipper");
+            std::thread::spawn(move || {
+                let res = crate::views::files::compress_paths(&[path]);
+                crate::platform::run_on_main(move || {
+                    match res {
+                        Ok(zip) => {
+                            let name = std::path::Path::new(&zip).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            crate::ui::toast::show(&format!("Created {name}"), "checkmark.circle.fill");
+                        }
+                        Err(m) => crate::ui::toast::show(&m, "exclamationmark.triangle.fill"),
+                    }
+                });
+            });
+        }
+
         /// Esc: clear a live filter first; on an empty one go back to the palette.
         fn files_escape(&self) {
             let had_query = self
@@ -960,10 +1060,13 @@ mod appkit {
                         })
                         .flatten();
                     let Some(path) = path else { return };
-                    let (po, pr, pcf, pcp) = (path.clone(), path.clone(), path.clone(), path.clone());
-                    // Rename / compress / trash need the main app's Files backends.
+                    let (po, pr, pcf, pcp, pco, ptr) =
+                        (path.clone(), path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
                     let actions = crate::views::files::FileMenuActions {
                         open: Some(Box::new(move || with_ui(|ui| ui.files_open(&po)))),
+                        rename: Some(Box::new(move || with_ui(|ui| ui.files_begin_rename(Some(row))))),
+                        compress: Some(Box::new(move || with_ui(|ui| ui.files_compress(pco)))),
+                        trash: Some(Box::new(move || with_ui(|ui| ui.files_trash(ptr)))),
                         reveal: Some(Box::new(move || crate::app::hooks::reveal_in_files(&[pr]))),
                         copy_file: Some(Box::new(move || {
                             copy_files_toast(&[pcf]);
@@ -1020,6 +1123,9 @@ mod appkit {
             let plain = !cmd && !ctrl && !shift && !opt;
             match event.keyCode() {
                 popup::KEY_ESC if plain => self.files_escape(),
+                // F2 / Cmd+R: rename the selected row.
+                120 if plain => self.files_begin_rename(None),
+                15 if cmd && !ctrl && !opt && !shift => self.files_begin_rename(None),
                 popup::KEY_RETURN | 76 if plain => self.files_open_selected(),
                 popup::KEY_DOWN if plain => {
                     self.files_surface(|b| b.list.move_selection(1));
