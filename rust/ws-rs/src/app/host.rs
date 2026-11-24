@@ -1729,23 +1729,24 @@ impl SwitcherController {
         json!({ "view": view, (format!("{kind}Width")): width, "min": min, "max": max })
     }
 
-    fn do_host_action(&self, action: &str) -> Option<Value> {
-        // Window-only verbs have no effect without a window; refuse rather than
-        // write a `shown`/visible flag into state with nothing behind it.
-        if self.is_headless() && needs_window(action) {
-            return Some(json!({ "error": format!("{action} unavailable in headless mode") }));
-        }
+    /// The `do:` verbs that carry an argument after a `prefix:`. `None` = no
+    /// prefix matched (fall through to the exact-name verbs); `Some(reply)` =
+    /// handled, with the reply `do_host_action` returns.
+    fn do_prefixed_action(&self, action: &str) -> Option<Option<Value>> {
         if let Some(v) = action.strip_prefix("open:").or_else(|| action.strip_prefix("show:")) {
-            return match SlotView::from_raw(v) {
+            
+return Some(match SlotView::from_raw(v) {
                 Some(view) => {
                     self.open(view);
                     None
                 }
                 None => Some(json!({ "error": "unknown view" })),
-            };
+            })
+;
         }
         if let Some(v) = action.strip_prefix("rebuild-card:") {
-            return match SlotView::from_raw(v) {
+            
+return Some(match SlotView::from_raw(v) {
                 Some(view)
                     if matches!(
                         view,
@@ -1755,7 +1756,8 @@ impl SwitcherController {
                     None
                 }
                 _ => Some(json!({ "error": "not a card view" })),
-            };
+            })
+;
         }
         if let Some(rest) = action.strip_prefix("screenshot:") {
             // `screenshot:*` creates real overlay/pin windows: hop to main like
@@ -1766,66 +1768,86 @@ impl SwitcherController {
                     move || crate::views::screenshot::controller_test_do(&controller, &rest),
                     std::time::Duration::from_secs(2),
                 );
-                return Some(match result {
+                
+return Some(Some(match result {
                     Some(v) => v,
                     None => json!({ "error": "timeout" }),
-                });
+                }))
+;
             }
         }
         if let Some(v) = action.strip_prefix("pane:") {
             let mut inner = self.inner.lock().unwrap();
             if inner.current.is_none() {
-                return Some(json!({ "error": "no view shown" }));
+                
+return Some(Some(json!({ "error": "no view shown" })))
+;
             }
             if inner.main_queue.is_some() {
                 // The daemon: real AppKit focus, on main before the reply.
                 if let Some(id) = v.strip_prefix("focus:") {
                     inner.ui_push(UiCommand::PaneFocus(id.to_string()));
-                    return None;
+                    
+return Some(None)
+;
                 }
                 if let Some(dir) = v.chars().next().and_then(PaneDir::from_raw) {
                     inner.ui_push(UiCommand::PaneMove(dir));
-                    return None;
+                    
+return Some(None)
+;
                 }
-                return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
+                
+return Some(Some(json!({ "error": "pane:h|j|k|l|focus:ID" })))
+;
             }
             let panes = inner.panel_list();
             if let Some(id) = v.strip_prefix("focus:") {
                 let found = inner.pane_nav.focus(id, &panes);
-                return if found {
+                
+return Some(if found {
                     None
                 } else {
                     Some(json!({ "error": "no such pane" }))
-                };
+                })
+;
             }
             if let Some(c) = v.chars().next() {
                 if let Some(dir) = PaneDir::from_raw(c) {
                     inner.pane_nav.move_dir(dir, &panes);
-                    return None;
+                    
+return Some(None)
+;
                 }
             }
-            return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
+            
+return Some(Some(json!({ "error": "pane:h|j|k|l|focus:ID" })))
+;
         }
         if let Some(rest) = action.strip_prefix("sidebar-width:") {
-            return Some(self.do_pane_width(
+            
+return Some(Some(self.do_pane_width(
                 "sidebar",
                 rest,
                 |v| SIDEBAR_VIEWS.contains(&v),
                 pane_sidebar_bounds,
                 pane_sidebar_width,
                 |v, w| SlotView::from_raw(v).map(|sv| UiCommand::SidebarWidth(sv, w)),
-            ));
+            )))
+;
         }
         if let Some(rest) = action.strip_prefix("inspector-width:") {
             // The right-pane mirror of `sidebar-width`: only Jira has one.
-            return Some(self.do_pane_width(
+            
+return Some(Some(self.do_pane_width(
                 "inspector",
                 rest,
                 |v| v == "jira",
                 |_| pane_inspector_bounds(),
                 |_| pane_inspector_width(),
                 |_v, w| Some(UiCommand::InspectorWidth(w)),
-            ));
+            )))
+;
         }
         if let Some(rest) = action.strip_prefix("jira-inspector:") {
             // Show / hide / toggle the Jira ticket panel (same as ⌘I; the
@@ -1834,10 +1856,14 @@ impl SwitcherController {
                 "show" => Some(true),
                 "hide" => Some(false),
                 "toggle" => None,
-                _ => return Some(json!({ "error": format!("jira-inspector: <show|hide|toggle>, got '{rest}'") })),
+                _ => 
+return Some(Some(json!({ "error": format!("jira-inspector: <show|hide|toggle>, got '{rest}'") })))
+,
             };
             self.inner.lock().unwrap().ui_push(UiCommand::JiraInspector(on));
-            return None;
+            
+return Some(None)
+;
         }
         if let Some(rest) = action.strip_prefix("rail:") {
             // `do:rail:<view>[:on|off|toggle]` — the Ctrl+B B command:
@@ -1850,67 +1876,91 @@ impl SwitcherController {
                 None => (rest, None),
             };
             if !RAIL_VIEWS.contains(&view) {
-                return Some(json!({ "error": format!("no sidebar rail on '{view}'") }));
+                
+return Some(Some(json!({ "error": format!("no sidebar rail on '{view}'") })))
+;
             }
             let cur = crate::ui::sidebar::rail_default(view);
             let Some(m) = val else {
-                return Some(json!({ "view": view, "rail": cur }));
+                
+return Some(Some(json!({ "view": view, "rail": cur })))
+;
             };
             let on = match m {
                 "on" => true,
                 "off" => false,
                 "toggle" => !cur,
-                m => return Some(json!({ "error": format!("rail: <on|off|toggle>, got '{m}'") })),
+                m => 
+return Some(Some(json!({ "error": format!("rail: <on|off|toggle>, got '{m}'") })))
+,
             };
             crate::ui::sidebar::set_rail_default(view, on);
             if let Some(sv) = SlotView::from_raw(view) {
                 self.inner.lock().unwrap().ui_push(UiCommand::SidebarRail(sv, on));
             }
-            return Some(json!({ "view": view, "rail": on }));
+            
+return Some(Some(json!({ "view": view, "rail": on })))
+;
         }
         if let Some(rest) = action.strip_prefix("input:") {
-            return match crate::app::synth_input::parse(rest) {
+            
+return Some(match crate::app::synth_input::parse(rest) {
                 Ok(cmd) => {
                     self.inner.lock().unwrap().ui_push(UiCommand::Input(cmd));
                     None
                 }
                 Err(e) => Some(json!({ "error": e })),
-            };
+            })
+;
         }
         if let Some(spec) = action.strip_prefix("key:") {
             if spec.is_empty() {
-                return Some(json!({ "error": "key:<spec>" }));
+                
+return Some(Some(json!({ "error": "key:<spec>" })))
+;
             }
             self.inner.lock().unwrap().last_key = spec.to_string();
-            return None;
+            
+return Some(None)
+;
         }
         if let Some(rest) = action.strip_prefix("paths:") {
             let mut inner = self.inner.lock().unwrap();
             match rest {
                 "show" => {
                     if !inner.paths_enabled {
-                        return Some(json!({ "error": "[paths] not enabled" }));
+                        
+return Some(Some(json!({ "error": "[paths] not enabled" })))
+;
                     }
                     if let Some(o) = inner.paths_state.as_object_mut() {
                         o.insert("shown".into(), json!(true));
                     }
                     inner.ui_push(UiCommand::Paths(PathsCmd::Show));
-                    return None;
+                    
+return Some(None)
+;
                 }
                 "hide" => {
                     if let Some(o) = inner.paths_state.as_object_mut() {
                         o.insert("shown".into(), json!(false));
                     }
                     inner.ui_push(UiCommand::Paths(PathsCmd::Hide));
-                    return None;
+                    
+return Some(None)
+;
                 }
                 "return" => {
                     inner.ui_push(UiCommand::Paths(PathsCmd::Return));
-                    return None;
+                    
+return Some(None)
+;
                 }
                 sel if sel.starts_with("select:") => {
                     let Ok(n) = sel[7..].parse::<usize>() else {
-                        return Some(json!({ "error": "paths:select:N" }));
+                        
+return Some(Some(json!({ "error": "paths:select:N" })))
+;
                     };
                     let rows = inner
                         .paths_state
@@ -1918,25 +1968,33 @@ impl SwitcherController {
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len);
                     if n >= rows {
-                        return Some(json!({ "error": "paths:select: out of range" }));
+                        
+return Some(Some(json!({ "error": "paths:select: out of range" })))
+;
                     }
                     if let Some(o) = inner.paths_state.as_object_mut() {
                         o.insert("selection".into(), json!(n));
                     }
                     inner.ui_push(UiCommand::Paths(PathsCmd::Select(n)));
-                    return None;
+                    
+return Some(None)
+;
                 }
-                _ => return Some(json!({ "error": "paths:show|hide|return|select:N" })),
+                _ => 
+return Some(Some(json!({ "error": "paths:show|hide|return|select:N" })))
+,
             }
         }
         if let Some(style) = action.strip_prefix("header-style:") {
-            return match HeaderStyle::from_raw(style) {
+            
+return Some(match HeaderStyle::from_raw(style) {
                 Some(s) => {
                     self.inner.lock().unwrap().settings.header_style = s;
                     None
                 }
                 None => Some(json!({ "error": "unknown header style" })),
-            };
+            })
+;
         } else if let Some(rest) = action.strip_prefix("esc-hides:") {
             let parts: Vec<&str> = rest.split(':').collect();
             if parts.len() == 2 {
@@ -1948,32 +2006,42 @@ impl SwitcherController {
                                 .unwrap()
                                 .esc_sections
                                 .insert(v.raw().to_string(), i64::from(parts[1] == "on"));
-                            return None;
+                            
+return Some(None)
+;
                         }
                         _ => {}
                     }
                 }
             }
-            return Some(json!({ "error": "esc-hides:VIEW:on|off" }));
+            
+return Some(Some(json!({ "error": "esc-hides:VIEW:on|off" })))
+;
         } else if let Some(rest) = action.strip_prefix("hide-on-focus-loss:") {
             // In-memory flip (tests); the status menu persists it.
-            return match rest {
+            
+return Some(match rest {
                 "on" | "off" => {
                     self.set_hide_on_focus_loss(rest == "on", false);
                     None
                 }
                 _ => Some(json!({ "error": "hide-on-focus-loss:on|off" })),
-            };
+            })
+;
         } else if let Some(name) = action.strip_prefix("tool:") {
             if name == "paths" {
                 if !self.paths_enabled() {
-                    return Some(json!({ "error": "not a tool panel: paths" }));
+                    
+return Some(Some(json!({ "error": "not a tool panel: paths" })))
+;
                 }
                 {
                     let mut inner = self.inner.lock().unwrap();
                     inner.tools.insert(name.to_string(), json!({ "shown": true }));
                 }
-                return self.do_host_action("paths:show");
+                
+return Some(self.do_host_action("paths:show"))
+;
             }
             if let Some(kind) = ToolKind::from_name(name) {
                 let mut inner = self.inner.lock().unwrap();
@@ -1981,11 +2049,15 @@ impl SwitcherController {
                     .tools
                     .insert(name.to_string(), json!({ "shown": true, "key": true }));
                 inner.ui_push(UiCommand::Tool(kind));
-                return None;
+                
+return Some(None)
+;
             }
             // Empty or unknown names are rejected instead of fabricating a
             // `tools.<name>` entry in state (F3).
-            return Some(json!({ "error": format!("not a tool panel: {name}") }));
+            
+return Some(Some(json!({ "error": format!("not a tool panel: {name}") })))
+;
         } else if let Some(name) = action.strip_prefix("tool-close:") {
             // Same set `tool:` accepts (incl. `paths`); a bogus name is an
             // error instead of a silent no-op.
@@ -1999,10 +2071,14 @@ impl SwitcherController {
                     }
                 }
                 drop(inner);
-                return self.do_host_action("paths:hide");
+                
+return Some(self.do_host_action("paths:hide"))
+;
             }
             if ToolKind::from_name(name).is_none() {
-                return Some(json!({ "error": format!("not a tool panel: {name}") }));
+                
+return Some(Some(json!({ "error": format!("not a tool panel: {name}") })))
+;
             }
             {
                 let mut inner = self.inner.lock().unwrap();
@@ -2013,7 +2089,21 @@ impl SwitcherController {
                 }
                 inner.ui_push(UiCommand::ToolClose(name.to_string()));
             }
-            return None;
+            
+return Some(None)
+;
+        }
+        None
+    }
+
+    fn do_host_action(&self, action: &str) -> Option<Value> {
+        // Window-only verbs have no effect without a window; refuse rather than
+        // write a `shown`/visible flag into state with nothing behind it.
+        if self.is_headless() && needs_window(action) {
+            return Some(json!({ "error": format!("{action} unavailable in headless mode") }));
+        }
+        if let Some(reply) = self.do_prefixed_action(action) {
+            return reply;
         }
 
         match action {
