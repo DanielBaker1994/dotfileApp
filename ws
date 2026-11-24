@@ -16,7 +16,7 @@ ws — kitchen-sink entry point
                                     .build/dist and the app bundle)
   ws dmg [--no-notarize]            build the distributable .dmg
   ws test [all|SUITE|install]
-                                    unit tests (SUITE = config, compare, …).
+                                    unit tests (SUITE = config, filter, paths, …).
                                     UI suites were deleted (owner decision)
   ws doctor [--fix]                 health check of the whole stack
   ws check [--json]                 preflight this Mac

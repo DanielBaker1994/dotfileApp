@@ -53,11 +53,6 @@ for s in borders; do
         warn "brew service $s: not started (brew services start $s)"
     fi
 done
-if fc-list 2>/dev/null | grep -i "Hack Nerd Font" >/dev/null; then
-    ok "Hack Nerd Font installed (terminal drawer glyphs)"
-else
-    warn "Hack Nerd Font not found — terminal drawer shows fallback glyphs"
-fi
 
 head_ "== aerospace =="
 NW="$(aerospace list-workspaces --all 2>/dev/null | wc -l | tr -d ' ')"

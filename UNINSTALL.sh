@@ -13,9 +13,9 @@ case "$ROOT" in *.app/Contents/Resources)
     LINK_ROOT="$(cd "$WS_HOME" 2>/dev/null && pwd -P)" ;;
 esac
 
-GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; RESET='\033[0m'
+GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; CYAN='\033[1;36m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
-warn() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
+warn() { printf "${YELLOW}  ! %s${RESET}\n" "$*"; }
 step() { printf "\n${CYAN}== %s ==${RESET}\n" "$*"; }
 
 printf "${CYAN}== Uninstalling the kitchen sink ==${RESET}\n"

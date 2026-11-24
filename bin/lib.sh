@@ -10,6 +10,19 @@ ws_warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
 ws_step() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ws_die()  { printf '\033[31mws: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# ws_python: print a python >= 3.11 (WS_PYTHON, brew, then PATH); exit 1 if none.
+# GUI/AeroSpace launchers start with a bare PATH where python3 is the CLT 3.9.
+ws_python() {
+    local c
+    for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
+        [ -n "$c" ] && [ -x "$c" ] || continue
+        if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+            printf '%s\n' "$c"; return 0
+        fi
+    done
+    return 1
+}
+
 ws_cmd_build() {
     ws_ensure_signing_identity
     if [ "${1:-}" = "--force" ]; then
@@ -397,7 +410,7 @@ ws_cmd_test() {
 # ---------------------------------------------------------------- clean -----
 # `ws clean` — stop the running app and wipe build objects so the next build
 # is done from scratch. Default wipes the cargo objects (.build/rust-target and
-# rust/target); `--all` also wipes the SwiftTerm build, .build/dist and the
+# rust/target); `--all` also wipes .build/dist and the
 # repo-root app bundle. The socket/lock files under $TMPDIR are left alone —
 # a stale ws-notes.sock is re-claimed on the next start.
 ws_cmd_clean() {
@@ -432,8 +445,6 @@ ws_cmd_clean() {
     )
     if [ "$all" = 1 ]; then
         paths+=(
-            "$WS_ROOT/.build/SwiftTerm"
-            "$WS_ROOT/.build/.termbuilt"
             "$WS_ROOT/.build/dist"
             "$WS_ROOT/$APP_NAME.app"
         )

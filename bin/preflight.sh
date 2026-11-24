@@ -205,11 +205,11 @@ if [ "$MODE" = repo ]; then
         add cargo dev warn 0 "Rust toolchain" "not installed" \
             "The app is built with cargo (INSTALL.sh installs it):  brew install rust" "term:brew install rust"
     fi
-    # swiftc still compiles the pinned SwiftTerm library + the terminal shim
+    # swiftc builds the test tools (bin/ks-input, ks-ocr, winwatch), not the app
     if command -v swiftc >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
-        add swiftc dev required 1 "Swift compiler (terminal shim)" "$(swiftc --version 2>/dev/null | head -1)"
+        add swiftc dev required 1 "Swift compiler (ks-input / ks-ocr tools)" "$(swiftc --version 2>/dev/null | head -1)"
     else
-        add swiftc dev required 0 "Swift compiler (terminal shim)" "not installed" \
+        add swiftc dev required 0 "Swift compiler (ks-input / ks-ocr tools)" "not installed" \
             "Install the command-line tools:  xcode-select --install"
     fi
     if command -v git >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then

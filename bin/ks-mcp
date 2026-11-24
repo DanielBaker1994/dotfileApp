@@ -14,17 +14,8 @@
 # a bare PATH where `python3` may be the CLT 3.9, so look further.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
-py=""
-for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
-    [ -n "$c" ] && [ -x "$c" ] || continue
-    if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-        py="$c"; break
-    fi
-done
-if [ -z "$py" ]; then
-    echo "ks-mcp: needs python 3.11 or newer (brew install python, or set WS_PYTHON)" >&2
-    exit 1
-fi
+. "$here/lib.sh"
+py="$(ws_python)" || { echo "ks-mcp: needs python 3.11 or newer (brew install python, or set WS_PYTHON)" >&2; exit 1; }
 # a __pycache__ inside the signed app bundle breaks its signature
 export PYTHONDONTWRITEBYTECODE=1
 exec "$py" -B "$here/ks-mcp.py" "$@"

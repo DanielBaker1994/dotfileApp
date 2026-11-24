@@ -115,11 +115,9 @@ strip non-mac `cfg` code). The old plans: `git show 64bbd4a^:PLAN-cross-platform
 
 ## Tooling cleanup (from the teardown handoff)
 
-- Shell DRY: one `ws_python` (Python ≥3.11 picker) in `bin/lib.sh` instead of copies in
-  `bin/ws-settings`, `bin/ks-mcp`, `bin/text-table`; `UNINSTALL.sh` `warn()` prints a red ✘;
-  dead text in `ws` (a `compare` suite mention), `bin/lib.sh` `clean --all` (SwiftTerm),
-  `bin/preflight.sh` swiftc check, `jira/jira-doctor.sh` Nerd-Font check,
-  `bin/grant-permissions.sh` microphone/speech grants.
+- `bin/grant-permissions.sh` / `bin/lib.sh` still grant microphone + speech-recognition TCC rows and
+  `Info.plist` declares both usage strings, but no Rust code uses either. Removing them touches TCC
+  grants, so it needs the owner around.
 - Needs the owner around: signing-identity and TCC.db duplication in `bin/lib.sh` /
   `grant-permissions.sh`, app-kill logic in ~7 scripts, splitting `host.rs` giants.
 - Owner decisions: keep the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`,

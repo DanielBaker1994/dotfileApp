@@ -17,10 +17,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 PYLIB="${TEXT_TABLE_PYLIB:-$ROOT/pylib}"
-PY="${WS_PYTHON:-}"
-for c in "$PY" /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
-    [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
-done
+. "$DIR/lib.sh"
+PY="$(ws_python)" || { echo "text-table: needs python 3.11 or newer (brew install python, or set WS_PYTHON)" >&2; exit 1; }
 export PYTHONPATH="$PYLIB" PYTHONDONTWRITEBYTECODE=1
 
 FORMAT=outlook PRINT=0 SRC="" EXTRA=()
