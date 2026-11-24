@@ -228,6 +228,7 @@ pub fn rename_path(old_path: &str, new_name: &str) -> Result<Option<String>, Str
 
 // `PathsWindow` surface geometry (flipped, top-left origin).
 pub const PATHS_DEFAULT_WIDTH: f64 = 680.0;
+pub const PATHS_DEFAULT_HEIGHT: f64 = 300.0;
 /// `PathsWindow` grows with its rows up to this (Swift's 602 pt panel).
 pub const PATHS_MAX_HEIGHT: f64 = 602.0;
 pub const PATH_ROW_HEIGHT: f64 = 22.0;
@@ -459,6 +460,10 @@ impl PathsWindow {
         if self.shown {
             self.reload(false);
         }
+    }
+
+    pub fn set_key(&mut self, key: bool) {
+        self.key = key;
     }
 
     pub fn show(&mut self) {

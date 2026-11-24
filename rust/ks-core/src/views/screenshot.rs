@@ -3769,6 +3769,7 @@ enum ChromePress {
 pub struct ShotRecentButton;
 
 impl ShotRecentButton {
+    pub const SIZE: f64 = 28.0;
 
     /// `layoutChrome`'s recent-button origin: right of the mode pill and 3pt
     /// below its top edge (the pill starts at `top + 16`, the button at

@@ -13,7 +13,7 @@
 //! decoration wiring and sheet handling land in a later cut.
 
 use crate::app::hotkey::{eval_true_args, AeroCall, AeroIpc};
-use crate::app::registry::{nav, RectI, SlotView};
+use crate::app::registry::{nav, RectI, SlotMember, SlotView};
 use serde_json::{json, Value};
 use std::rc::Rc;
 use std::time::Instant;
@@ -65,6 +65,7 @@ mod appkit {
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
     use std::cell::{Cell, RefCell};
 
+    use crate::ui::card::CardNSWindow;
 
     use crate::ui::view_base::as_any;
 

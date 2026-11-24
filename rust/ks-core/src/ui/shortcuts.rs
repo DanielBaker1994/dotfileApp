@@ -100,6 +100,8 @@ pub fn groups_for(view: &str, entries: &[ShortcutEntry]) -> Vec<ShortcutGroup> {
     let own: &[(&str, &str)] = match view {
         "files" => &[("Files", "files")],
         "jira" => &[("Jira", "jira")],
+        "confluence" => &[("Confluence", "confluence")],
+        "ai" => &[("AI", "ai")],
         "palette" => &[("Palette", "palette")],
         "paths" => &[("Paths", "paths")],
         "screenshot" => &[("Screenshot", "screenshot")],
@@ -432,6 +434,7 @@ x = 1
         let titles: Vec<&str> = g.iter().map(|g| g.0.as_str()).collect();
         assert_eq!(titles, ["Files", "Sidebars", "Everywhere"]);
         assert_eq!(groups_for("jira", &e)[0].0, "Jira");
+        assert_eq!(groups_for("ai", &e)[0].0, "AI");
         assert!(groups_for("compare", &e).iter().all(|g| g.0 != "Text Compare"), "the compare view is gone");
     }
 
@@ -489,7 +492,7 @@ x = 1
             return;
         }
         let e = parse_entries(&text);
-        for v in ["all", "files", "jira", "paths", "screenshot", "palette", "sidebar"] {
+        for v in ["all", "files", "jira", "confluence", "ai", "paths", "screenshot", "palette", "sidebar"] {
             assert!(!e.iter().any(|x| x.view == "notes"), "the notes view is gone");
             assert!(!e.iter().any(|x| x.view.starts_with("compare")), "the compare view is gone");
             assert!(e.iter().any(|x| x.view == v), "no [shortcuts] rows for {v}");

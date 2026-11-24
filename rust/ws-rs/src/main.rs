@@ -172,7 +172,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
 
         app::logging::ws_log(&format!("kitchen-sink (rust) daemon: socket {sock}"));
         // Check the config paths at launch: log what is read, and warn on
-        // screen if an old ~/.config/jira is back.
+        // screen if an old ~/.config/jira or ~/.config/confluence is back.
         let (lines, warn) = app::config::startup_config_report();
         for l in &lines {
             app::logging::ws_log(l);
@@ -335,7 +335,7 @@ fn config_check(argv: &[String]) -> i32 {
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
-    println!("usage: kitchen-sink [headless|quick|window|files|jira|ping|");
+    println!("usage: kitchen-sink [headless|quick|window|files|jira|confluence|ai|terminal|ping|");
     println!("                     config-check SECTION KEY VALUE | config-check --file PATH | config-schema]");
 }
 

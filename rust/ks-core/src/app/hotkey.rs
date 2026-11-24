@@ -11,6 +11,8 @@ pub const HOTKEY_MODES: &[&str] = &[
     "window",
     "jira",
     "files",
+    "confluence",
+    "ai",
 ];
 
 pub fn is_hotkey_mode(name: &str) -> bool {
@@ -308,6 +310,8 @@ mod tests {
                 "window",
                 "jira",
                 "files",
+                "confluence",
+                "ai",
             ]
         );
         assert!(is_hotkey_mode("window"));

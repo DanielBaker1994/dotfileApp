@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::engines::file_ops::FileOps;
+use crate::engines::file_ops::{FileOps, Outcome, UndoStack};
 use crate::engines::list_filter::localized_standard_compare;
 use crate::ui::chrome::Rect;
 
@@ -1217,6 +1217,10 @@ pub fn duplicate_toast(copies: &[String]) -> String {
     }
 }
 
+pub fn trash_paths(paths: &[String], undo: &UndoStack) -> Outcome {
+    FileOps::trash(paths, undo)
+}
+
 // ---------------------------------------------------------- shared context menu
 
 /// One row action of [`file_context_menu`]. Surfaces wire these to their own
@@ -1326,6 +1330,9 @@ pub fn copy_contents_entry(path: &str) -> Option<crate::ui::menu_kit::MenuEntry>
 
 // ------------------------------------------------------------------ appkit layout
 
+// `PopupFileBrowser` surface geometry (flipped, top-left origin).
+pub const BROWSER_DEFAULT_WIDTH: f64 = 760.0;
+pub const BROWSER_DEFAULT_HEIGHT: f64 = 460.0;
 pub const BROWSER_ROW_HEIGHT: f64 = 22.0;
 pub const BROWSER_TOOLBAR_HEIGHT: f64 = 30.0;
 pub const BROWSER_PREVIEW_WIDTH: f64 = 220.0;

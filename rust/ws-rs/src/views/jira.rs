@@ -12,6 +12,7 @@
 use crate::app::config::ListColumn;
 use crate::app::python_helper::PythonHelper;
 use crate::app::registry::Registry;
+use crate::ui::card::CardConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};

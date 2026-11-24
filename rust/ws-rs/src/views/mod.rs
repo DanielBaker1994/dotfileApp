@@ -4,6 +4,10 @@
 // not every re-export is used by every target.
 #![allow(unused_imports)]
 
+pub mod ai;
+pub mod ai_view;
+pub mod confluence;
+pub mod confluence_view;
 pub use ks_core::views::file_popup;
 pub use ks_core::views::files;
 pub use ks_core::views::files_view;

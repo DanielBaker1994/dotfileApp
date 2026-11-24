@@ -1,7 +1,7 @@
-//! Shared registries + the `SlotView` contract.
+//! Shared registries + the `SlotView`/`SlotMember` contract.
 //!
 //! This is the frozen hub every view plugs into (mirrors `SharedWindow.swift`'s
-//! `SlotView` and `PopupChrome.navIcons`). View modules register
+//! `SlotView`/`SlotMember` and `PopupChrome.navIcons`). View modules register
 //! here instead of editing the host, which keeps parallel work conflict-free.
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,9 @@ pub mod nav {
     pub const HOME: i64 = 62;
     pub const BACK: i64 = 63;
     pub const FILES: i64 = 64;
-    pub const ALL: [i64; 4] = [JIRA, HOME, BACK, FILES];
+    pub const CONFLUENCE: i64 = 65;
+    pub const AI: i64 = 66;
+    pub const ALL: [i64; 6] = [JIRA, HOME, BACK, FILES, CONFLUENCE, AI];
 
     pub fn is_nav_id(id: i64) -> bool {
         ALL.contains(&id)
@@ -29,6 +31,8 @@ pub enum SlotView {
     Releases,
     Config,
     Output,
+    Confluence,
+    Ai,
 }
 
 impl SlotView {
@@ -40,6 +44,8 @@ impl SlotView {
             SlotView::Releases => "releases",
             SlotView::Config => "config",
             SlotView::Output => "output",
+            SlotView::Confluence => "confluence",
+            SlotView::Ai => "ai",
         }
     }
 
@@ -51,6 +57,8 @@ impl SlotView {
             "releases" => SlotView::Releases,
             "config" => SlotView::Config,
             "output" => SlotView::Output,
+            "confluence" => SlotView::Confluence,
+            "ai" => SlotView::Ai,
             _ => return None,
         })
     }
@@ -73,6 +81,8 @@ impl SlotView {
     pub fn nav_id(self) -> i64 {
         match self {
             SlotView::Files => nav::FILES,
+            SlotView::Confluence => nav::CONFLUENCE,
+            SlotView::Ai => nav::AI,
             v if v.is_jira() => nav::JIRA,
             _ => nav::FILES,
         }
@@ -83,6 +93,8 @@ impl SlotView {
         Some(match self {
             SlotView::Files => "files-icon",
             SlotView::Jira => "jira-icon",
+            SlotView::Confluence => "confluence-icon",
+            SlotView::Ai => "ai-icon",
             _ => return None,
         })
     }
@@ -90,6 +102,8 @@ impl SlotView {
     pub fn title(self) -> &'static str {
         match self {
             SlotView::Files => "Files",
+            SlotView::Confluence => "Confluence",
+            SlotView::Ai => "AI",
             v if v.is_jira() => "Jira",
             _ => "Output",
         }
@@ -111,6 +125,27 @@ impl RectI {
     }
 }
 
+/// Mirrors `protocol SlotMember` in `SharedWindow.swift`.
+pub trait SlotMember {
+    fn view(&self) -> SlotView;
+    fn shown(&self) -> bool;
+    fn is_key(&self) -> bool {
+        false
+    }
+    fn frame(&self) -> Option<RectI> {
+        None
+    }
+    fn base_frame(&self) -> Option<RectI> {
+        self.frame()
+    }
+    /// Show/unpark the view. `frame` = an explicit frame, else its base frame.
+    fn slot_show(&self, frame: Option<RectI>);
+    /// Park (detach + order out) the view.
+    fn slot_park(&self, stop_voice: bool);
+    fn test_state(&self) -> Value {
+        Value::Null
+    }
+}
 
 /// One entry in the header view switcher (mirrors `PopupChrome.navIcons`).
 #[derive(Clone, Debug, Serialize)]
@@ -228,6 +263,8 @@ mod tests {
     fn nav_ids_match_swift() {
         assert_eq!(SlotView::Jira.nav_id(), 61);
         assert_eq!(SlotView::Files.nav_id(), 64);
+        assert_eq!(SlotView::Confluence.nav_id(), 65);
+        assert_eq!(SlotView::Ai.nav_id(), 66);
         assert_eq!(SlotView::Detail.nav_id(), 61);
         assert_eq!(SlotView::Releases.nav_id(), 61);
         assert_eq!(SlotView::Config.nav_id(), 61);
@@ -261,6 +298,8 @@ mod tests {
             SlotView::Releases,
             SlotView::Config,
             SlotView::Output,
+            SlotView::Confluence,
+            SlotView::Ai,
         ] {
             assert_eq!(SlotView::from_raw(v.raw()), Some(v));
         }
@@ -273,6 +312,8 @@ mod tests {
     fn icon_keys_match_settings() {
         assert_eq!(SlotView::Files.icon_key(), Some("files-icon"));
         assert_eq!(SlotView::Jira.icon_key(), Some("jira-icon"));
+        assert_eq!(SlotView::Confluence.icon_key(), Some("confluence-icon"));
+        assert_eq!(SlotView::Ai.icon_key(), Some("ai-icon"));
         assert_eq!(SlotView::Detail.icon_key(), None);
     }
 
@@ -281,11 +322,12 @@ mod tests {
         let mut r = Registry::new();
         r.set_nav(vec![
             (SlotView::Files, "Files".into(), None),
-            (SlotView::Jira, "Jira".into(), Some("jira.png".into())),
+            (SlotView::Ai, "AI".into(), Some("ai.png".into())),
+            (SlotView::Jira, "Jira".into(), None),
         ]);
-        assert_eq!(r.nav_icons().len(), 2);
+        assert_eq!(r.nav_icons().len(), 3);
         assert_eq!(r.nav_on_id_for(SlotView::Detail), Some(61));
-        assert_eq!(r.nav_on_id_for(SlotView::Jira), Some(61));
+        assert_eq!(r.nav_on_id_for(SlotView::Ai), Some(66));
 
         r.add_palette(PaletteCommand::new("ai", "AI", "views"));
         r.add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
