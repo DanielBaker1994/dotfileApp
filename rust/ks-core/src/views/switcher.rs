@@ -1243,15 +1243,41 @@ mod macos {
 
     // -- the `show` command palette panel -----------------------------------
 
-    /// Narrow, Raycast-like: one list, no side panes.
-    pub const PALETTE_WIDTH: f64 = 440.0;
+    /// Floor for the fitted width (the filter field needs some room to type).
+    pub const PALETTE_MIN_WIDTH: f64 = 220.0;
+    /// Ceiling for the fitted width.
+    pub const PALETTE_MAX_WIDTH: f64 = 560.0;
+
+    /// The palette is only as wide as its widest row (unfiltered, so it does not
+    /// jitter while typing) plus the row's own padding: a command is its label;
+    /// a workspace is the id chip + its app icons + unread.
+    pub fn palette_width(model: &PaletteModel) -> f64 {
+        use crate::ui::style::{self, Weight};
+        let cmd_font = style::system_font(13.0, Weight::Semibold);
+        let unread_font = style::system_font(10.5, Weight::Semibold);
+        let mut widest: f64 = 0.0;
+        for (_, label) in &model.commands {
+            // 8 outer + 14 inset ... 8 right inset + 8 outer.
+            widest = widest.max(style::text_size(label, &cmd_font).0.ceil() + 8.0 + 14.0 + 8.0 + 14.0);
+        }
+        for ws in &model.workspaces {
+            let mut names: Vec<&str> = Vec::new();
+            for a in &ws.apps {
+                if !names.contains(&a.name.as_str()) {
+                    names.push(&a.name);
+                }
+            }
+            let icons = names.len().min(6) as f64 * 26.0;
+            let unread = if ws.unread.is_empty() { 0.0 } else { style::text_size(&ws.unread, &unread_font).0.ceil() + 8.0 };
+            widest = widest.max(8.0 + 10.0 + 22.0 + 12.0 + icons + unread + 10.0 + 8.0);
+        }
+        widest.clamp(PALETTE_MIN_WIDTH, PALETTE_MAX_WIDTH)
+    }
 
     /// The palette's own row cap (the shared `MAX_ROWS` is the view
     /// switcher's).
     pub const PALETTE_MAX_ROWS: usize = 20;
 
-    /// Shown while the filter is empty (was blank: an unlabeled box).
-    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "Search commands and windows";
 
     pub struct PaletteHandlerIvars {
         pub model: RefCell<PaletteModel>,
@@ -1354,11 +1380,12 @@ mod macos {
             };
             self.ivars().rows_view.set_count(n, sel);
             let h = crate::ui::list_panel::panel_height(n, ROW_HEIGHT, PALETTE_MAX_ROWS);
+            let w = palette_width(&self.ivars().model.borrow());
             let panel = &self.ivars().panel;
             let f = panel.frame();
             let top = f.origin.y + f.size.height;
             panel.setFrame_display(
-                NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(PALETTE_WIDTH, h)),
+                NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(w, h)),
                 true,
             );
         }
@@ -1651,7 +1678,7 @@ mod macos {
             }
             if let Some(panel) = &self.window {
                 let count = self.model.rows().len();
-                let (w, h) = (PALETTE_WIDTH, crate::ui::list_panel::panel_height(count, ROW_HEIGHT, PALETTE_MAX_ROWS));
+                let (w, h) = (palette_width(&self.model), crate::ui::list_panel::panel_height(count, ROW_HEIGHT, PALETTE_MAX_ROWS));
                 panel.setContentSize(NSSize::new(w, h));
                 if let Some(host) = host {
                     let (x, y) = panel_origin(host, (w, h));
@@ -1673,11 +1700,12 @@ mod macos {
             use crate::ui::popup::PopupConfig;
 
             let colors = crate::ui::theme::PopupThemeDefaults::colors();
-            let list = ListPanel::new(mtm, colors, PALETTE_WIDTH, ROW_HEIGHT, PALETTE_SEARCH_PLACEHOLDER);
+            let pw = palette_width(&self.model);
+            let list = ListPanel::new(mtm, colors, pw, ROW_HEIGHT, "");
             let h = list.height(self.model.rows().len(), PALETTE_MAX_ROWS);
             let config = PopupConfig {
                 name: "palette".to_string(),
-                frame: crate::ui::popup::CardFrame { x: 0.0, y: 0.0, width: PALETTE_WIDTH, height: h },
+                frame: crate::ui::popup::CardFrame { x: 0.0, y: 0.0, width: pw, height: h },
                 tool_panel: true,
                 floating: true,
                 ..PopupConfig::default()

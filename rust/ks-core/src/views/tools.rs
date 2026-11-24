@@ -1643,7 +1643,8 @@ impl ToolPanel {
                 // The pasted text stays invisible; the hint reports it.
                 text.setTextColor(Some(&objc2_app_kit::NSColor::clearColor()));
                 text.setInsertionPointColor(Some(&colors.dim.to_nscolor()));
-                text.setTextContainerInset(NSSize::new(6.0, 6.0));
+                // Caret x = inset + line padding (5): 3 puts it exactly where the hint's text starts.
+                text.setTextContainerInset(NSSize::new(3.0, 6.0));
                 text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(pw, 28.0)));
                 // An empty text view otherwise shrinks to zero height and
                 // a click on the cell hits nothing (never focusing it).
