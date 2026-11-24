@@ -18,7 +18,7 @@ enable-normalization-opposite-orientation-for-nested-containers = true
 
 accordion-padding = 30
 
-default-root-container-layout = 'tiles'
+default-root-container-layout = 'accordion'
 
 default-root-container-orientation = 'auto'
 
@@ -51,8 +51,8 @@ on-window-detected = [
 { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
-  { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['layout v_accordion', 'move-node-to-workspace 9'] },
-{ if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] },
+  { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['layout v_accordion', 'move-node-to-workspace W'] },
+{ if = "test %{app-bundle-id} ~= 'citrix' || test %{app-name} ~= '[Cc]itrix'", run = ['move-node-to-workspace 9'] },
 { if = 'test %{app-bundle-id} = com.spotify.client', run = ['move-node-to-workspace W'] }
 ]
 
