@@ -4904,24 +4904,38 @@ mod daemon_ui {
             true
         }
 
-        fn route_key_event(&self, event: &NSEvent) -> bool {
+        /// The overlays that own the keyboard ahead of normal routing (Ctrl+W,
+        /// text find, inline rename, pickers, Quick Look, `/` bar, Cmd+K card,
+        /// shortcuts sheet). `Some(b)` = `route_key_event` returns `b` now;
+        /// `None` = keep routing.
+        fn route_modal_key(&self, event: &NSEvent) -> Option<bool> {
             // Ctrl+W deletes the previous word in every text input (window
             // fields, panel search boxes, sheets, inline rename).
             if self.kill_word_in_text_input(event) {
-                return true;
+                
+return Some(true)
+;
             }
             if self.text_find_key(event) {
-                return true;
+                
+return Some(true)
+;
             }
             if self.cmd_edit_in_popup(event) {
-                return true;
+                
+return Some(true)
+;
             }
             if crate::ui::inline_rename::active() {
-                return false;
+                
+return Some(false)
+;
             }
             // An open multi-picker popover owns its keys (↑↓ / Return / Esc).
             if crate::ui::multi_picker::appkit::is_open() {
-                return false;
+                
+return Some(false)
+;
             }
             // Esc / Space close Quick Look even when the panel is not key.
             {
@@ -4935,31 +4949,43 @@ mod daemon_ui {
                                     st.window.makeKeyAndOrderFront(None);
                                 }
                             }
-                            return true;
+                            
+return Some(true)
+;
                         }
                     }
                 }
             }
             if self.route_overlay_key(event) {
-                return true;
+                
+return Some(true)
+;
             }
             {
                 let state = self.ivars().state.borrow();
                 let Some(st) = state.as_ref() else {
-                    return false;
+                    
+return Some(false)
+;
                 };
                 if !st.window.isVisible() || !st.window.isKeyWindow() {
-                    return false;
+                    
+return Some(false)
+;
                 }
                 if st.window.attachedSheet().is_some() {
                     // Sheets keep their own Esc / edit-key routing.
-                    return false;
+                    
+return Some(false)
+;
                 }
             }
 
             // `VimKeys.searching(in:)`: an open `/` bar owns every key.
             if self.vim_searching() {
-                return self.vim_key(event);
+                
+return Some(self.vim_key(event))
+;
             }
 
             // `actionPickerKey`: the Cmd+K card owns the keyboard while up.
@@ -4971,7 +4997,9 @@ mod daemon_ui {
                     if !p.key(event.keyCode(), m.contains(F::Control), m.contains(F::Shift)) {
                         self.ivars().action_picker.borrow_mut().take();
                     }
-                    return true;
+                    
+return Some(true)
+;
                 }
                 self.ivars().action_picker.borrow_mut().take();
             }
@@ -4988,7 +5016,16 @@ mod daemon_ui {
                         st.shortcuts = None;
                     }
                 }
-                return true;
+                
+return Some(true)
+;
+            }
+            None
+        }
+
+        fn route_key_event(&self, event: &NSEvent) -> bool {
+            if let Some(handled) = self.route_modal_key(event) {
+                return handled;
             }
             let mut key = popup::key_input_from_event(event);
             if key.key_code == popup::KEY_ESC {
