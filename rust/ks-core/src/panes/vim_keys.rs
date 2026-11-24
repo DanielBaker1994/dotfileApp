@@ -1162,7 +1162,7 @@ mod tests {
 
     /// The Files list type-ahead must see `i` / `a` before the vim engine:
     /// `EnterInsert` for those two letters used to swallow the typed character
-    /// (the filter came out one character short, APP-BUGS N1).
+    /// (the filter came out one character short, old bug N1).
     #[test]
     fn typeahead_beats_vim_insert_letters() {
         for ch in ['i', 'a'] {

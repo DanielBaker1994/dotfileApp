@@ -48,7 +48,7 @@
 //! (label + spin box + slider), active colour, Grab Color, a hue/saturation
 //! wheel, the hex field (edited through the key router) and Display grid.
 //! Layout, hit-test and value mapping live in `ShotSidePanel`. Not yet: text
-//! options (G3) and the layers list (G5) — see `PRD-screenshot-gaps.md`.
+//! options (G3) and the layers list (G5) — see BACKLOG.md "Screenshot".
 //! The save-card field is edited through the key router (no AppKit control) and
 //! the ring buttons' SF Symbols are drawn by `draw_symbol`.
 
@@ -7367,7 +7367,7 @@ impl ScreenshotController {
     /// The warm-up itself (a synchronous Vision recognition, seconds on a cold
     /// VM) deliberately runs *outside* this mutex: holding it across the OCR
     /// made `state` / `do:` replies — served on the single socket thread, which
-    /// reads this controller — wait for the whole recognition (APP-BUGS #21).
+    /// reads this controller — wait for the whole recognition (old bug #21).
     /// `None` when it already ran or off main (the AppKit bitmap context and
     /// Vision are main-thread only; `deliver_text` warm-starts lazily off main).
     pub fn prewarm_plan(&mut self) -> Option<crate::engines::screenshot_text::ShotOCRConfig> {

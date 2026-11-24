@@ -2,8 +2,8 @@
 
 Current, authoritative agent context for this repo. Docs drift; **the code is
 truth**. Grep a symbol, then read ~60 lines around it. `rust/ws-rs/src/app/host.rs`
-is ~4.5k lines — never read it whole. `AGENT_CONTEXT.md` (`CLAUDE.md` symlink) is
-a pointer here; its old deep-detail text is in git history.
+is ~4.5k lines — never read it whole. `CLAUDE.md` is a symlink to this file; the old
+deep-detail doc is in git history (`git log -- AGENT_CONTEXT.md`).
 
 ## What this is (overview)
 
@@ -48,10 +48,9 @@ in Nov 2026 by owner decision.
 4. **Git only in this repo** (`/Users/danielbaker/.config/kitchen-sink`).
    Never stage/commit/change `.git` in a `.bak` copy, backup, or duplicate.
    Verify with `git rev-parse --show-toplevel` before git commands.
-5. (Retired: the SwiftTerm rule. The embedded terminal was removed in Nov 2026.)
-6. **Transient overlays own the keyboard.** Popovers/pickers take key focus on
+5. **Transient overlays own the keyboard.** Popovers/pickers take key focus on
    open and Esc closes only them, never the window under them.
-7. **Python stays stable.** Keep the helper protocol and `pylib/` behavior
+6. **Python stays stable.** Keep the helper protocol and `pylib/` behavior
    byte-compatible; change Python only with a reason (the app depends on it).
 
 ## Build / run / test
@@ -193,17 +192,15 @@ An agent can drive and verify the app over the socket — no computer control:
   `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty. Headless
   still reports `shown: true` for panels/tools that cannot exist without AppKit (F0-7, undecided).
   Requests over 2048 bytes are refused (`request too long`), not truncated. Test status and open
-  strategy and the orchestrator playbook for DeepSeek test runs: `TESTING.md`; bug ledger: `APP-BUGS.md`. Deferrals in `BACKLOG.md` ("MCP / headless control").
+  strategy and the orchestrator playbook for DeepSeek test runs: `TESTING.md`; open bugs and leads: `BACKLOG.md` ("MCP / headless control", "Leads").
 
 ## Linux (experimental)
-
-**Current functional state of the Linux and Windows ports: `PORTS-STATUS.md` (keep it updated).**
 
 The egui/eframe frontend (the Linux/Windows UI) was removed in Nov 2026 by owner
 decision (app teardown to its minimal form). Off macOS the daemon now always runs
 **headless** (socket API only, no UI); the AppKit halves stay compiled out
-(`#[cfg(target_os = "macos")]`). Older plans (`PLAN-cross-platform.md`,
-`PORTS-STATUS.md`) describe the removed frontend; they are history.
+(`#[cfg(target_os = "macos")]`). The old port plans are in git history (`git log -- PLAN-cross-platform.md`);
+`BACKLOG.md` "Ports" holds the open decision.
 
 ```bash
 bin/linux-check.sh check          # cargo check --workspace --all-targets in Docker
@@ -314,11 +311,12 @@ root); `Tests/` (Python tests,
 
 ### Docs
 
-`rule.md` (non-negotiables), `HANDOFF-rust-port-next.md` (latest status /
-open items), `PRD-*.md`
-(`PRD-keyboard.md` = pane/vim spec; …), `BACKLOG.md`,
-`PRODUCT.md`, `DESIGN.md`, `README.md`. Older plans/PRDs name Swift files —
-map them to the Rust module of the same name.
+`rule.md` (non-negotiables), `BACKLOG.md` (every open item), `TESTING.md` (test
+strategy, flow schema, worker playbook), `PRODUCT.md`, `DESIGN.md`, `README.md`.
+The old PRDs/plans/handoffs were deleted in the Nov 2026 consolidation; read them
+with `git show 64bbd4a^:<file>` (e.g. `PRD-keyboard.md`, `PRD-screenshot.md`,
+`PRD-settings-hub.md`, `HANDOFF-rust-port-next.md`). They name Swift files — map
+them to the Rust module of the same name.
 
 ## Architecture
 
@@ -575,7 +573,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   focus, and mutate `commands.toml` (restored). Run once, not concurrently.
 - **Symbols over line numbers** — line numbers drift constantly.
 
-## Known gaps (see `HANDOFF-rust-port-next.md`)
+## Known gaps (full list: `BACKLOG.md`)
 
 - Hide-on-focus-loss: the setting is reported, but the Swift focus bridge
   (`ws-aerospace-focus` watcher) is not ported.

@@ -3,7 +3,7 @@
 #
 # Compiles the Rust workspace inside a pinned Debian image (rustc matches the
 # local 1.92 toolchain) with the checkout bind-mounted at /repo. This is Wave 0
-# of PLAN-cross-platform.md: with the macOS deps target-gated, `cargo check` on
+# of the old cross-platform plan: with the macOS deps target-gated, `cargo check` on
 # Linux surfaces exactly the AppKit leaks the later waves fix.
 #
 #   bin/linux-check.sh check          # cargo check --workspace --all-targets

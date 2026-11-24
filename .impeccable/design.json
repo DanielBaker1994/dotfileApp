@@ -400,7 +400,7 @@
       "kind": "custom",
       "refersTo": "row-cursor",
       "description": "30pt rows; cursor = highlight pill + 3pt accent edge, hover = ghost fill.",
-      "html": "<div class=\"ds-list\"><div class=\"ds-row\">AGENT_CONTEXT.md</div><div class=\"ds-row ds-row-cur\">DESIGN.md</div><div class=\"ds-row\">PRODUCT.md</div></div>",
+      "html": "<div class=\"ds-list\"><div class=\"ds-row\">AGENTS.md</div><div class=\"ds-row ds-row-cur\">DESIGN.md</div><div class=\"ds-row\">PRODUCT.md</div></div>",
       "css": ".ds-list{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;width:280px;background:#24273A;padding:4px 0}.ds-row{position:relative;height:28px;margin:1px 4px;padding:0 10px;display:flex;align-items:center;font-size:11px;color:#CAD3F5;border-radius:4px;overflow:hidden;cursor:default}.ds-row:hover{background:rgba(202,211,245,.11)}.ds-row-cur,.ds-row-cur:hover{background:#3F4A5A}.ds-row-cur::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:#C6A0F6}"
     },
     {

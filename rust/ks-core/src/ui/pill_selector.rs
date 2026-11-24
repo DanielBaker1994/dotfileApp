@@ -6,7 +6,7 @@
 //! stays hand-drawn — and `NSSegmentedControl` usage must stay at zero
 //! (`grep -rn NSSegmentedControl rust/ws-rs/src`).
 //!
-//! Extracted from `views/jira_view.rs` (PLAN-capsule-toggle-consistency §3.1)
+//! Extracted from `views/jira_view.rs`
 //! so surfaces outside Jira can reuse it. Geometry comes from
 //! [`crate::ui::style::capsule_metrics`] (chip pad 22, gutters 2, track
 //! padding 3) — the track hugs the chips (intrinsic [`TabPillView::desired_width`]),

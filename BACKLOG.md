@@ -1,260 +1,138 @@
 # Backlog
 
-Open work: bugs, features, and things to investigate. Newest first. Each
-entry says what's wrong or wanted, how to reproduce it or where it lives, and
-what a fix probably looks like.
+Every open item for the app, newest theme first. Each entry says what is wrong or
+wanted, where it lives, and what a fix probably looks like. The code is truth:
+re-check an item before working on it. Items about removed features (Notes view,
+Compare view, prose/PDF pop-out, SwiftTerm terminal drawer, the Swift build) were
+dropped in the Nov 2026 doc consolidation; `git log -- <old file>` has the history.
+
+Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
+"Bug ledger" for how to report new ones.
 
 ---
 
-## Prose pop-out: owner verification pending (2026-10-17)
+## Palette (Hyper+S) and view switcher
 
-The fixes from `PLAN-prose-popout.md` §4 (scoped will-close observer, NSApp
-ordering, export-latch hardening, `prose.log` stderr, Aerospace `*.md`
-floating rule) are landed but the interactive half could not run: the session
-was locked and "AX sees no windows while the session is locked". Repro the
-§4 "Owner manual pass" once unlocked: right-click rows in a pop-out, PDF
-under `[notes] pdf-path`, child survives menu dismissal, cross-screen drag
-sticks (`aerospace list-windows` → `layout floating`). If the PDF row still
-fails in the child, the `prose …` lines in `daemon.log` + `prose.log` pinpoint
-the stage — the fallback design is Step E: route export through the daemon via
-a new `do:prose-pdf:<path>` hook and have the child's menu row only send the
-socket line and toast locally.
+- **No "No results" row.** A filter that matches nothing collapses the panel to the
+  search box. Fix: draw one disabled row (and make `accept()` a no-op on it) in
+  `ks-core/src/views/switcher.rs`.
+- **Workspace badges read as part of the command rows.** The right pane (workspace id
+  chips + app icons) lines up with the command rows, so a badge looks like it belongs to
+  the row beside it. By design (two panes, Tab switches) but unlabeled. Fix: a faint
+  column header or a stronger divider.
 
----
+## Shortcuts and key routing
 
-## UI test pass (2026-10-12) — open items
+- **`Cmd+K` action picker and the `Cmd+/` shortcuts sheet** are not built; keys are
+  recorded and ignored. Wanted per view: open with, reveal, copy path, copy file; Jira
+  and Confluence open-in-browser.
+- **Palette key grammar is duplicated** between `ks-core/src/app/quick.rs` (~925-1010) and
+  `ws-rs/src/app/host.rs` `route_overlay_key`. Fold into one `palette_key()` in
+  `views/switcher.rs`; needs real-key testing (see `AGENTS.md`, ks-input).
+- **Missing Files keys** (check each against the code first): `Cmd+O` open selection,
+  `Cmd+[` / `Cmd+]` history, `Cmd+Shift+.` hidden files, Shift+arrows range extend, Tab
+  path completion, Space Quick Look. Jira: `Cmd+F` live search (`views/jira_search_bar.rs`
+  is the start), `Cmd+I` issue panel. Confluence: `Cmd+F` find in page, back/forward.
+  `Cmd+,` should open Settings.
+- **Vim search highlight** (`hlsearch`): list rows are ported (files, Jira, Confluence);
+  web targets (`CSS.highlights`) are not.
+- **Hide-on-focus-loss**: the setting is reported, but the old `ws-aerospace-focus`
+  watcher bridge is not ported. AeroSpace re-show differs from the Swift version
+  ("no jump back" in the focus suite). Ask the owner before touching either.
+- **Window menu** opens no dropdown (S3, report MB-WINDOW-01). `app/menu.rs` builds
+  Minimize / Zoom / Bring All to Front; not confirmable under ks-drive (clicks are
+  window-relative). Re-check by hand.
+- **Window-resize shortcuts are untestable under AeroSpace**: the window is tiled, so
+  Ctrl+Shift+HJKL / Cmd+Opt+± snap back. Verify with `aerospace layout floating`, or
+  document that they only apply when floating.
 
-Full write-up, repros and the fixed list: `UI-TEST-FINDINGS.md`.
+## Jira / Confluence / AI
 
-### Terminal drawer has no right-click menu (rule 2)
-Right-clicking the notes terminal drawer does nothing. `rule.md` §2 wants copy
-file / copy absolute path / open in notes / reveal in Files for a path under the
-cursor. No terminal menu exists in the Rust port (`MenuEntry` menus exist for
-paths / files / notes tree / compare only). Fix: a context-menu hook in the
-SwiftTerm shim (`rust/swiftterm-shim`) that resolves the clicked word to a path,
-then reuse `reveal_in_files` / `copy_text_to_pasteboard` from `host.rs`.
+- **Jira setup window** (`ui/jira_setup.rs`): Test Connection, Copy curl and Save & Enable
+  are not verified live. Do it in an isolated daemon with every Jira env override
+  (`JIRA_CONFIG_FILE`, `JIRA_TEAM_JSON`, `JIRA_CACHE_DIR`, `JIRA_CONFIG_JSON`) against
+  `jira/fake_jira.py` on :8766; Save & Enable touches the real LaunchAgent plist. Its
+  header text may clip at the third line.
+- **Jira Group By menu** and saving fitted column widths (`columnsResized` →
+  `jira_config.py --set-columns`) are not ported.
+- **Jira direct spawns may ignore `WS_PYTHON`**: `app/jira_poll.rs` tries brew pythons
+  before `WS_PYTHON`. Align the discovery order (the helper and Confluence already
+  prefer `WS_PYTHON`).
+- **`do:board:*` has no handler** ("unhandled action"); Jira registers a palette row only.
+  Register a Jira `test_do` for the board verbs. Route-around: the jira CLI
+  (`--board-*`, `--pin-*`, `--import-filters`).
+- **`do:ai:*` / `do:confluence:*`**: verify they dispatch; if the namespaces are not
+  registered, wire `views/ai.rs` / `views/confluence.rs` into `register_views`.
+- **Files listing does not watch the disk.**
+- **Theme menu extras**: live preview on hover, Custom Color…, Transparency ▸,
+  per-view card theme menu; Jira list text zoom toasts.
 
-### Terminal drawer: top border clips the first row; no resize handle
-The drawer's top border overlaps its first text row, and dragging its top edge
-does nothing (height is fixed at `drawerInset` 200). Fix: inset the terminal
-view by the border width; add a drag handle (or document the keyboard route).
+## Screenshot (Hyper+X)
 
-### Palette: no "No results" row
-A filter that matches nothing collapses the panel to the search box with no
-message. Fix: draw one disabled row (and make `accept()` a no-op on it) in
-`views/switcher.rs`.
+- Side panel exists (size, colour, grab, wheel, hex, display grid). Still missing: **text
+  options** (Flameshot G3) and the **layers list** (G5).
+- The overlay's **recent button** (`ShotRecentButton`) is not drawn; `Cmd+R` works.
+- **Recents grid has no state field or verb**: `state.screenshot` carries `modePill`
+  only. Add a `screenshot:recents*` verb plus a state field if an agent should drive it.
+- A unit test writes 1–7 byte junk `shot-*.png` files into the real
+  `~/.cache/kitchen-sink/screenshots` (blank cells in the grid). Find the `record_png`
+  caller in tests and point it at a temp dir.
+- Non-goals and the full Flameshot comparison: `git show 64bbd4a^:PRD-screenshot-gaps.md`.
 
-### Palette: workspace badges read as part of the command rows
-The right pane (workspace id chips + app icons) lines up with the command rows,
-so a badge looks like it belongs to the row beside it (worse when filtered).
-By design (two panes, Tab switches) but unlabeled. Fix: a faint column header
-or a stronger divider.
+## Settings hub (`ws-settings`)
 
-### Notes polish
-- nvim gutter: two-digit line numbers touch the pane's left border.
-- Sidebar right-click menu opens with "Open in Notes" pre-highlighted.
-
-### Window-resize shortcuts are untestable under AeroSpace
-This app's window is tiled (`layout tiling` in `config/aerospace/aerospace.toml`),
-so AeroSpace snaps Ctrl+Shift+HJKL / Cmd+Opt+± resizes back. Verify them with
-`aerospace layout floating` on the window, or document that they only apply when
-the window floats.
-
----
+v1 (read: `keys` / `settings` / `get` / `export`, picker, Hyper+/, `doctor`) shipped.
+Later: double-tap-modifier trigger, a GUI front end if the TUI falls short, making the
+app's own keys configurable from `[shortcuts]` (real remapping), quiz mode. Old spec:
+`git show 64bbd4a^:PRD-settings-hub.md`.
 
 ## MCP / headless control
 
-### Full MCP catalog deferred — thin v1 shipped (`bin/ks-mcp`)
-v1 exposes `ks_state` / `ks_do` / `ks_raw` (allow-listed raw verbs) only. The
-expensive, drift-prone part was left out on purpose — the 150-method
-`ks_helper` registry, `ks_jira`, `ks_confluence`, `ks_notify`, `ks_settings`,
-`ks_launch`/`ks_reload`/`ks_restart`; agents shell out to those CLIs today.
-Also deferred: the L1 sandbox + L2 data suites (`Tests/test_ks_mcp_sandbox.py`,
-`Tests/test_ks_mcp_data.py`) and modern MCP protocol support (`protocol: auto`,
-`2026-07-28`). Locked by `bin/ks-mcp.py` + `Tests/test_ks_mcp.py` (`./ws test mcp`).
+- **Full MCP catalog deferred** — thin v1 shipped (`bin/ks-mcp`: `ks_state` / `ks_do` /
+  `ks_raw`). Left out on purpose: the 150-method `ks_helper` registry, `ks_jira`,
+  `ks_confluence`, `ks_notify`, `ks_settings`, `ks_launch`/`ks_reload`/`ks_restart`, the L1
+  sandbox + L2 data suites, modern MCP protocol (`protocol: auto`, `2026-07-28`).
+- **Wave-2 leads not fixed**: `ks_do` advertises `board:<sub>` but it always errors;
+  `tool-close:<unknown>` and `key:<garbage>` succeed silently; `back` goes home, not to
+  the previous view; no `show` to pair `hide`; no state schema / verb-list tool; Windows
+  `Reply::peer_closed` is a stub.
+- **Key-only surfaces have no headless entry**: `do:key:SPEC` records `last_key` only, so
+  Cmd+K pickers, find bars and right-click menus cannot be driven headless.
+- **Known failing tests** (not regressions): `bin/linux-check.sh check` (macOS-only
+  `ui::toast::show` in `files.rs` `copy_contents_entry`);
+  `Tests/test_mcp_verbs.py::test_every_do_host_action_verb_is_in_the_table`; the flaky
+  `engines::path_shelf::tests::pure_add_merges_with_another_writers_entries_atomically`
+  under parallel runs.
 
-### MCP wave-2 leads not yet fixed (wave write-up removed 2026-10-20; `git log -- MCP-TEST-FINDINGS.md`)
-`ks_do` advertises `board:<sub>` but it always errors; `tool-close:<unknown>`, `key:<garbage>` and
-`compare:select:99999` succeed silently; `back` goes home, not to the previous view; no `show` to pair
-`hide`; no state schema / verb-list tool for agents; Windows/Linux `Reply::peer_closed` is untested
-(Windows is a stub returning false).
+## Ports (Linux / Windows)
 
-### Headless daemons never drain `pending_note_open`
-A GUI daemon drains a queued `open:<path>` when notes presents (`host.rs`); the
-headless daemon leaves it queued, so `do:open:PATH` on the sandbox is a no-op.
-Route-around: helper `fileops` / notes data. Fix: drain
-`take_pending_note_open` in the headless path.
+State: macOS is the only GUI; non-macOS builds are headless-only and the Linux check is
+already broken. Whether to drop Linux/Windows support entirely is an owner decision (if
+yes: delete `bin/linux-check.sh`, `bin/windows-check.sh`, `bin/build-linux.sh`,
+`Tests/test_linux_headless.sh`, `rust/docker/`, the `ws test linux*|windows` cases, and
+strip non-mac `cfg` code). The old plans: `git show 64bbd4a^:PLAN-cross-platform.md`,
+`PLAN-windows.md`, `PORTS-STATUS.md`.
 
-### jira `board:*` has no `do:` entry
-`do:board:*` errors ("unhandled action", `host.rs`); jira registers a palette
-row only. Route-around: the jira CLI (`--board-*`, `--pin-*`,
-`--import-filters`). Fix: register a jira `test_do` for the board verbs.
+## Tooling cleanup (from the teardown handoff)
 
-### `do:ai:*` / `do:confluence:*` are dead code
-`views/ai.rs` and `views/confluence.rs` have `register()` functions that are
-never called, so those namespaces cannot be dispatched (MCP or otherwise).
-Wire them into `register_views` or delete them.
+- Shell DRY: one `ws_python` (Python ≥3.11 picker) in `bin/lib.sh` instead of copies in
+  `bin/ws-settings`, `bin/ks-mcp`, `bin/text-table`; `UNINSTALL.sh` `warn()` prints a red ✘;
+  dead text in `ws` (a `compare` suite mention), `bin/lib.sh` `clean --all` (SwiftTerm),
+  `bin/preflight.sh` swiftc check, `jira/jira-doctor.sh` Nerd-Font check,
+  `bin/grant-permissions.sh` microphone/speech grants.
+- Needs the owner around: signing-identity and TCC.db duplication in `bin/lib.sh` /
+  `grant-permissions.sh`, app-kill logic in ~7 scripts, splitting `host.rs` giants.
+- Owner decisions: keep the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`,
+  `ks-ocr`, `Tests/run_flows.py`, `drive.py`, `haiku_run.py`, `night_run.py`)?
 
-### Screenshot recents grid has no state field or verb
-`state.screenshot` carries `modePill` but nothing for the recents grid; only
-`key:tab` touches it and `do:key:` is record-only. Add a `screenshot:recents*`
-verb plus a state field if an agent should drive it.
+## Leads
 
-### Key-only surfaces have no headless entry
-`do:key:SPEC` records `last_key` only, so Cmd+K action pickers, Cmd+/ sheets,
-find bars and right-click menus cannot be driven headless. Extend with
-per-surface `do:` verbs where needed.
+Unverified bug leads from test runs (Oct 2026). Reproduce before fixing; `Tests/night_run.py`'s
+fix phase reads the `- S<n>` bullets below (ledger-table rows with an `open` status are read
+too). Move a lead to git history once fixed and replayed.
 
-### Jira direct spawns may ignore `WS_PYTHON`
-`jira_poll.rs` tries brew pythons before `WS_PYTHON` for its direct spawns, so
-a pinned interpreter can silently not apply (the helper and confluence already
-prefer `WS_PYTHON`). Align the discovery order.
-
----
-
-## Build & tooling
-
-### Every build recompiles the whole app — make it incremental
-
-**Symptom.** A one-line change rebuilds everything and takes minutes.
-`bin/build-app.sh`'s `compile()` (:192) runs one whole-module
-`swiftc -O -swift-version 5 … "${SOURCES[@]}"` over every top-level
-`*.swift` in `$SWIFT_SOURCES_GLOB` — no object files, no incremental state.
-So editing `kitchen_sink.swift` (~553 KB), `PopupWindow.swift` (~11.7k
-lines) or `CompareWindow.swift` (~147 KB) recompiles all of them plus every
-other source. (SwiftTerm is already fine: `build_term_lib()` precompiles it
-once into `.build/SwiftTerm/libSwiftTerm.a` and only rebuilds when its
-sources or target change.)
-
-**Investigate.**
-
-1. **Per-file incremental `swiftc`.** Compile each source to
-   `.build/obj/NAME.o` with `swiftc -c`, rebuild only the `.o` whose source
-   is newer, then link the `.o` set once. Keep the Info.plist embedding
-   (`-Xlinker -sectcreate … __info_plist`) on the link step. This is the
-   smallest change that gets most of the win.
-2. **SwiftPM.** A `Package.swift` target gives incremental builds plus a
-   standard `swift build` / `swift run` / `swift test` surface for free.
-   Bigger lift: the build currently depends on a single-invocation model, a
-   static SwiftTerm lib, embedded plist and copied resources — all
-   expressible in SwiftPM but real work to port.
-3. **Split the mega-files** so an incremental build touches less and the
-   compiler has smaller units (this also helps editor/agent context).
-4. Look at `-enable-batch-mode` / build records and whether a ccache-style
-   cache is worth it for Swift.
-
-### An obvious build entry point
-
-**Done.** `./ws build` is the one obvious entry point. `./ws help` lists every
-command. The old shim scripts and a Makefile that once multiplied entry points
-have been removed.
-
----
-
-## Bugs
-
-### Focus ring doesn't resize when the notes sidebar collapses to the rail
-
-**Symptom.** With notes focused, the gray pane ring correctly outlines the
-editor. Press `Ctrl+B` then `B` (sidebar ⇄ icon rail) and the editor widens,
-but the ring keeps the old, pre-toggle width — it no longer hugs the pane.
-
-**Repro.**
-
-1. Open the notes view and click the editor so the focus ring is visible.
-2. `Ctrl+B` `B` (or `Cmd+\`) to collapse the sidebar to the icon rail.
-3. The editor grows; the ring stays where it was.
-
-**Where.** `PaneNav.swift` — `refresh(_:)` (:231) positions the ring from
-`cur.windowRect()`. It is re-run from a local `.keyDown` / `.leftMouseUp`
-monitor and from window key/resize notifications (`track(_:)`, :189).
-`PopupTabsBar.collapsed` (`PopupWindow.swift`, :1540) changes the sidebar
-width and marks `superview.needsLayout`, but the window frame does not
-change, so no `didResize` fires. The key monitor's `refreshSoon` runs on the
-next async turn — before AppKit has re-laid out the panes — so
-`windowRect()` is still the old size.
-
-**Fix sketch.** Re-run `PaneNav.shared.refreshSoon(w)` *after* the layout
-pass when the rail toggles: from `PopupTabsBar`'s `onCollapse`/`collapsed`
-didSet, or in a `layout()` hook that fires once the sidebar width has been
-applied. A generic "content-view subview frames changed" trigger would cover
-other width changes too (drag-resize, sidebar width edits).
-
-### Focused PDF window gets no border highlight
-
-**Symptom.** Focusing a PDF window with the AeroSpace focus shortcut
-(alt-h/j/k/l) gives it no highlight border, so it's impossible to see that
-it's focused. Other windows get the border fine.
-
-**Where.** The highlight is JankyBorders (`borders`), configured by
-`config/borders/bordersrc` (symlinked to `~/.config/borders/bordersrc`) and
-run as the brew service `borders`; `bin/preflight.sh` and
-`jira/jira-doctor.sh` check it's running. It borders the focused window via
-the accessibility API, so a window it can't read, or one it doesn't track as
-focused, gets nothing.
-
-**Investigate.** Why this one window is skipped:
-
-- Does the PDF window expose a normal AX window (title bar / standard
-  level)? JankyBorders can miss windows without a standard title bar, at a
-  non-normal window level, or that are panels/sheets.
-- Does AeroSpace's focus change post the AX focus event JankyBorders listens
-  for? If AeroSpace focuses the window through its own IPC without the app
-  becoming frontmost in the usual way, borders' active-window tracking may
-  not update.
-- Is the PDF opened in Preview, a Quick Look panel, or a kitchen-sink
-  floating panel (`ProseWindow` / `QLPreviewPanel`)? A `.nonactivatingPanel`
-  is invisible to AeroSpace and may be skipped by borders too.
-- Check `bordersrc` options (`hidpi=on`, `style=round`) against that window
-  type.
-
----
-
-## Features & ideas
-
-### Per-language code coloring in the markdown views
-
-**Wanted.** Fenced code blocks render, but every language is colored the
-same — Python, Swift, JSON all look alike. It should read differently per
-language.
-
-**Where.** Prose reading view + Export PDF go through pandoc
-`--syntax-highlighting=\(highlight)` (`pylib/prose_pdf.py`, default `tango`,
-`[notes] pdf-highlight`). pandoc/skylighting does emit per-language classes
-(`pre.sourceCode.LANG`), and the dotfiles `friendly_document_styling.css`
-styles code, so the shared look is most likely the one theme mapping the same
-token categories to the same colors across languages — or the CSS overriding
-the skylighting span colors with a single color.
-
-**Investigate.** Confirm whether skylighting is actually tokenizing per
-language (inspect the emitted HTML for `kw` / `st` / `co` spans per
-language) and whether `pdf-css` overrides them. Then decide: a theme with
-more distinct token colors, per-language CSS, or accept the single palette.
-
-### Copy-to-clipboard buttons for code blocks in Prose / PDF
-
-**Wanted.** A copy-to-clipboard affordance next to code items — e.g. the
-`## Log` block with a fenced `log` sample should show a copy button to its
-left, the way the dotfiles markdown generator already does it.
-
-**Where the dotfiles do it.** `~/.dotfiles/markdown_generator/copy_button.js`
-wraps every `<pre>` in a `div.codeblock` and inserts a `.copy-btn` to its
-left; `copy_button.css` lays it out (flex, button on the left, 40px wide,
-hover/copied states). The `friendly_document_styling.css` language icons
-(`pre.sourceCode.LANG::before`) are the top-left glyphs already used by the
-Prose view/PDF.
-
-**Investigate.** `ProseRender` (`NotesProse.swift`) builds the reading view's
-HTML and `prose_pdf.pandoc_args` (`pylib/prose_pdf.py`) builds the exported
-document — neither injects copy buttons today.
-
-- In the **reading view** (a `WKWebView`) a button with `navigator.clipboard`
-  works, so port `copy_button.js`/`copy_button.css` into the Prose HTML the
-  same way the dotfiles do. This is the part that can actually copy.
-- For the **exported PDF**, weasyprint runs no JS, so a live button can't
-  copy. Decide whether to (a) render the button as a static, clearly
-  non-functional marker, (b) omit it from the PDF and keep it reading-view
-  only, or (c) explore a PDF JavaScript action (unreliable across viewers) —
-  likely (b) is right, with the button injected only for the screen render.
-- Keep it config-driven: a `[notes]` key to turn the buttons on/off and to
-  point at the dotfiles' CSS/JS if we want to reuse them verbatim.
+- S3 Jira board Table mode with the issue panel: the Columns/Table pill overlaps the inspector title; every header / key cell is "…".
+- S4 Jira board header count clipped at 900 pt ("5 issue…").
+- S4 Files: after Cmd+Up the cursor sits on `..`, not on the folder you came from, so Return goes up again (Finder selects the child).
+- S4 Create File: Return with an empty name or a `/` only beeps (the button shows a message).
+- S3 config: TOML arrays are accepted as scalars (`hide-on-focus-loss = [true]` acts as `true`). By design? Rejecting needs a scalar-key schema in the shared codec. Owner decision.

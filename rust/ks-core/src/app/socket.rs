@@ -67,7 +67,7 @@ impl Reply {
         }
         // `dup` clears FD_CLOEXEC: a deferred handler that spawns a child
         // (`screenshot`, `pane-shot`) must not hand the client's connection to
-        // it, or the client never sees EOF (APP-BUGS #17).
+        // it, or the client never sees EOF (old bug #17).
         set_cloexec(d);
         Some(Reply { fd: d })
     }
@@ -323,7 +323,7 @@ fn configure_conn(fd: RawFd) {
     // The connection must not leak into any child the daemon spawns while the
     // request is served: the first `do:` after a GUI launch starts the Python
     // helper / nvim, and a child holding this fd keeps the client's connection
-    // open after the server closed it (APP-BUGS #17).
+    // open after the server closed it (old bug #17).
     set_cloexec(fd);
     // On macOS an accepted socket inherits the listener's O_NONBLOCK: a reply
     // larger than the socket buffer (~8 KB — a big `state`) then
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(line, "{\"view\":\"notes\"}");
     }
 
-    /// APP-BUGS #17: the first `do:` after a GUI launch starts the Python
+    /// old bug #17: the first `do:` after a GUI launch starts the Python
     /// helper / nvim *while the accept thread holds the connection*, so the
     /// child inherits the client's fd and the client never sees EOF after the
     /// reply. Every connection fd must be `FD_CLOEXEC`.

@@ -105,7 +105,7 @@ class Sandbox:
             time.sleep(0.5)
         else:
             raise SystemExit("sandbox never answered `state` within 20 s")
-        # Warm-up: the first do: after launch is slow (and holds its connection, APP-BUGS #17);
+        # Warm-up: the first do: after launch is slow (and holds its connection, old bug #17);
         # let it settle so the first flow doesn't race a still-starting app.
         try:
             self.send("do:open:notes", timeout=30)
@@ -145,7 +145,7 @@ class Sandbox:
             s.sendall(line.encode() + b"\n")
             # Every reply is one line. Stop at the newline: the app can keep a
             # connection open long after replying (the first do: after launch
-            # stays open ~25 s, APP-BUGS.md), so waiting for EOF would stall.
+            # stays open ~25 s, the old bug ledger), so waiting for EOF would stall.
             buf = b""
             while b"\n" not in buf:
                 chunk = s.recv(65536)

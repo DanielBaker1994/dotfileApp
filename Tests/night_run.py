@@ -33,7 +33,7 @@ RELAY = os.path.expanduser("~/.claude/skills/opencode-delegate/scripts/relay.mjs
 MODEL = "opencode-go/deepseek-v4.1-flash"
 TABLE = os.path.join(ROOT, "Tests", "app_flows.json")
 NIGHT_TABLE = os.path.join(ROOT, "Tests", "app_flows_night.json")  # synced into the VM
-OWNER_UNTRACKED = ["PLAN-prose-popout.md"]
+OWNER_UNTRACKED = []
 ENV = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ["PATH"],
            CARGO_TARGET_DIR=os.path.join(ROOT, ".build", "rust-target"))
 
@@ -101,7 +101,7 @@ COMMON_RULES = """HARD RULES
 - Never use any model other than the one you are; never edit files outside what the task names.
 - Two failed attempts at the same step: write down what you saw and move on. No retry loops.
 - Pass/fail comes from machine checks (state JSON, files on disk, exit codes, logs), never opinion.
-Read TESTING.md §3 for the exact commands, Tests/app_flows.md for the flow schema, APP-BUGS.md for
+Read TESTING.md §3 for the exact commands, the "Flow schema" section of TESTING.md for the flow format, BACKLOG.md for
 known bugs (do not re-report them).
 """
 
@@ -115,7 +115,7 @@ AUTHOR_AREAS = {
 }
 
 AUTHOR_BRIEF = """TASK: write NEW feature test flows for the kitchen-sink app: {area}.
-Repo: {root}. Read: Tests/app_flows.md (runner contract), Tests/app_flows.json (schema + the 45
+Repo: {root}. Read: TESTING.md "Flow schema" (runner contract), Tests/app_flows.json (schema + the 45
 existing flows; do not duplicate them), TESTING.md §3.0/§3.7b, PRODUCT.md, commands.toml shortcut rows,
 and the source files named above.
 
@@ -176,7 +176,7 @@ repeat k/3), {out}/summary.md. Stop the sandbox at the end.
 # ---------------------------------------------------------------- usability (report-only)
 # Usability findings are design questions, not bugs: they never reach triage or the fix
 # phase. They land in .build/night/<run>/USABILITY.md for the owner to rank and move into
-# APP-BUGS.md if wanted.
+# BACKLOG.md if wanted.
 
 UX_TASKS = {
     "files-notes": "Files and Notes: e.g. find a file by part of its name and open it; rename a file and undo it; "
@@ -211,7 +211,7 @@ UX_KEYS_BRIEF = """TASK: keyboard consistency audit of kitchen-sink, read-only (
 For these keys: Esc, Return, Tab, Shift+Tab, Cmd+W, Cmd+Z, Cmd+Shift+Z, Cmd+F, Cmd+L, Cmd+N, Cmd+S, Cmd+C,
 Cmd+V, Cmd+A, Cmd+[, Cmd+], Backspace, Space, j/k, Up/Down, F2, Cmd+R, Cmd+0, Cmd+=/Cmd+- — find what each does
 in each surface: files (list, filter field), jira, palette, view switcher, paths shelf, terminal/browser drawers, config/
-settings. Sources: commands.toml, PRODUCT.md / PRD-*.md, then the handlers (rust/ws-rs/src/app/host.rs
+settings. Sources: commands.toml, PRODUCT.md, then the handlers (rust/ws-rs/src/app/host.rs
 *_key fns, ui/popup.rs route_key/vim_pane_key, panes/vim_keys.rs, views/*.rs keyDown/handle_key).
 A finding is: the same key does clearly different things in similar contexts (e.g. Esc closes here but
 clears there), a key works in one list but not in a sibling list, a documented shortcut with no handler, a
@@ -412,10 +412,10 @@ def promote_flows() -> list[str]:
 # ---------------------------------------------------------------- phase: fix
 
 def open_bugs(max_leads: int = 4, max_total: int = 8) -> list[dict]:
-    """What the fix phase works on, read from APP-BUGS.md (nothing hard-coded):
+    """What the fix phase works on, read from BACKLOG.md (nothing hard-coded):
     every ledger row whose status starts with "open", then the S2 (then S3) bullets
     under "## Leads" (unverified: the worker must reproduce them first)."""
-    text = open(os.path.join(ROOT, "APP-BUGS.md"), encoding="utf-8").read()
+    text = open(os.path.join(ROOT, "BACKLOG.md"), encoding="utf-8").read()
     bugs = []
     for line in text.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
@@ -529,7 +529,7 @@ def usability_report(verdicts: dict) -> int:
     """USABILITY.md: walkthrough results + friction, key-consistency findings, silent keys.
     Report-only; returns the number of items."""
     lines = [f"# Usability findings, night run {RUN}", "",
-             "Report-only: nothing here was auto-fixed. Move what you want fixed into APP-BUGS.md.",
+             "Report-only: nothing here was auto-fixed. Move what you want fixed into BACKLOG.md (Leads).",
              "U1 = blocks a task, U2 = slows it a lot, U3 = annoyance.", ""]
     n = 0
     friction = []

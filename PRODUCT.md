@@ -80,8 +80,8 @@ All three of these together; no single one leads:
 
 ## Evidence on Hand
 
-- Specs: `PRD-screenshot.md`, `PRD-settings-hub.md`.
-  Agent and system docs: `AGENT_CONTEXT.md`.
+- Specs (history): `git show 64bbd4a^:PRD-screenshot.md`, `PRD-settings-hub.md`.
+  Agent and system docs: `AGENTS.md`.
 - Test suites under `Tests/` and `bin/run-tests.sh`, plus UI drivers
   `bin/ui-test.sh` and `bin/ui-test-focus.py`.
 - App icons and view icons (`[app] *-icon`, `confluence_icon.png`).

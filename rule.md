@@ -49,12 +49,7 @@ When working on this repo, ALWAYS verify you are in the real repo directory
 in a different repo or workspace. The install script is for installing the
 app — not for modifying git history anywhere.
 
-## 5. (Retired) SwiftTerm
-
-The embedded SwiftTerm terminal was removed in Nov 2026 by owner decision; there is
-no fetched checkout or patch any more. Do not bring it back without being asked.
-
-## 6. Transient overlays own the keyboard, and Esc closes only them
+## 5. Transient overlays own the keyboard, and Esc closes only them
 
 Every popover / picker / dropdown opened from a window (the jira column
 filters, `JiraMultiPicker`, the search pickers, …):

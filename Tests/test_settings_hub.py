@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ws-settings (settings_hub/) tests — PRD-settings-hub.md §9.
+"""ws-settings (settings_hub/) tests.
 
 Everything runs against throwaway copies: a temp commands.toml whose
 [settings-hub] points at fixture aerospace / herdr / ghostty / vim files, a

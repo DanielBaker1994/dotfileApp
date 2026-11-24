@@ -10,12 +10,12 @@ The repo has a lot of markdown; start here:
 
 | You want | Read |
 | --- | --- |
-| current state / next work | `HANDOFF-rust-port-next.md` |
-| repo layout, commands, conventions | `AGENTS.md` (`AGENT_CONTEXT.md` / `CLAUDE.md` only point at it) |
+| current state / next work | `BACKLOG.md` (open items), `NEXT-TEARDOWN.md` (teardown handoff, while it exists) |
+| repo layout, commands, conventions | `AGENTS.md` (`CLAUDE.md` is a symlink to it) |
 | non-negotiable UX rules | `rule.md` |
 | open bugs / ideas | `BACKLOG.md` |
 | headless control / MCP | `AGENTS.md` "MCP server / headless control" · `bin/ks-mcp-sandbox.sh` · `bin/ks-mcp --list-tools` |
-| a feature spec | its `PRD-<feature>.md` (+ the matching `PLAN-<feature>.md` for build order) |
+| how to test / the worker playbook | `TESTING.md` |
 | what the product is / how it should look | `PRODUCT.md`, `DESIGN.md` |
 
 Consumed prompts, session reports and finished plans get deleted as their work
@@ -189,49 +189,6 @@ every poll job is one entry of `endpoints` in `~/.config/kitchen-sink-local/jira
 - CLI: `python3 jira/jira_config.py --show` (token masked), `--path`,
   `python3 jira/jira_poll.py --describe` (every job's schedule, JQL and curl).
 
-
-### SwiftTerm (fetched at build time for the embedded terminal)
-
-The embedded terminal drawer (`config.terminal` in commands.toml) uses
-[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). It is **not
-committed** — `bin/ensure-swiftterm.sh` shallow-clones the pinned upstream
-commit from `install.conf` (`SWIFTTERM_PIN`), applies
-`patches/swiftterm-cellstorage-cache.patch` (the perf fix the app was tested
-with) and generates the two `Generated/*.swift` files upstream builds. It
-fetches into `install.conf`'s `SWIFTTERM_DIR` — by default **`../SwiftTerm`, a
-sibling of this repo, so the checkout never lives in the git tree**. It runs
-automatically before the SwiftTerm compile in `bin/build-app.sh`, so a normal
-build just works:
-
-```bash
-./ws build            # first run fetches + precompiles SwiftTerm, then builds
-bin/ensure-swiftterm.sh   # fetch/refresh it alone (no-op when already pinned)
-```
-
-Needs network only when the pinned checkout is missing or the pin changed.
-`PopupWindow.swift` imports SwiftTerm; `bin/build-app.sh` compiles
-`$SWIFTTERM_DIR/Sources` + `Generated` into a static lib (see `build_term_lib`).
-
-### Nerd font
-
-The terminal renders with **Hack Nerd Font** (installed by the installer via
-`font-hack-nerd-font` cask). Override in `commands.toml`:
-
-```conf
-[app]
-terminal-font = Hack Nerd Font
-```
-
-### Shell in the terminal drawer
-
-```conf
-[app]
-shell = /opt/homebrew/bin/bash
-shell-args = --login -i      # login + interactive: sources profile AND rc
-```
-
-The shell auto-restarts if you `exit` it (poll + delegate), and the drawer
-grows with the window.
 
 ## Uninstall
 

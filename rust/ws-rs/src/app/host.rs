@@ -2787,7 +2787,7 @@ impl CommandHandler for SwitcherController {
         // `try_lock`: the main thread holds the mutex while it runs long
         // AppKit work (the OCR prewarm, a capture) and
         // this reply is served on the single socket thread — blocking here
-        // wedged every later socket verb until that work finished (APP-BUGS #21).
+        // wedged every later socket verb until that work finished (old bug #21).
         if let Some(c) = &self.screenshot_controller {
             if let Ok(c) = c.try_lock() {
                 v["screenshot"] = c.test_state();
@@ -3690,7 +3690,7 @@ mod daemon_ui {
         // so the first capture / first OCR does not pay the cold cost. The OCR
         // pass runs outside the controller mutex (a cold Vision load takes
         // seconds; holding it wedged `state` and every `do:` behind the single
-        // socket thread — APP-BUGS #21).
+        // socket thread — old bug #21).
         if let Some(shot) = shot_prewarm {
             dispatch2::DispatchQueue::main()
                 .after(dispatch2::DispatchTime::NOW.time(1_500_000_000), move || {
@@ -11634,7 +11634,7 @@ mod tests {
     /// later verb until it is let go. The main thread holds the screenshot
     /// controller across long AppKit work (the OCR prewarm ran Vision while
     /// holding it), and that is how the notes find-bar flow's next verb timed
-    /// out for 20 s with the app looking wedged (APP-BUGS #21). `state` must
+    /// out for 20 s with the app looking wedged (old bug #21). `state` must
     /// therefore read the controller with `try_lock`.
     #[test]
     fn state_does_not_block_on_a_busy_controller_lock() {

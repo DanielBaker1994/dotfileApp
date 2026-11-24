@@ -582,7 +582,7 @@ fn file_browser_key(config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
 fn edit_key(config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     match key.key_code {
         // Cmd+A/X/C/V pass through to the Edit menu; only Ctrl+C/V and Cmd+Z
-        // are routed here (see AGENT_CONTEXT "Edit keys").
+        // are routed here (see AGENTS.md rule 1).
         // Ctrl+A is the field's own start-of-line (macOS emacs keys), never
         // select-all.
         0 if key.ctrl && !key.cmd => Some(KeyAction::Pass),
@@ -1073,7 +1073,7 @@ mod tests {
         // reports key code 0 — the A key — with the typed character in `chars`.
         // With Command left down from `Cmd+=` (the zoom) this used to be taken
         // as Cmd+A: `ggVG` in nvim, which ate the character and left
-        // Visual-line mode (APP-BUGS #7).
+        // Visual-line mode (old bug #7).
         let c = PopupConfig { vim_focus: true, ..Default::default() };
         let mut typed_g = key(KEY_A);
         typed_g.cmd = true;

@@ -387,7 +387,7 @@ ws_cmd_doctor()    { exec "$WS_ROOT/jira/jira-doctor.sh" "$@"; }
 ws_cmd_test() {
     case "${1:-all}" in
         ui|vim|focus)
-            ws_die "UI test suites were deleted (owner decision: slow and ineffective) — verify with ./ws build + socket probes and screenshots; see HANDOFF-rust-port-next.md"
+            ws_die "UI test suites were deleted (owner decision: slow and ineffective) — verify with ./ws build + socket probes and screenshots"
             ;;
         install) exec "$WS_ROOT/Tests/test_install.sh" "${@:2}" ;;
         *)       exec "$WS_ROOT/bin/run-tests.sh" "$@" ;;

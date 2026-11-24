@@ -187,8 +187,8 @@ frontmatter are the default theme. `mantle`, `crust`, `surface0`,
   labels are dim; hover brightens them to text at 92%.
 - **Accent Outline** (outline): the card's border, the accent sunk 45% into
   the base at 85% opacity, so every theme frames itself in its own hue.
-- **Browser / Terminal panes**: the file browser and terminal drawer fills
-  (translucent slate, `[theme] browser` / `terminal`).
+- **Browser pane**: the file browser fill
+  (translucent slate, `[theme] browser`).
 
 ### Named Rules
 **The Theme-Only Rule.** No `NSColor.systemX`, `controlAccentColor` or
@@ -208,14 +208,13 @@ must survive all 29 presets, including Paper and Solarized Light.
 
 **Body Font:** SF Pro (the system font) for all chrome, lists and labels.
 **Mono Font:** SF Mono by default, or the user's `font` per section, for
-the notes editor, Compare panes, previews and AI output. The terminal
-drawer uses `terminal-font` (a Nerd Font for glyphs).
+previews and AI output.
 
 **Character:** quiet system UI with a monospace work surface. The chrome
 gets out of the way so the text you edit stands out.
 
 ### Hierarchy
-- **Editor** (400, 13 pt, mono): the notes, Compare and AI panes. Each is
+- **Editor** (400, 13 pt, mono): the AI pane. It is
   user-sized (`font-size`, Cmd+Opt+±).
 - **Toast** (500, 12.5 pt): the bottom-centre confirmation pill.
 - **Input** (400, 12 pt): filter bars and search fields.
@@ -235,11 +234,11 @@ a bigger size. Sizes stay on the scale above.
 
 A card of a fixed, shared frame (`PopupWindow.baseFrame`). Every view of
 the shared window uses the same rect, so switching views never resizes the
-window; only the notes drawers grow it. From top to bottom: a 30 pt drag
+window. From top to bottom: a 30 pt drag
 header (✕, kitchen-sink icon, view-switcher icons at 26 pt with 2 pt gaps,
 a centred title, and right-hand buttons), then a mantle tab strip or
 toolbar, then the content. Content is lists of 30 pt rows inset 4 × 1 pt,
-master–detail splits (Jira Config, AI, Compare), or a filter box over a
+master–detail splits (Jira Config, AI), or a filter box over a
 list (the palette, /paths). Window padding is 8 pt. Density is high on
 purpose: Jira tabs hold 5k–20k rows.
 
@@ -273,7 +272,7 @@ the hairline for the accent.
 Gently rounded and never pill-shaped, except for the toast. The card has a
 9 pt corner, and `_cornerRadius` overrides keep macOS 26's 16 pt frame from
 showing around it. Chips, tabs, row pills and buttons use 4 pt. Fields and
-image wells use 6 pt, the terminal drawer 8 pt, and floating overlays
+image wells use 6 pt, and floating overlays
 10–12 pt, so bigger floats get rounder corners. The cursor mark is a 3 pt
 accent edge clipped inside the row pill's left curve. Lines are 1 pt
 hairlines; the only 2 pt lines are the active-chip indicator and the Accent
