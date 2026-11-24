@@ -120,8 +120,8 @@ strip non-mac `cfg` code). The old plans: `git show 64bbd4a^:PLAN-cross-platform
   grants, so it needs the owner around.
 - Needs the owner around: signing-identity and TCC.db duplication in `bin/lib.sh` /
   `grant-permissions.sh`, app-kill logic in ~7 scripts, splitting `host.rs` giants.
-- Owner decisions: keep the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`,
-  `ks-ocr`, `Tests/run_flows.py`, `drive.py`, `haiku_run.py`, `night_run.py`)?
+- Owner decided (2026-11-24): the GUI test harness stays untouched; the Jira / Files / Confluence / AI views and
+  main window are out of scope for teardown.
 
 ## Leads
 

@@ -89,14 +89,14 @@ Gates: `bash -n` each edited script, `./ws help`, `./ws test config`.
   `files_event`, `files_key`, `jira_actions_or`, `install_daemon_ui`): structure only, keep
   behaviour; tests must stay at the baseline counts.
 
-### 4. Decisions only the owner can make (ask plainly, one at a time)
-- Drop Linux/Windows support entirely (non-mac is headless-only now; Linux check already
+### 4. Decisions only the owner can make
+- **Owner answered 2026-11-24: do not touch the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`,
+  `ks-ocr`, `Tests/run_flows.py`, `drive.py`, `haiku_run.py`, `night_run.py`), and do nothing about the
+  Jira / Files / Confluence / AI views or the main window.** Don't ask again.
+- Still open: drop Linux/Windows support entirely (non-mac is headless-only now; Linux check already
   broken)? If yes: the stash has a ready non-mac strip (`strip_cfg.py`), plus delete
   `bin/linux-check.sh`, `bin/windows-check.sh`, `bin/build-linux.sh`,
   `Tests/test_linux_headless.sh`, `rust/docker/`, the `ws test linux*|windows` cases.
-- Keep the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`, `ks-ocr`,
-  `Tests/run_flows.py`, `drive.py`, `haiku_run.py`, `night_run.py`, ~3k lines)?
-- Anything about the Jira / Files / Confluence / AI views or the main window.
 
 ## How to orchestrate
 
