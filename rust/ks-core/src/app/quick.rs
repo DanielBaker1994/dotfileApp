@@ -408,6 +408,8 @@ mod appkit {
         files_win: RefCell<Option<FilesWin>>,
         /// Ctrl+H/J/K/L focus ring + spatial pane moves for the Recent window.
         files_nav: RefCell<crate::app::live_panes::LiveNav>,
+        /// Vim key state for the Recent window's sidebar / list / filter.
+        files_vim: RefCell<crate::panes::vim_keys::VimKeys>,
         shared: Arc<QuickShared>,
         server: RefCell<Option<CommandServer>>,
         palette: RefCell<Option<PalettePanel>>,
@@ -1211,9 +1213,132 @@ mod appkit {
             true
         }
 
+        fn files_nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            self.files_surface(|b| b.view.as_ref().map(|v| v.nav_panes())).flatten().unwrap_or_default()
+        }
+
+        fn files_pane_id(&self) -> Option<String> {
+            let w = self.files_window()?;
+            let panes = self.files_nav_panes();
+            crate::app::live_panes::current(&w, &panes).map(|p| p.id.clone())
+        }
+
+        fn files_sidebar(&self) -> Option<objc2::rc::Retained<crate::ui::sidebar::SidebarView>> {
+            self.files_surface(|b| b.view.as_ref().map(|v| v.sidebar())).flatten()
+        }
+
+        /// Up / Down / Ctrl+N / Ctrl+P while the sidebar has the keyboard.
+        fn files_sidebar_move(&self, d: i64) {
+            let Some(bar) = self.files_sidebar() else { return };
+            let (texts, cursor, _) = bar.vim_rows();
+            if texts.is_empty() {
+                return;
+            }
+            let to = (cursor as i64 + d).clamp(0, texts.len() as i64 - 1) as usize;
+            bar.vim_move(to);
+        }
+
+        /// `VimKeys` on the sidebar / list / filter (rows only; `/` jumps to the filter).
+        fn files_vim_key(&self, event: &NSEvent) -> bool {
+            use crate::panes::vim_keys::{VimAction, VimContext, VimRows, VimTarget};
+            let Some(w) = self.files_window() else { return false };
+            let panes = self.files_nav_panes();
+            let Some(cur) = crate::app::live_panes::current(&w, &panes) else { return false };
+            let Some(fr) = w.firstResponder() else { return false };
+            let pane_id = cur.id.clone();
+            let query_empty = self.files_surface(|b| b.query.is_empty()).unwrap_or(true);
+            // Esc in an empty filter closes the window (back to the palette), not just leaves the field.
+            if event.keyCode() == popup::KEY_ESC && pane_id == "files-filter" && query_empty {
+                return false;
+            }
+            let mut key = popup::key_input_from_event(event);
+            if let Some(c) = event.characters().and_then(|s| s.to_string().chars().next()) {
+                if !key.ctrl && !key.cmd {
+                    key.chars = Some(c);
+                }
+            }
+            let is_text_input = objc2_foundation::NSObjectProtocol::isKindOfClass(
+                &*fr,
+                <objc2_app_kit::NSTextView as objc2::ClassType>::class(),
+            ) && fr
+                .downcast_ref::<objc2_app_kit::NSTextView>()
+                .map(|t| t.isEditable())
+                .unwrap_or(true);
+            let mut target: Option<VimTarget> = if is_text_input {
+                None
+            } else {
+                match pane_id.as_str() {
+                    "files-sidebar" => self.files_sidebar().map(|bar| {
+                        let (texts, cursor, page) = bar.vim_rows();
+                        VimTarget::Rows(VimRows { texts, cursor, page })
+                    }),
+                    "files-list" => self
+                        .files_surface(|b| {
+                            let texts: Vec<String> = b.visible_rows().iter().map(|e| e.name.clone()).collect();
+                            VimRows { texts, cursor: b.selection(), page: 20 }
+                        })
+                        .map(VimTarget::Rows),
+                    _ => None,
+                }
+            };
+            let before = target.clone();
+            let has_insert = pane_id == "files-list";
+            let has_normal = pane_id == "files-filter";
+            let clip = crate::platform::get_text();
+            let action = {
+                let mut ctx = VimContext {
+                    pane_id: &pane_id,
+                    target: target.as_mut(),
+                    is_text_input,
+                    owns_vim: false,
+                    has_insert,
+                    has_normal,
+                    clipboard: clip.as_deref(),
+                };
+                self.files_vim.borrow_mut().handle(key, &mut ctx)
+            };
+            if let (Some(VimTarget::Rows(b)), Some(VimTarget::Rows(a))) = (&before, &target) {
+                if a.cursor != b.cursor {
+                    match pane_id.as_str() {
+                        "files-sidebar" => {
+                            if let Some(bar) = self.files_sidebar() {
+                                bar.vim_move(a.cursor);
+                            }
+                        }
+                        _ => {
+                            self.files_surface(|br| {
+                                br.list.marked.clear();
+                                br.list.selection = a.cursor;
+                            });
+                        }
+                    }
+                }
+            }
+            match action {
+                VimAction::Pass => false,
+                VimAction::EnterInsert | VimAction::OpenSearch { .. } => {
+                    self.files_focus_filter(false);
+                    true
+                }
+                VimAction::ExitToNormal => {
+                    self.files_surface(|b| {
+                        if !b.query.is_empty() {
+                            b.set_query("");
+                        }
+                        if let Some(v) = &b.view {
+                            v.search_field().setStringValue(&objc2_foundation::NSString::from_str(""));
+                        }
+                    });
+                    self.focus_files_list();
+                    true
+                }
+                _ => true,
+            }
+        }
+
         fn files_pane_move(&self, dir: crate::panes::pane_geometry::PaneDir) {
             let Some(panel) = self.files_window() else { return };
-            let panes = self.files_surface(|b| b.view.as_ref().map(|v| v.nav_panes())).flatten().unwrap_or_default();
+            let panes = self.files_nav_panes();
             self.files_nav.borrow_mut().move_dir(&panel, &panes, dir, &|_| false);
         }
 
@@ -1764,6 +1889,25 @@ mod appkit {
                     return true;
                 }
             }
+            // The sidebar owns Up/Down/Ctrl+N/P/Return while it has the keyboard.
+            if self.files_pane_id().as_deref() == Some("files-sidebar") {
+                let down = (plain && code == popup::KEY_DOWN) || (ctrl && !cmd && !opt && code == 45);
+                let up = (plain && code == popup::KEY_UP) || (ctrl && !cmd && !opt && code == 35);
+                if down || up {
+                    self.files_sidebar_move(if down { 1 } else { -1 });
+                    return true;
+                }
+                if plain && matches!(code, popup::KEY_RETURN | 76) {
+                    if let Some(bar) = self.files_sidebar() {
+                        let (_, cursor, _) = bar.vim_rows();
+                        bar.activate_row(cursor);
+                    }
+                    return true;
+                }
+            }
+            if !cmd && self.files_vim_key(event) {
+                return true;
+            }
             match code {
                 popup::KEY_ESC if plain => self.files_escape(),
                 popup::KEY_RETURN | 76 if plain => self.files_open_selected(),
@@ -2279,6 +2423,7 @@ mod appkit {
             paths_win: RefCell::new(None),
             files_win: RefCell::new(None),
             files_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
+            files_vim: RefCell::new(crate::panes::vim_keys::VimKeys::default()),
             shot: shot.clone(),
             palette_return: Cell::new(None),
             pick_return: Cell::new(None),
