@@ -38,11 +38,9 @@ LOCK = threading.Lock()
 AREAS = {
     "files": "the Files view: open it (do open:files), browse folders with the keyboard (Return, Backspace/Cmd+Up, arrows), "
              "filter (Cmd+L, type-ahead), rename (F2), new folder (Cmd+Shift+N), duplicate (Cmd+D), undo (Cmd+Z), hidden files (Cmd+Shift+.)",
-    "notes": "Notes with the plain editor: switch notes in the sidebar, Cmd+N new note, type, Cmd+S save, Cmd+F find, rename, "
-             "tabs, the prose (rendered) toggle, long and unicode text",
     "shell": "the shared window: the view switcher (Ctrl+B then w), Ctrl+Tab between views, the command palette (Cmd+K) and its "
-             "tools, the terminal and browser drawers, Esc to hide, Cmd+W, Cmd+0 window reset, the shortcuts sheet (Cmd+/)",
-    "keyboard-only": "a keyboard-only user: starting from Notes, reach every view, do one real action in each, and get back, "
+             "tools, Esc to hide, Cmd+W, Cmd+0 window reset, the shortcuts sheet (Cmd+/)",
+    "keyboard-only": "a keyboard-only user: starting from Files, reach every view, do one real action in each, and get back, "
                      "never clicking. Note every place the keyboard gets stuck or focus is unclear",
     "visual": "visual quality: take a screenshot of every view and of every sheet/popover/drawer you can open; look for clipped "
               "or overlapping text, misaligned controls, unreadable contrast, missing focus indication, empty states with no hint",
@@ -62,10 +60,8 @@ the VM. Commands:
   bin/ks-drive state [path]          the app's state JSON (e.g. `state view`, `state pane.focused`, `state views.files.rows`)
   bin/ks-drive log 30                the app's log tail (look for panic / ERROR)
 After every key/text/click it prints a short summary (view, focused pane, last toast, dropped input).
-Test data lives under the app's HOME: ~/notes (Alpha.md, Beta.md, Quill.md), ~/files.
+Test data lives under the app's HOME: ~/files.
 
-Known capture limit: screenshots of the Notes view come out blank white (the capture can't see how
-Notes draws). Do NOT report a blank/white Notes screenshot; test Notes through `state` and the other views.
 
 How to work:
 - Take a screenshot early and after anything surprising, and actually look at it.

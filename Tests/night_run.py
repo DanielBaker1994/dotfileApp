@@ -110,8 +110,7 @@ known bugs (do not re-report them).
 
 AUTHOR_AREAS = {
     "files": "the Files view (views/files.rs): listing, filter (Cmd+L), Return/Backspace navigation, rename (F2/Cmd+R; rename keeps the extension), new folder/file, duplicate (Cmd+D), copy path, hidden toggle, sorting, Cmd+Z undo",
-    "notes": "Notes with the PLAIN editor (vim-mode=false in the fixture; no nvim in the VM): Cmd+N, typing, Cmd+S save to disk, Cmd+F find bar, tabs in the sidebar, rename, switching notes, unicode, long text, the prose toggle",
-    "shell": "the shared window and its surfaces: Ctrl+B W switcher, Ctrl+Tab view cycling, Cmd+0, the palette tools (Pretty Print, Text to Table, Create File, Health Checks, Find Recent Files), paths shelf, terminal/browser drawers, esc-hides, header styles, config reload, Cmd+W",
+    "shell": "the shared window and its surfaces: Ctrl+B W switcher, Ctrl+Tab view cycling, Cmd+0, the palette tools (Pretty Print, Text to Table, Create File, Health Checks, Find Recent Files), paths shelf, esc-hides, header styles, config reload, Cmd+W",
 }
 
 AUTHOR_BRIEF = """TASK: write NEW feature test flows for the kitchen-sink app: {area}.
@@ -179,9 +178,8 @@ repeat k/3), {out}/summary.md. Stop the sandbox at the end.
 # BACKLOG.md if wanted.
 
 UX_TASKS = {
-    "files-notes": "Files and Notes: e.g. find a file by part of its name and open it; rename a file and undo it; "
-                   "make a new folder and move into it; start a new note, write two lines, save, find it again later; "
-                   "rename a note; search inside a note",
+    "files": "Files: e.g. find a file by part of its name and open it; rename a file and undo it; "
+             "make a new folder and move into it; copy a file's path; sort and filter the listing",
     "shell": "The shared window: e.g. "
                      "switch between views without the mouse; find and run a palette tool; close everything with the keyboard",
 }
@@ -246,7 +244,7 @@ def phase_find() -> None:
             except Exception as e:
                 log(f"  worker {jobs[f]} crashed: {e}")
     for f in os.listdir(os.path.join(ROOT, "Tests")):
-        if re.fullmatch(r"app_flows_(files|notes|shell|ux[\w-]+)\.json", f):
+        if re.fullmatch(r"app_flows_(files|shell|ux[\w-]+)\.json", f):
             os.remove(os.path.join(ROOT, "Tests", f))
     dirty = git_dirty()
     if dirty:

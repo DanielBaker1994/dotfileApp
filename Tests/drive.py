@@ -5,7 +5,7 @@ Agents call it through the host wrapper `bin/ks-drive`, which runs it over `bin/
 It reuses run_flows.py's Sandbox, so the app, fixtures (Tests/app_flows.json), activation
 and real-input path are exactly what the flow runner uses.
 
-    drive.py start                 fresh fixtures + launch the app (+ open notes)
+    drive.py start                 fresh fixtures + launch the app (+ open files)
     drive.py state [dotted.path]   the state JSON, or one value from it
     drive.py do VERB               a do: verb (e.g. open:files), prints the reply
     drive.py key COMBO             real key event(s), e.g. cmd+n | 'ctrl+b w' | esc

@@ -17,8 +17,8 @@ oracle failed, ERROR when a step could not run or the app died.
 
     python3 Tests/run_flows.py --list
     python3 Tests/run_flows.py                         # every flow, fresh build of the working tree
-    python3 Tests/run_flows.py --feature notes --repeat 3
-    python3 Tests/run_flows.py --ids notes-type-save,switcher-close-esc --app installed
+    python3 Tests/run_flows.py --feature files --repeat 3
+    python3 Tests/run_flows.py --ids files-open-listing,switcher-close-esc --app installed
     python3 Tests/run_flows.py --replay .build/hammer/RUN/G-SOAK/findings.jsonl --repeat 3
 
 The GUI sandbox takes the screen while it runs (a test window in front; anything typed goes
@@ -108,7 +108,7 @@ class Sandbox:
         # Warm-up: the first do: after launch is slow (and holds its connection, old bug #17);
         # let it settle so the first flow doesn't race a still-starting app.
         try:
-            self.send("do:open:notes", timeout=30)
+            self.send("do:open:files", timeout=30)
         except Exception:
             pass
         time.sleep(WARMUP_S)
@@ -551,7 +551,7 @@ def run_step(sb: Sandbox, inp: str, replies: dict, silent: list | None = None) -
     if kind == "click-rel":
         fx, fy = (float(x) for x in arg.split())
         st = sb.state() or {}
-        v = st.get("view") or "notes"
+        v = st.get("view") or "files"
         frame = (st.get("views", {}).get(v, {}) or {}).get("frame")
         if not frame:
             raise StepError(f"{inp}: no frame for view {v!r}")

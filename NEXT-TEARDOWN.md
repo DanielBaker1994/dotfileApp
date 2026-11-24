@@ -42,6 +42,9 @@ Written 2026-11-23 for the next agent. Delete this file when the work below is d
 
 ## Tasks, in order
 
+**Tasks 1 and 2 are DONE** (fbf48fb, 83ab304 + the harness-text cleanup commit). Only the mic/speech TCC rows were
+left from task 2 (moved to BACKLOG.md). Tasks 3 and 4 below need the owner.
+
 ### 1. Markdown consolidation (owner asked for it) — Sonnet or a DeepSeek write worker
 Target set: AGENTS.md, README.md, rule.md, BACKLOG.md (all open items), TESTING.md (trim to
 ~200 lines), DESIGN.md + PRODUCT.md (read by the owner's design skill), `CLAUDE.md` →
