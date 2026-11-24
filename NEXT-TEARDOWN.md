@@ -85,9 +85,7 @@ Gates: `bash -n` each edited script, `./ws help`, `./ws test config`.
 - Palette key grammar duplicated between `ks-core/src/app/quick.rs` (~925-1010) and
   `ws-rs/src/app/host.rs` `route_overlay_key` (~80 lines) → one `palette_key()` in
   `views/switcher.rs`. Needs real-key testing (see AGENTS.md / ks-input), so owner approval.
-- Split host.rs giants (`do_host_action` ~390 lines, `route_key_event` ~300, `jira_event`,
-  `files_event`, `files_key`, `jira_actions_or`, `install_daemon_ui`): structure only, keep
-  behaviour; tests must stay at the baseline counts.
+- Split host.rs giants: DONE for `do_host_action` (now `do_view_prefix_action` + `do_ui_prefix_action` + the exact-name match) and `route_key_event` (`route_modal_key` split out), 2026-11-24. Left, each ~230-250 lines (event matches, no obvious seam): `jira_event`, `files_event`, `conf_event`, `files_key`, `route_overlay_key` (~180), `jira_actions_or`, `install_daemon_ui`. Baselines held: ks-core 485, ws-rs 195.
 
 ### 4. Decisions only the owner can make
 - **Owner answered 2026-11-24: do not touch the GUI test harness (`bin/ks-vm`, `ks-drive`, `ks-input`,
