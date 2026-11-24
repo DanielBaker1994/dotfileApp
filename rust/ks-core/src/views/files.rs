@@ -1217,16 +1217,8 @@ pub fn duplicate_toast(copies: &[String]) -> String {
     }
 }
 
-pub fn duplicate_paths(paths: &[String], undo: &UndoStack) -> Outcome {
-    FileOps::duplicate(paths, undo)
-}
-
 pub fn trash_paths(paths: &[String], undo: &UndoStack) -> Outcome {
     FileOps::trash(paths, undo)
-}
-
-pub fn transfer_paths(paths: &[String], into: &str, move_: bool, undo: &UndoStack) -> Outcome {
-    FileOps::transfer(paths, into, move_, undo)
 }
 
 // ---------------------------------------------------------- shared context menu

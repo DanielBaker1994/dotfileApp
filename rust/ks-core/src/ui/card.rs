@@ -637,24 +637,6 @@ mod appkit {
             root
         }
 
-        /// `setSlotNav(_:icons:icon:on:click:)`.
-        pub fn set_slot_nav(
-            &mut self,
-            buttons: Vec<(String, i32)>,
-            icons: Vec<crate::ui::chrome::NavIcon>,
-            icon: Option<Retained<NSImage>>,
-            on: Option<i32>,
-            click: Option<Box<dyn Fn(i32)>>,
-        ) {
-            if let Some(ch) = &self.chrome {
-                ch.set_extra_buttons(buttons);
-                ch.set_nav_icons(icons);
-                ch.set_nav_on(on);
-                ch.set_header_icon(icon);
-            }
-            *self.slot_nav_click.borrow_mut() = click;
-        }
-
         /// The visible close-button rect (used by tests / hit-testing).
         pub fn close_button_rect(&self) -> Rect {
             self.chrome

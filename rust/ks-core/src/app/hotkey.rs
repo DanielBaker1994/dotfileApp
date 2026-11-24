@@ -83,16 +83,6 @@ impl AeroIpc {
         AeroIpc::new(discover_aerospace_binary())
     }
 
-    pub fn with_runner(
-        binary: impl Into<String>,
-        runner: impl Fn(&[String]) -> Option<String> + Send + Sync + 'static,
-    ) -> Self {
-        AeroIpc {
-            binary: binary.into(),
-            runner: Box::new(runner),
-        }
-    }
-
     pub fn binary(&self) -> &str {
         &self.binary
     }

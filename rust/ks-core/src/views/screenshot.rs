@@ -58,7 +58,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::app::registry::{PaletteCommand, Registry};
+use crate::app::registry::Registry;
 use crate::engines::screenshot_annotations::{
     round_half_away, ButtonRing, Point, Rect, ShotArgs, ShotColor, ShotDate, ShotDocument,
     ShotFiles, ShotGeom, ShotMode, ShotObject, ShotSnap, ShotState, ShotTextStyle, ShotTool, Size,
@@ -495,9 +495,6 @@ impl ScreenshotConfig {
         c
     }
 
-    pub fn palette_command(&self) -> PaletteCommand {
-        PaletteCommand::new("screenshot", "/screenshot", "tools")
-    }
 }
 
 /// One on-screen window for the W (snap to window) key: its bounds in global
@@ -1871,11 +1868,6 @@ impl ShotSession {
     }
     pub fn is_dragging(&self) -> bool {
         !matches!(self.drag, Drag::None)
-    }
-    pub fn take_ring_new(&mut self) -> bool {
-        let v = self.ring_new;
-        self.ring_new = false;
-        v
     }
 
     // -- tool / mode ------------------------------------------------------
@@ -7395,9 +7387,6 @@ impl ScreenshotController {
         self.session = None;
         #[cfg(target_os = "macos")]
         self.drop_key_monitor_if_idle();
-    }
-    pub fn is_capturing(&self) -> bool {
-        self.capturing
     }
 
     fn note(&mut self, line: impl Into<String>) {

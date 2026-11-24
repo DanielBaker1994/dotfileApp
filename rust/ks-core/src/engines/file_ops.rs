@@ -159,10 +159,6 @@ impl FileOps {
         Self::shared().can_undo()
     }
 
-    pub fn forget_undo() {
-        Self::shared().forget();
-    }
-
     pub fn transfer(paths: &[String], into: &str, move_: bool, undo: &UndoStack) -> Outcome {
         let params = json!({
             "paths": paths, "into": into, "move": move_, "stack": undo.handle()

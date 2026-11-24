@@ -608,11 +608,6 @@ mod appkit {
             self.setNeedsDisplay(true);
         }
 
-        pub fn set_header_color_override(&self, color: Option<Rgba>) {
-            self.ivars().header_color_override.set(color);
-            self.setNeedsDisplay(true);
-        }
-
         pub fn header_color(&self) -> Rgba {
             self.ivars()
                 .header_color_override
@@ -655,16 +650,6 @@ mod appkit {
 
         pub fn extra_button_rects(&self) -> HashMap<i32, Rect> {
             self.ivars().extra_button_rects.borrow().clone()
-        }
-
-        pub fn set_icon_hovered(&self, on: bool) {
-            self.ivars().icon_hovered.set(on);
-            self.setNeedsDisplay(true);
-        }
-
-        pub fn set_close_hovered(&self, on: bool) {
-            self.ivars().close_hovered.set(on);
-            self.setNeedsDisplay(true);
         }
 
         pub fn set_icon_menu_open(&self, on: bool) {

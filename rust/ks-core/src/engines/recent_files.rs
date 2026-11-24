@@ -20,18 +20,12 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `FSEventStreamEventFlags` bits (CoreServices `FSEvents.h`). Only the ones
-/// `handle` reads are declared; the Swift suite's synthetic events use these.
-pub const FSEVENT_MUST_SCAN_SUBDIRS: u32 = 0x0000_0001;
 pub const FSEVENT_ITEM_CREATED: u32 = 0x0000_0100;
 pub const FSEVENT_ITEM_REMOVED: u32 = 0x0000_0200;
-pub const FSEVENT_ITEM_INODE_META_MOD: u32 = 0x0000_0400;
 pub const FSEVENT_ITEM_RENAMED: u32 = 0x0000_0800;
 pub const FSEVENT_ITEM_MODIFIED: u32 = 0x0000_1000;
 pub const FSEVENT_ITEM_IS_FILE: u32 = 0x0001_0000;
 pub const FSEVENT_ITEM_IS_DIR: u32 = 0x0002_0000;
-pub const FSEVENT_ITEM_IS_SYMLINK: u32 = 0x0004_0000;
-pub const FSEVENT_OWN_EVENT: u32 = 0x0008_0000;
 
 // --- CoreServices FSEvents / CoreFoundation FFI (the live watcher) ----------
 //

@@ -104,12 +104,6 @@ pub fn track_fill(c: &PopupColors) -> Rgba {
     c.text.with_alpha(if c.is_light() { 0.07 } else { 0.06 })
 }
 
-/// `PopupColors.isLight`-aware sidebar card fill (the rounded sidebar panel
-/// behind PINNED / PLACES / MY WORK lists).
-pub fn sidebar_fill(c: &PopupColors) -> Rgba {
-    c.crust().with_alpha(if c.is_light() { 0.35 } else { 0.55 })
-}
-
 #[cfg(target_os = "macos")]
 pub use appkit::*;
 
@@ -347,13 +341,6 @@ mod appkit {
             return;
         }
         fill_rounded(r.inset_by(0.5, 0.5), radius, button_fill(st, c));
-    }
-
-    /// `ButtonStyle.indicator` — the accent underline of an "on" tab.
-    pub fn draw_indicator(r: Rect, c: &PopupColors) {
-        let inset = (r.width * 0.2).min(8.0);
-        let bar = Rect::new(r.x + inset, r.max_y() - 2.5, (r.width - inset * 2.0).max(4.0), 2.0);
-        fill_rounded(bar, 1.0, button_accent(c));
     }
 
     /// The canonical segmented-capsule geometry every mutually exclusive

@@ -46,18 +46,8 @@ impl NavPane {
         }
     }
 
-    pub fn with_owns(mut self, f: impl Fn(ViewId) -> bool + 'static) -> Self {
-        self.owns = Some(Box::new(f));
-        self
-    }
-
     pub fn with_intercept(mut self, f: impl Fn(PaneDir) -> bool + 'static) -> Self {
         self.intercept = Some(Box::new(f));
-        self
-    }
-
-    pub fn with_focus(mut self, f: impl Fn() + 'static) -> Self {
-        self.focus = Some(Box::new(f));
         self
     }
 

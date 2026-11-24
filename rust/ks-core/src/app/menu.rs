@@ -94,12 +94,6 @@ impl Modifiers {
         shift: false,
         control: false,
     };
-    pub const CMD_OPT: Modifiers = Modifiers {
-        command: true,
-        option: true,
-        shift: false,
-        control: false,
-    };
 }
 
 /// One actionable menu row.
@@ -401,12 +395,6 @@ mod appkit {
             unsafe { msg_send![super(this), init] }
         }
 
-        /// The Swift `menuNeedsUpdate(_:)` hook (config-issue refresh, jira
-        /// title/visibility, window states). Not ported yet: a host that
-        /// wants it supplies the rebuild closure.
-        pub fn set_needs_update_handler(&self, handler: impl Fn() + 'static) {
-            *self.ivars().on_needs_update.borrow_mut() = Some(Box::new(handler));
-        }
     }
 
     fn make_item(mtm: MainThreadMarker, node: &MenuNode, target: &MenuTarget) -> Retained<NSMenuItem> {

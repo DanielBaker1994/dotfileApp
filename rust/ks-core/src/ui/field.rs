@@ -225,12 +225,4 @@ mod appkit {
         }
     }
 
-    /// Show the focus stroke (`updatePartFocus`: 2 pt accent while editing).
-    pub fn set_focused(container: &NSView, colors: &PopupColors, on: bool) {
-        if let Some(l) = container.layer() {
-            l.setBorderWidth(if on { 2.0 } else { 1.0 });
-            let c = if on { colors.accent_on() } else { style::input_stroke(colors) };
-            l.setBorderColor(Some(&c.to_nscolor().CGColor()));
-        }
-    }
 }

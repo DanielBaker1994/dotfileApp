@@ -969,12 +969,6 @@ mod appkit {
             self.setNeedsDisplay(true);
         }
 
-        pub fn set_style(&self, colors: PopupColors, ring: Rgba) {
-            *self.ivars().colors.borrow_mut() = colors;
-            self.ivars().ring.set(ring);
-            self.setNeedsDisplay(true);
-        }
-
         /// `VimModeBadge.size(_:)` (measures the mode text with the chip font).
         pub fn size_for_mode(mode: VimMode) -> (f64, f64) {
             let font = badge_font();

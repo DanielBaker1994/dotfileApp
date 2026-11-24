@@ -1417,7 +1417,6 @@ fn columns_json_problem(value: &str) -> Option<String> {
     None
 }
 
-
 pub fn validate_config(text: &str) -> Vec<ConfigIssue> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let lines = config_text::config_decoded_lines(text);
@@ -1819,10 +1818,6 @@ pub fn write_config_text_at(path: &Path, text: &str) -> bool {
     std::fs::write(path, text).is_ok()
 }
 
-pub fn write_config_text(text: &str) -> bool {
-    write_config_text_at(&commands_conf_path(), text)
-}
-
 /// Park a config file whose text failed validation (or was not valid UTF-8)
 /// beside itself as `<name>.broken-<epoch>`. The live file is left in place so
 /// it can still be inspected/fixed; the caller keeps the last-known-good
@@ -1883,10 +1878,6 @@ pub fn save_config_values(section: &str, kv: &[(String, Option<String>)]) -> boo
 
 pub fn save_config_value(section: &str, key: &str, value: &str) {
     save_config_values(section, &[(key.to_string(), Some(value.to_string()))]);
-}
-
-pub fn remove_config_value(section: &str, key: &str) {
-    save_config_values(section, &[(key.to_string(), None)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2425,7 +2416,6 @@ mod tests {
     }
 }
 
-
 // ---- columns parsing (moved from views::jira so config validation needs no view) ----
 
 /// `columns` -> the columns. Accepts the structured JSON array of
@@ -2521,7 +2511,6 @@ pub fn column_from_obj(o: &Value) -> Option<ListColumn> {
         filterable: o.get("filter").map(truthy).unwrap_or(false),
     })
 }
-
 
 pub fn truthy(v: &Value) -> bool {
     match v {

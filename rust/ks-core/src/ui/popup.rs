@@ -24,7 +24,6 @@ pub const KEY_X: u16 = 7;
 pub const KEY_C: u16 = 8;
 pub const KEY_V: u16 = 9;
 pub const KEY_W: u16 = 13;
-pub const KEY_R: u16 = 15;
 pub const KEY_PLUS: u16 = 24;
 pub const KEY_MINUS: u16 = 27;
 pub const KEY_ZERO: u16 = 29;
@@ -158,9 +157,6 @@ impl KeyInput {
         KeyInput { key_code, chars: None, cmd: false, ctrl: false, opt: false, shift: false, esc_streak: 0 }
     }
 
-    pub fn key_char(&self) -> Option<char> {
-        self.chars
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -697,11 +693,6 @@ impl MonitorHandle {
         }
     }
 
-    /// Whether the monitor is still installed.
-    #[cfg(target_os = "macos")]
-    pub fn is_installed(&self) -> bool {
-        self.monitor.is_some()
-    }
 }
 
 impl Drop for MonitorHandle {

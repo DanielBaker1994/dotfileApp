@@ -45,15 +45,6 @@ impl PaneDir {
         }
     }
 
-    pub fn from_key_code(key_code: u16) -> Option<PaneDir> {
-        match key_code {
-            4 => Some(PaneDir::Left),
-            38 => Some(PaneDir::Down),
-            40 => Some(PaneDir::Up),
-            37 => Some(PaneDir::Right),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

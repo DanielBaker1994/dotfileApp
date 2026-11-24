@@ -8,15 +8,6 @@ use crate::ui::chrome::Rect;
 pub const SEARCH_H: f64 = 44.0;
 pub const PAD_BOTTOM: f64 = 6.0;
 
-/// What the panel reports.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ListEvent {
-    Query(String),
-    /// A field command (`insertNewline:`, `moveUp:`, …) — return true when
-    /// handled from the command closure instead.
-    Click { row: usize, x: f64, double: bool },
-}
-
 /// Height for `n` rows of `row_h`.
 pub fn panel_height(n: usize, row_h: f64, max_rows: usize) -> f64 {
     SEARCH_H + n.clamp(1, max_rows.max(1)) as f64 * row_h + PAD_BOTTOM

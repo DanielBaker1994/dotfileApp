@@ -93,17 +93,6 @@ impl WebPane {
         unsafe { self.web.evaluateJavaScript_completionHandler(&NSString::from_str(js), None) };
     }
 
-    pub fn is_loading(&self) -> bool {
-        unsafe { self.web.isLoading() }
-    }
-
-    pub fn page_zoom(&self) -> f64 {
-        unsafe { self.web.pageZoom() }
-    }
-
-    pub fn set_page_zoom(&self, z: f64) {
-        unsafe { self.web.setPageZoom(z) };
-    }
 }
 
 /// A JS string literal for `s` (JSON-quoted).

@@ -491,16 +491,6 @@ pub fn section_header_color(section: &str) -> Rgba {
         .unwrap_or_else(|| t.globals.header_color())
 }
 
-/// A section's `browser-background` (the file-browser / list fill).
-pub fn section_browser_background(section: &str) -> Option<Rgba> {
-    let t = theme_state()?;
-    t.sections
-        .get(section)
-        .and_then(|s| s.get("browser-background"))
-        .and_then(|x| HexColor::parse(x.trim()))
-        .or(t.globals.browser)
-}
-
 /// The `[theme]` globals (`THEME` / `BAR` / `GROUP_BG` / `TEXT` / `DIM` …).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeGlobals {

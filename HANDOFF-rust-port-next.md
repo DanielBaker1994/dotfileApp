@@ -16,7 +16,6 @@ two sessions; this section wins.
 
 ## Working rules (owner feedback, keep them)
 
-- Run `bin/parity-audit.sh` first (about 30 s, writes `.build/parity-audit.md`).
 - A row is done only after you see it work in the live app (a screenshot, or
   `state` from the socket). Unit tests prove the model, not the feature.
 - **No retry loops.** If a live check fails, read the code and the AppKit API,
@@ -220,7 +219,7 @@ For pixel-level reference there is no golden set yet. If required:
    through LaunchServices so TCC is right — see "Environment rules").
 3. Capture screenshots of every view/state from BOTH apps (notes, files, jira,
    confluence, ai, compare, palette, tool panels) via the same scripted
-   actions used for `rs-parity.py`.
+   actions (the old `bin/rs-parity.py` is gone; see git history).
 4. Commit the Swift captures into the repo as the reference set (a new
    `docs/parity/` or `samples/parity/` dir — owner's call) and use them as
    goldens for the Rust port.

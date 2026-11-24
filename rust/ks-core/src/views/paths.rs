@@ -669,11 +669,6 @@ impl PathsWindow {
         }
     }
 
-    #[allow(non_snake_case)]
-    pub fn test_return(&mut self) -> Vec<String> {
-        self.run_default()
-    }
-
     /// The window fields reported to the socket. Once [`Self::show_window`] has
     /// built the panel we read them straight from it — Swift's `testState`
     /// reads `window.isShown` / `isKeyWindow` / `level` / `frame` — so

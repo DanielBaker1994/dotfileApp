@@ -314,11 +314,6 @@ impl ViewSwitcherPanel {
         list.iter().position(|e| *e == self.selection).unwrap_or(0)
     }
 
-    /// Catch the model up with the search field (after typing).
-    pub fn sync_query(&mut self) {
-        self.reconcile_query();
-    }
-
     /// Typing moved on: the cursor goes to the top like the drawn list
     /// (`SwitchUi::refilter`).
     fn reconcile_query(&mut self) {
