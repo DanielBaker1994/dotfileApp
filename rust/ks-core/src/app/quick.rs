@@ -806,6 +806,7 @@ mod appkit {
                 browser.configure(&section);
                 browser.build(mtm);
                 if let Some(v) = &browser.view {
+                    v.set_sidebar_width(150.0);
                     v.set_on_event(Box::new(|ev| with_ui(|ui| ui.files_event(ev))));
                 }
                 FilesWin { browser, panel: None }
@@ -818,7 +819,7 @@ mod appkit {
                 .or_else(crate::platform::main_screen)
                 .map(|s| s.visible)
                 .unwrap_or(crate::platform::screens::Rect::new(0.0, 0.0, 1440.0, 900.0));
-            let (w, h) = (vf.w * 0.5, vf.h * 0.5);
+            let (w, h) = (vf.w * 0.72, vf.h * 0.55);
             let frame = NSRect::new(NSPoint::new(vf.x + (vf.w - w) / 2.0, vf.y + (vf.h - h) / 2.0), NSSize::new(w, h));
             if win.panel.is_none() {
                 let cfg = PopupConfig {

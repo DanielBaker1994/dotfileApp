@@ -738,6 +738,8 @@ mod appkit {
         shown_preview_key: RefCell<String>,
         /// Cmd+Shift+P hid the preview pane (Finder's Show/Hide Preview).
         no_preview: Cell<bool>,
+        /// Expanded sidebar width (the small Find Recent Files window narrows it).
+        side_w: Cell<f64>,
     }
 
     define_class!(
@@ -916,6 +918,7 @@ mod appkit {
                 tracking: RefCell::new(None),
                 shown_preview_key: RefCell::new(String::new()),
                 no_preview: Cell::new(false),
+                side_w: Cell::new(SIDEBAR_W),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
@@ -1024,7 +1027,14 @@ mod appkit {
         }
 
         fn sidebar_w(&self) -> f64 {
-            self.ivars().sidebar.width(SIDEBAR_W)
+            self.ivars().sidebar.width(self.ivars().side_w.get())
+        }
+
+        /// Narrower expanded sidebar for compact hosts.
+        pub fn set_sidebar_width(&self, w: f64) {
+            self.ivars().side_w.set(w);
+            self.layout_panes();
+            self.setNeedsDisplay(true);
         }
 
         /// Show / hide the preview pane (Cmd+Shift+P).
