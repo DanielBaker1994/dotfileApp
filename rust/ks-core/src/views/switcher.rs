@@ -1485,6 +1485,16 @@ mod macos {
         if let Some(img) = APP_ICONS.with(|c| c.borrow().get(name).cloned()) {
             return img;
         }
+        // Our own app: draw the shipped icon, not whatever stale `kitchen-sink.app`
+        // copy (old sink icon) LaunchServices resolves the name to.
+        let lower = name.to_lowercase();
+        if matches!(lower.as_str(), "kitchen-sink" | "kitchen sink" | "bansho") {
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            if let Some(img) = crate::ui::style::image_file(&format!("{assets}/app_icon.png")) {
+                APP_ICONS.with(|c| c.borrow_mut().insert(name.to_string(), img.clone()));
+                return img;
+            }
+        }
         let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
         #[allow(deprecated)]
         let mut path = ws.fullPathForApplication(&NSString::from_str(name)).map(|p| p.to_string());

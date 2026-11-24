@@ -332,6 +332,8 @@ mod appkit {
     use crate::app::socket::{CommandServer, DaemonLock};
     use crate::engines::path_shelf;
     use crate::ui::popup::{self, MonitorHandle};
+    use crate::views::files::FileBrowser;
+    use crate::views::files_view::FilesEvent;
     use crate::views::paths::{PathsEvent, PathsWindow, ReturnAction as PathsReturn};
     use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
     use crate::views::switcher::{gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, WorkspaceRow};
@@ -367,8 +369,16 @@ mod appkit {
         crate::platform::run_on_main(move || with_ui(f));
     }
 
+    /// Find Recent Files: the Files view torn down (no sidebar / Pin) in a
+    /// half-screen panel, fed by the Recent engine.
+    struct FilesWin {
+        browser: FileBrowser,
+        panel: Option<objc2::rc::Retained<popup::PopupPanel>>,
+    }
+
     struct QuickUi {
         paths: Paths,
+        files_win: RefCell<Option<FilesWin>>,
         shared: Arc<QuickShared>,
         server: RefCell<Option<CommandServer>>,
         palette: RefCell<Option<PalettePanel>>,
@@ -432,7 +442,12 @@ mod appkit {
                 .paths_win
                 .try_borrow()
                 .map(|p| p.as_ref().is_some_and(|w| w.is_window_visible()))
-                .unwrap_or(true);
+                .unwrap_or(true)
+                || self
+                    .files_win
+                    .try_borrow()
+                    .map(|g| g.as_ref().and_then(|w| w.panel.as_ref()).is_some_and(|p| p.isVisible()))
+                    .unwrap_or(true);
             if let Ok(mut s) = self.shared.state.lock() {
                 *s = json!({
                     "palette": palette,
@@ -619,8 +634,8 @@ mod appkit {
                 PaletteAction::Workspace(id) => switch_workspace(&id),
                 PaletteAction::Command(id) => match route_command(&id) {
                     PickRoute::Paths => {
-                        self.set_back_to("paths");
-                        self.show_paths();
+                        self.set_back_to("files");
+                        self.show_files();
                     }
                     PickRoute::Tool(name) => {
                         if let Some(kind) = ToolKind::from_name(name) {
@@ -766,6 +781,220 @@ mod appkit {
                 .into_iter()
                 .filter(|i| std::path::Path::new(&i.path).exists())
                 .collect()
+        }
+
+        // -- Find Recent Files (the torn-down Files view) ------------------------
+
+        fn files_surface<R>(&self, f: impl FnOnce(&mut FileBrowser) -> R) -> Option<R> {
+            let mut g = self.files_win.try_borrow_mut().ok()?;
+            let w = g.as_mut()?;
+            let r = f(&mut w.browser);
+            w.browser.sync_view();
+            Some(r)
+        }
+
+        fn show_files(&self) {
+            use crate::ui::popup::{CardFrame, PopupConfig, PopupPanel};
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let text = self.refresh_config();
+            let section = crate::app::sections::parse_sections(&text).get("files").cloned().unwrap_or_default();
+            // The agent runs its own Recent engine so the list is live without the main app.
+            crate::views::files::start_recent(&section);
+            let mut win = self.files_win.borrow_mut().take().unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                let mut browser = FileBrowser::new(&home);
+                browser.configure(&section);
+                browser.build(mtm);
+                if let Some(v) = &browser.view {
+                    v.set_compact(true);
+                    v.set_on_event(Box::new(|ev| with_ui(|ui| ui.files_event(ev))));
+                }
+                FilesWin { browser, panel: None }
+            });
+            win.browser.show_virtual(0);
+            win.browser.sync_view();
+            // Half the size of the full-screen app window, centred on the screen under the mouse.
+            let m = NSEvent::mouseLocation();
+            let vf = crate::platform::screen_containing(m.x, m.y)
+                .or_else(crate::platform::main_screen)
+                .map(|s| s.visible)
+                .unwrap_or(crate::platform::screens::Rect::new(0.0, 0.0, 1440.0, 900.0));
+            let (w, h) = (vf.w * 0.5, vf.h * 0.5);
+            let frame = NSRect::new(NSPoint::new(vf.x + (vf.w - w) / 2.0, vf.y + (vf.h - h) / 2.0), NSSize::new(w, h));
+            if win.panel.is_none() {
+                let cfg = PopupConfig {
+                    name: "files-quick".to_string(),
+                    frame: CardFrame { x: frame.origin.x, y: frame.origin.y, width: w, height: h },
+                    tool_panel: true,
+                    floating: true,
+                    ..PopupConfig::default()
+                };
+                let panel = PopupPanel::create(mtm, &cfg);
+                if let Some(root) = win.browser.content_view() {
+                    panel.setContentView(Some(&root));
+                }
+                panel.setTitle(&objc2_foundation::NSString::from_str("Recent files"));
+                // Click-off closes it (no palette), unless the preview popup took key.
+                panel.set_on_resign(Box::new(|| {
+                    defer(|ui| {
+                        if crate::views::file_popup::is_live() {
+                            return;
+                        }
+                        ui.hide_files();
+                        ui.surface_closed("files", false);
+                    });
+                }));
+                win.panel = Some(panel);
+            }
+            if let Some(panel) = &win.panel {
+                panel.setFrame_display(frame, true);
+                panel.makeKeyAndOrderFront(None);
+                if let Some(v) = &win.browser.view {
+                    let field = v.search_field();
+                    let r: &objc2_app_kit::NSResponder = &field;
+                    panel.makeFirstResponder(Some(r));
+                }
+            }
+            *self.files_win.borrow_mut() = Some(win);
+            self.publish_state();
+        }
+
+        fn hide_files(&self) {
+            if let Ok(g) = self.files_win.try_borrow() {
+                if let Some(p) = g.as_ref().and_then(|w| w.panel.as_ref()) {
+                    p.orderOut(None);
+                }
+            }
+            self.publish_state();
+        }
+
+        /// Esc: clear a live filter first; on an empty one go back to the palette.
+        fn files_escape(&self) {
+            let had_query = self
+                .files_surface(|b| {
+                    if b.query.is_empty() {
+                        return false;
+                    }
+                    b.set_query("");
+                    if let Some(v) = &b.view {
+                        v.search_field().setStringValue(&objc2_foundation::NSString::from_str(""));
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if had_query {
+                return;
+            }
+            self.hide_files();
+            self.surface_closed("files", true);
+        }
+
+        fn files_open_selected(&self) {
+            let path = self
+                .files_surface(|b| b.visible_rows().get(b.selection()).filter(|e| !e.is_parent()).map(|e| e.path.clone()))
+                .flatten();
+            if let Some(path) = path {
+                crate::platform::open_path(std::path::Path::new(&path));
+                self.hide_files();
+            }
+        }
+
+        fn files_event(&self, ev: FilesEvent) {
+            match ev {
+                FilesEvent::Escape => self.files_escape(),
+                FilesEvent::Enter => self.files_open_selected(),
+                FilesEvent::Click { row, cmd, shift, double } => {
+                    self.files_surface(|b| b.handle(FilesEvent::Click { row, cmd, shift, double: false }));
+                    if double && !cmd && !shift {
+                        self.files_open_selected();
+                    }
+                }
+                FilesEvent::RowMenu { row, x, y } => {
+                    let path = self
+                        .files_surface(|b| {
+                            b.handle(FilesEvent::RowMenu { row, x, y });
+                            b.visible_rows().get(row).map(|e| e.path.clone())
+                        })
+                        .flatten();
+                    let Some(path) = path else { return };
+                    let (po, pr, pcf, pcp) = (path.clone(), path.clone(), path.clone(), path.clone());
+                    // Rename / compress / trash need the main app's Files backends.
+                    let actions = crate::views::files::FileMenuActions {
+                        open: Some(Box::new(move || {
+                            crate::platform::open_path(std::path::Path::new(&po));
+                        })),
+                        reveal: Some(Box::new(move || crate::app::hooks::reveal_in_files(&[pr]))),
+                        copy_file: Some(Box::new(move || {
+                            copy_files_toast(&[pcf]);
+                        })),
+                        copy_path: Some(Box::new(move || copy_text(&pcp))),
+                        ..Default::default()
+                    };
+                    let entries = crate::views::files::file_context_menu(&path, actions);
+                    crate::ui::menu_kit::popup(entries, None, x, y);
+                }
+                FilesEvent::SortMenu { x, y } => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    use crate::views::files::SortKey;
+                    let cur = self.files_surface(|b| b.sort_key).unwrap_or(SortKey::Name);
+                    let view = self.files_win.try_borrow().ok().and_then(|g| g.as_ref().and_then(|w| w.browser.view.clone()));
+                    let entries = SortKey::ALL
+                        .iter()
+                        .map(|k| {
+                            let k = *k;
+                            MenuEntry::checked(k.label(), k == cur, move || {
+                                with_ui(|ui| {
+                                    ui.files_surface(|b| b.set_sort(k));
+                                })
+                            })
+                        })
+                        .collect();
+                    if let Some(v) = view {
+                        popup(entries, Some(&v), x, y);
+                    }
+                }
+                FilesEvent::Drop { .. } | FilesEvent::BlankMenu { .. } => {}
+                other => {
+                    self.files_surface(|b| b.handle(other));
+                }
+            }
+        }
+
+        /// Keys while the Recent window is key: Esc, Up/Down (Ctrl+N/P), Return —
+        /// whether the filter field or the list has focus.
+        fn files_key(&self, event: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let key = self
+                .files_win
+                .try_borrow()
+                .ok()
+                .map(|g| g.as_ref().and_then(|w| w.panel.as_ref()).is_some_and(|p| p.isKeyWindow()))
+                .unwrap_or(false);
+            if !key {
+                return false;
+            }
+            let mods = event.modifierFlags();
+            let (cmd, ctrl, shift, opt) =
+                (mods.contains(F::Command), mods.contains(F::Control), mods.contains(F::Shift), mods.contains(F::Option));
+            let plain = !cmd && !ctrl && !shift && !opt;
+            match event.keyCode() {
+                popup::KEY_ESC if plain => self.files_escape(),
+                popup::KEY_RETURN | 76 if plain => self.files_open_selected(),
+                popup::KEY_DOWN if plain => {
+                    self.files_surface(|b| b.list.move_selection(1));
+                }
+                popup::KEY_UP if plain => {
+                    self.files_surface(|b| b.list.move_selection(-1));
+                }
+                45 if ctrl && !cmd && !opt => {
+                    self.files_surface(|b| b.list.move_selection(1));
+                }
+                35 if ctrl && !cmd && !opt => {
+                    self.files_surface(|b| b.list.move_selection(-1));
+                }
+                _ => return false,
+            }
+            true
         }
 
         fn show_paths(&self) {
@@ -976,6 +1205,9 @@ mod appkit {
                     return false;
                 }
             }
+            if self.files_key(event) {
+                return true;
+            }
             if self.paths_key(event) {
                 return true;
             }
@@ -1116,6 +1348,7 @@ mod appkit {
             tools: RefCell::new(HashMap::new()),
             opened_at: RefCell::new(HashMap::new()),
             paths_win: RefCell::new(None),
+            files_win: RefCell::new(None),
             shot: shot.clone(),
             palette_return: Cell::new(None),
             pick_return: Cell::new(None),

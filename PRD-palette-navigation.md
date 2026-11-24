@@ -31,3 +31,11 @@ Palette query is not restored on return (fresh list). Main-daemon views are unch
 
 ## Verify (needs an unlocked screen)
 Hyper+S -> Pretty Print -> Esc: palette is back. Esc again: gone, previous app focused.
+
+## Find Recent Files = the Files view, torn down
+Hyper+S -> Find Recent Files now opens the real Files view (`FileBrowser` + `FilesView`) in
+Recent mode: filter field, sort / order, the list and the preview pane, in a panel half the
+size of the full-screen app window. No sidebar, no Pin (`FilesView::set_compact`). Up/Down
+(Ctrl+N/P) move, Return opens, Esc clears the filter, then returns to the palette. The agent
+runs its own Recent engine (`start_recent`) so the list is live without the main app.
+The old paths shelf window (`views/paths.rs`, `show_paths`) is no longer reached from the palette.
