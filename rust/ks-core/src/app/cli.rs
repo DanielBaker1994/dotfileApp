@@ -302,9 +302,6 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
             open_command = Some("screenshot".to_string());
         }
         Some("pane-shot") => return Outcome::Exit(pane_shot(&sock, &args[2..])),
-        Some("term") => {
-            return Outcome::Exit(if send_launch_message(&sock, "term") { 0 } else { not_running() });
-        }
         Some(mode) if hotkey::is_hotkey_mode(mode) => {
             if send_launch_message(&sock, mode) {
                 return Outcome::Exit(0);

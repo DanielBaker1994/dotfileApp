@@ -118,7 +118,7 @@ case "$MODE" in quick)
     exit 0
 esac
 
-case "$MODE" in window|jira|files|terminal|confluence|ai)
+case "$MODE" in window|jira|files|confluence|ai)
     LOG "== invoke MODE=$MODE focused=[$LINE] =="
     # files, jira and output windows are all views of ONE shared
     # window: move ours (not the Hyper+S palette, titled like the app) onto

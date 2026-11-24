@@ -56,7 +56,7 @@ DO_ACTIONS = (
     "last view, or `jira` if none), `rebuild-card:<view>`, "
     "`cycle` / `cycle-back` (the next / previous header view; Files when none "
     "are registered), `hide`, `back` (returns to the previous view), `home`, "
-    "`toggle`, `term`, `switcher`, `switcher-hide`, `jira-jump`, "
+    "`toggle`, `switcher`, `switcher-hide`, `jira-jump`, "
     "`jira-poll-on`, `jira-poll-off`, `jira-setup`, `reset-size`, "
     "`pane:h|j|k|l`, `pane:focus:<id>`, `key:<spec>` (non-empty; recorded as "
     "state `lastKey`; sends nothing), "
@@ -72,7 +72,7 @@ DO_ACTIONS = (
     "`screenshot:<sub>`, `board:<sub>` (Jira board: `open:<id>`, `list`, "
     "`list-open:<id>`, `list-star:<id>`, `view:<board|sprint|mode>`, "
     "`sprint:<id>`, `mode:<columns|table>`, `pin`). "
-    "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, `term`, "
+    "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, "
     "`jira-jump`, `reset-size`, `board:*`) are refused in headless mode. Pass "
     "one of these; a typo is not always distinguishable from success."
 )
@@ -119,7 +119,7 @@ STATE_HELP = (
 # The headless caveat, shared by ks_help's state section and its own note.
 HEADLESS_HELP = (
     "Headless mode runs no AppKit: window-only verbs are refused (see "
-    "`needs_window` in host.rs): `paths:show`, `switcher`, `term`, `jira-jump`, "
+    "`needs_window` in host.rs): `paths:show`, `switcher`, `jira-jump`, "
     "`reset-size`, `tool:<name>`. `screenshot`/`pane-shot`/`window-shot` are "
     "refused too. "
     "`state` still reports `shown: true` for panels that cannot exist without a "
@@ -386,7 +386,7 @@ class Server:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "description": "Action without the `do:` prefix, e.g. `open:files`, `term`, `cycle`.",
+                                "description": "Action without the `do:` prefix, e.g. `open:files`, `cycle`.",
                             }
                         },
                         "required": ["action"],

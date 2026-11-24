@@ -20,5 +20,4 @@ pub use ks_core::views::paths;
 pub use ks_core::views::screenshot;
 pub mod setup;
 pub use ks_core::views::switcher;
-pub mod terminal;
 pub use ks_core::views::tools;

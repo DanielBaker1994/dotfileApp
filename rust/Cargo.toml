@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ws-rs", "ks-core", "ws-helpers", "swiftterm-shim"]
+members = ["ws-rs", "ks-core", "ws-helpers"]
 
 [profile.release]
 opt-level = 3

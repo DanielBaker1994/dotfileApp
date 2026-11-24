@@ -6,12 +6,12 @@ handling must honor these.
 ## 1. Obvious edit shortcuts always work in every text input
 
 Copy / Paste / Cut / Select All / Undo must work in **every** editable text
-field: the search/filter bars, the embedded terminal, tool panels, and
+field: the search/filter bars, tool panels, and
 **every sheet prompt** (Rename…, path prompts).
 
 - `Cmd+C` / `Cmd+V` / `Cmd+X` / `Cmd+A` / `Cmd+Z` — native macOS.
-- `Ctrl+V` (and `Ctrl+C`) — must paste/copy too, because the embedded
-  terminal honors them and users expect the same everywhere.
+- `Ctrl+V` (and `Ctrl+C`) — must paste/copy too; users expect the same
+  everywhere.
 - Do NOT rely on AppKit key equivalents alone (the popup windows' focus is
   non-standard); route edit keys to the active field editor explicitly.
 - The key router (`route_key_event` in `rust/ws-rs/src/app/host.rs`, deciding
@@ -22,7 +22,7 @@ field: the search/filter bars, the embedded terminal, tool panels, and
 
 ## 2. Right-click menus must offer obvious actions
 
-File browsers and the embedded terminal must have right-click menus with the
+File browsers must have right-click menus with the
 actions users expect: copy the file, copy the absolute path, and reveal it in
 the app's own Files view (`Reveal in Files`). (The notes app was removed;
 markdown editing lives in nvim — `~/.dotfiles/nvim`.)
@@ -49,22 +49,11 @@ When working on this repo, ALWAYS verify you are in the real repo directory
 in a different repo or workspace. The install script is for installing the
 app — not for modifying git history anywhere.
 
-## 5. NEVER rebuild SwiftTerm (the fetched checkout) unless explicitly told to
+## 5. (Retired) SwiftTerm
 
-SwiftTerm is a third-party embedded terminal library. It is **not committed**
-and does not live in this repo: `bin/ensure-swiftterm.sh` fetches it at the
-pinned upstream commit from `install.conf` into `SWIFTTERM_DIR` (default
-`../SwiftTerm`, outside the git tree) and applies
-`patches/swiftterm-cellstorage-cache.patch`. It is precompiled once into a
-static lib (`.build/SwiftTerm/libSwiftTerm.a`).
+The embedded SwiftTerm terminal was removed in Nov 2026 by owner decision; there is
+no fetched checkout or patch any more. Do not bring it back without being asked.
 
-- NEVER modify, edit, or refactor any code under the SwiftTerm checkout — it is
-  fetched, so edits are lost; carry needed changes as a patch in `patches/`.
-- NEVER rebuild it (`build_term_lib`) unless the user explicitly requests it.
-- The build script auto-rebuilds it only when a SwiftTerm source file changes —
-  do not touch those files, and it won't trigger.
-- If SwiftTerm is missing or broken, ask the user before rebuilding (the build
-  fetches it automatically, so a missing directory is normally fine).
 ## 6. Transient overlays own the keyboard, and Esc closes only them
 
 Every popover / picker / dropdown opened from a window (the jira column

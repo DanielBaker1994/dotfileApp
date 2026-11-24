@@ -292,7 +292,7 @@ class Handshake(McpTestCase):
 
         do_desc = tools["ks_do"]["description"]
         self.assertIn("Valid actions", do_desc)
-        for action in ("open:<view>", "term", "cycle", "home",
+        for action in ("open:<view>", "cycle", "home",
                        "pane:h|j|k|l", "screenshot:<sub>"):
             self.assertIn(action, do_desc, action)
         self.assertIn("`files`", do_desc)  # the open:<view> list names the views

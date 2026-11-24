@@ -13,7 +13,7 @@ ws — kitchen-sink entry point
   ws build [--force|--build-only]   compile + relaunch
   ws clean [--all]                  stop the app and wipe build objects so the
                                     next build is from scratch (--all: also
-                                    SwiftTerm, .build/dist and the app bundle)
+                                    .build/dist and the app bundle)
   ws dmg [--no-notarize]            build the distributable .dmg
   ws test [all|SUITE|install]
                                     unit tests (SUITE = config, compare, …).

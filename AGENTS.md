@@ -11,7 +11,7 @@ kitchen-sink is a single-instance macOS app — **Rust + AppKit via objc2**
 (`rust/`, cargo workspace) — that runs as a hotkey-driven daemon: AeroSpace / CLI
 launches talk to it over a Unix socket (`$TMPDIR/ws-notes.sock`, lock file beside
 it), and one **shared window** hosts the views — files, jira, confluence,
-AI — plus tool panels (screenshot, paths, terminal, prettyprint,
+AI — plus tool panels (screenshot, paths, prettyprint,
 filefast, health checks, view switcher / command palette). It is a *regular* app
 (`NSApplicationActivationPolicy::Regular`: menu bar + status item). Python
 (`pylib/` plus `jira/`, `confluence/`, `notify/`, `settings_hub/`) is the "cold
@@ -28,7 +28,8 @@ History: the app was Swift until the Phase-4 cutover (Oct 2026); the Rust
 port mirrors the old Swift files module for module, and Swift type names
 survive in comments (`SwitcherController`,
 `PopupWindow.handleKey`, `testQuery`) — use them to find the Rust counterpart.
-The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
+No Swift is left: the SwiftTerm terminal panel (and its shim crate) was removed
+in Nov 2026 by owner decision.
 
 ## Non-negotiable rules (condensed from `rule.md`)
 
@@ -37,7 +38,7 @@ The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
    `ui::popup::route_key` must forward edit shortcuts to the focused field
    editor; sheets route paste to their field editor and set
    `initialFirstResponder`).
-2. **Right-click menus** in file browsers / the terminal offer: copy file,
+2. **Right-click menus** in file browsers offer: copy file,
    copy absolute path, reveal in the app's own Files view. (The notes app
    was removed Nov 2026; markdown editing, snippets and the document-style
    picker now live in nvim (`~/.dotfiles/nvim`: `<leader>mdo` build/open,
@@ -47,10 +48,7 @@ The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
 4. **Git only in this repo** (`/Users/danielbaker/.config/kitchen-sink`).
    Never stage/commit/change `.git` in a `.bak` copy, backup, or duplicate.
    Verify with `git rev-parse --show-toplevel` before git commands.
-5. **SwiftTerm is fetched, not committed** (`../SwiftTerm`, pinned by
-   `install.conf`, applied `patches/swiftterm-cellstorage-cache.patch`).
-   Never edit or rebuild it unless explicitly told; carry changes as a patch.
-   A missing checkout is fine — the build fetches it.
+5. (Retired: the SwiftTerm rule. The embedded terminal was removed in Nov 2026.)
 6. **Transient overlays own the keyboard.** Popovers/pickers take key focus on
    open and Esc closes only them, never the window under them.
 7. **Python stays stable.** Keep the helper protocol and `pylib/` behavior
@@ -80,9 +78,7 @@ identity, then relaunches via `bin/kitchen_sink.sh window`):
 `cargo build --release -p ws-rs -p ws-helpers` in `rust/` with
 `CARGO_TARGET_DIR=.build/rust-target`; output is the repo-root
 `kitchen-sink.app` (the path AeroSpace, `kitchen_sink.sh` and the TCC grants
-use). Before cargo it runs `bin/ensure-swiftterm.sh` and compiles the pinned
-SwiftTerm into `.build/SwiftTerm/libSwiftTerm.a` **only when that checkout
-changed** (the shim crate's `build.rs` links it). `--dist` →
+use). `--dist` →
 `.build/dist/kitchen-sink.app` with resources per `install.conf` `RESOURCE_*`,
 a rewritten `commands.default.toml` and the AX helpers in
 `Resources/helpers-bin` (`HELPER_BINS`). Signed with the self-signed `SIGN_ID`
@@ -90,10 +86,9 @@ a rewritten `commands.default.toml` and the AX helpers in
 the running daemon before swapping the binary.** `--stale` exits 0 when a
 rebuild is needed (`kitchen_sink.sh` uses it for build-if-stale). `ws clean`
 stops the daemon and removes `.build/rust-target` (plus `rust/target` so the
-next build is a full cargo rebuild); `--all` also wipes `.build/SwiftTerm`,
-`.build/.termbuilt`, `.build/dist` and the repo-root app bundle (a wiped
+next build is a full cargo rebuild); `--all` also wipes `.build/dist` and the repo-root app bundle (a wiped
 bundle is recreated by `mkdir -p` + a full build). Toolchain:
-cargo (brew `rust` or rustup) + Xcode CLT (`swiftc`, for SwiftTerm + the shim).
+cargo (brew `rust` or rustup) + Xcode CLT.
 Don't export `MACOSX_DEPLOYMENT_TARGET=26.7` (corrupt proc-macro dylibs).
 
 **Tests.** `./ws test SUITE` → `bin/run-tests.sh SUITE`. `all` (the default)
@@ -279,13 +274,11 @@ gitignored.
     `jira_poll.rs`, `synth_input.rs` and re-exports.
   - `ui/` — `shared_window.rs`, `jira_setup.rs` (the rest is in ks-core).
   - `views/` — `jira.rs`, `pane_find.rs` (jira-jump + `/` pane finder),
-    `confluence.rs`, `ai.rs`, `terminal.rs`, `inspector.rs`, `setup.rs`
+    `confluence.rs`, `ai.rs`, `setup.rs`
     (`AppInstall` + setup UI), the jira/confluence/ai views.
   - `engines/` — ai_format only.
 - `ws-helpers` — `dock_badges` + `webex_unread` AX helpers (run by
   `notify/notify_poll.py`).
-- `swiftterm-shim` — the one Swift piece: `WSShim`, a tiny `NSView` around the
-  pinned `libSwiftTerm.a`, built by its `build.rs`.
 
 Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 `do_host_action`, `raw_deferred`, `route_key_event`, `route_key`, `SlotView`,
@@ -312,11 +305,11 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 
 `bin/` (build/test/install tooling; `lib.sh` for `ws_*` helpers;
 `preflight.sh`, `grant-permissions.sh`, `setup-home.sh`, `symlinks.sh` at
-root); `Tests/` (Python tests + `helper_fixtures/`,
+root); `Tests/` (Python tests,
 `test_install.sh`); `config/` (aerospace + borders rc, per-file symlinks from
 `~/.config/<name>`, plus `paths.ignore`); `rules/` (AI rule markdown),
 `templates/`, `samples/`,
-`patches/` (SwiftTerm patch only), `.claude/skills/` (repo skills incl.
+`.claude/skills/` (repo skills incl.
 `ui-check`; `.agents/` is gitignored).
 
 ### Docs
@@ -368,9 +361,9 @@ JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `views.<view>` (`shown`, `key`, `frame [x,y,w,h]`, `wid`, plus per-view extras),
 `hideOnFocusLoss`, `escHides`, `headerStyle`, `pane`, `screenshot`,
 `paneShot`, `paths`, `tools.<name>`, `palette`, `paletteCommands`,
-`viewSwitcher`, `terminalPanel`, `activations`, `pid`. Useful `do:` actions:
+`viewSwitcher`, `activations`, `pid`. Useful `do:` actions:
 `cycle`, `cycle-back`, `hide`, `back`, `home`, `toggle`, `open:<view>`,
-`term`, `switcher`, `reset-size`, `pane:h|j|k|l`,
+`switcher`, `reset-size`, `pane:h|j|k|l`,
 `pane:focus:<id>`, `key:<spec>`, `header-style:<style>`,
 `esc-hides:<view>:on|off`, `tool:<name>` / `tool-close:<name>`, `screenshot:*`,
 `paths:*`, `sidebar-width:<view>[:px]`,
@@ -389,7 +382,7 @@ Copy Text join wide-gapped blocks on a row with a tab so tables keep columns.
 daemon; the main daemon keeps `show` / `do:` / `screenshot` on its own socket
 for in-window use and tests. The rules in this paragraph apply to both.
 **Hyper+S never activates kitchen-sink.** The palette and every popup it opens
-(tool panels, terminal, paths, screenshot, note finders) are non-activating
+(tool panels, paths, screenshot, note finders) are non-activating
 panels that take the keyboard without activating the app; only a pick of
 "Kitchen Sink" or a view activates (via the view's `present`). Never add
 `activate_app` to a popup path: an active kitchen-sink with no window up lets
@@ -446,9 +439,8 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   `logs/YYYY_MM_DD/daemon.log` (`quick: …`, `hotkey: toggle recv->shown Nms`).
 - **Picks**: agent-owned commands open locally (`quick::route_command`);
   workspaces via AeroSpace IPC; everything else (views, "Bansho"/`window`,
-  terminal, jira-config, health) is forwarded to `ws-notes.sock`
-  (`quick::forward_to_main`; `jira-config` → `jira-dashboard`, `terminal` →
-  `term`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
+  jira-config, health) is forwarded to `ws-notes.sock`
+  (`quick::forward_to_main`; `jira-config` → `jira-dashboard`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
   nothing answers. Screenshot / paths "reveal in Files" send `reveal\tPATH…` to
   the main socket (`hooks::set_reveal_hook`; lost if the main app is down).
 - **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
@@ -458,7 +450,7 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   it shows what is on disk and adds screenshots.
 - **Not in the agent**: rename / compress / trash in the paths shelf (rows menu
   offers open / reveal / copy), the screenshot `do:` hooks (registered only in
-  the main daemon), health checks, the terminal panel.
+  the main daemon), health checks.
 
 ### Keyboard / focus
 
@@ -467,8 +459,7 @@ The daemon UI installs one local `keyDown` monitor → `route_key_event`
 switcher, tool panels — Esc streak per `escCloseCount`/`esc-close` (0 =
 never), window-size keys, edit keys) deciding through `ui::popup::route_key`.
 Ctrl+B is a 1.5 s prefix: L = previous view, W = view switcher
-(`views/switcher.rs`), T =
-terminal, B = sidebar rail (every `SidebarView` pane: files,
+(`views/switcher.rs`), B = sidebar rail (every `SidebarView` pane: files,
 jira, confluence, ai; persisted per view as `sidebarRail.<view>`).
 `PaneNav` moves the focus ring between panes;
 `VimKeys` gives the focused pane normal/insert/search modes. Tool panels are
@@ -505,7 +496,7 @@ minus .json>")`; user/runtime data keeps its own I/O.
 Flat `[section]` tables, one `key = value` per line: `[app]`, `[theme]`,
 `[themes]`, per-view sections (`[files]`, `[jira]`, `[confluence]`,
 `[ai]`, `[screenshot]`, `[pane-shot]`, `[paths]`, `[pane-find]`,
-`[filefast]`), `[icons]`, `[shortcuts]`, `[terminal]`, `[prettyprint]`,
+`[filefast]`), `[icons]`, `[shortcuts]`, `[prettyprint]`,
 `[health-checks]`, `[setup]`, `[settings-hub]`, … Reads go through the Python
 line codec (or the pure scans in `host.rs`, which unquote values like the
 codec); writes through `config.line`/`config.setting` with a validation gate
@@ -582,8 +573,6 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   self-signed cert.
 - **`./ws build` kills and relaunches the app**; UI tests take it over, steal
   focus, and mutate `commands.toml` (restored). Run once, not concurrently.
-- **SwiftTerm is read-only** (fetched into `../SwiftTerm`); changes go in
-  `patches/`. The shim (`rust/swiftterm-shim/shim/WSShim.swift`) is ours.
 - **Symbols over line numbers** — line numbers drift constantly.
 
 ## Known gaps (see `HANDOFF-rust-port-next.md`)

@@ -213,15 +213,6 @@
       "note": "headless counts as 'user already in it', so toggle hides the shown view."
     },
     {
-      "verb": "term",
-      "grammar": "term (no argument)",
-      "happy": ["term"],
-      "bad": [],
-      "bad_note": "no argument to be malformed",
-      "headless": "refused",
-      "expect": {}
-    },
-    {
       "verb": "switcher",
       "grammar": "switcher (no argument)",
       "happy": ["switcher"],

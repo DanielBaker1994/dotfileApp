@@ -19,6 +19,6 @@ git show <commit>:AGENT_CONTEXT.md   # the old full document
 
 - `AGENTS.md` — the single current context doc: rules, build/run/test, code
   map, architecture, the Rust port, common tasks, gotchas.
-- `rule.md` — the non-negotiable UX/git/SwiftTerm rules.
+- `rule.md` — the non-negotiable UX/git rules.
 - `BACKLOG.md`, `PRD-*.md`, `PRODUCT.md`, `DESIGN.md`, `README.md` — deep
   dives for the parts they cover.

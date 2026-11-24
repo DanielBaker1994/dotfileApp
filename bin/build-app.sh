@@ -7,18 +7,14 @@
 #   build-app.sh --dist     self-contained bundle in .build/dist (resources,
 #                           commands.default.toml, AX helpers)
 #
-# The app is the `kitchen-sink` binary of rust/ws-rs; the one Swift piece is the
-# SwiftTerm shim crate (rust/swiftterm-shim), which links the pinned, prebuilt
-# .build/SwiftTerm/libSwiftTerm.a (fetched by ensure-swiftterm.sh, compiled
-# here only when the SwiftTerm checkout changes).
+# The app is the `kitchen-sink` binary of rust/ws-rs.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 . "$ROOT/install.conf"
 
 # NOTE: do NOT export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN here — the Homebrew
-# rustc produces a corrupt proc-macro dylib for that target. The SwiftTerm
-# min-OS is handled at link time (rust/.cargo/config.toml).
+# rustc produces a corrupt proc-macro dylib for that target.
 
 DIST=0
 [ "${1:-}" = "--dist" ] && DIST=1
@@ -29,11 +25,6 @@ WORKSPACE="$ROOT/rust"
 CARGO_TARGET_DIR="$ROOT/.build/rust-target"
 export CARGO_TARGET_DIR
 "$DIR/check-macos.sh" || exit 1
-TERM_SRC="$ROOT/$SWIFTTERM_DIR"
-TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
-TERM_LIB="$TERM_MOD_DIR/libSwiftTerm.a"
-TERM_SENTINEL="$ROOT/.build/.termbuilt"
-TERM_TARGET="$(uname -m)-apple-macosx$MACOS_MIN"
 TMP="${TMPDIR:-/tmp}"
 
 # Every app/helper log lives in the date-based logs/ dir (pylib/log_hub.py).
@@ -56,26 +47,10 @@ announce_logs() {
 command -v cargo >/dev/null 2>&1 || {
     echo "build-app: cargo not found — install Rust (rustup or 'brew install rust')" >&2; exit 1; }
 
-lib_target_ok() {
-    [ -f "$TERM_LIB" ] || return 1
-    local minos
-    minos="$(otool -l "$TERM_LIB" 2>/dev/null | awk '
-        /LC_BUILD_VERSION/     { b = 1; next }
-        b && $1 == "minos"     { print $2; exit }
-        /LC_VERSION_MIN_MACOSX/ { v = 1; next }
-        v && $1 == "version"   { print $2; exit }')"
-    [ "$minos" = "$MACOS_MIN" ] || return 1
-    lipo -info "$TERM_LIB" 2>/dev/null | grep -q "$(uname -m)"
-}
-
 stale() {
-    [ -x "$BIN" ] && [ -f "$TERM_LIB" ] || return 0
-    [ "$(cat "$TERM_SENTINEL" 2>/dev/null)" = "$TERM_TARGET" ] || return 0
-    lib_target_ok || return 0
-    [ -f "$TERM_SRC/.ws-pinned" ] || return 0
-    [ "$(cat "$TERM_SRC/.ws-pinned" 2>/dev/null)" = "$SWIFTTERM_PIN" ] || return 0
+    [ -x "$BIN" ] || return 0
     [ -n "$(find "$WORKSPACE" \( -path "$WORKSPACE/target" -prune \) -o \
-        \( -name '*.rs' -o -name '*.swift' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name '*.toml' \) \
+        \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name '*.toml' \) \
         -newer "$BIN" -print 2>/dev/null | head -1)" ] && return 0
     local f
     for f in "$ROOT/Info.plist" "$ROOT/install.conf"; do
@@ -84,36 +59,12 @@ stale() {
     return 1
 }
 
-build_term_lib() {
-    [ -f "$TERM_SENTINEL" ] && \
-        [ "$(cat "$TERM_SENTINEL" 2>/dev/null)" = "$TERM_TARGET" ] && \
-        lib_target_ok && \
-        [ -z "$(find "$TERM_SRC"/Sources "$TERM_SRC"/Generated \
-            -name '*.swift' -newer "$TERM_SENTINEL" 2>/dev/null | head -1)" ] && return 0
-    mkdir -p "$TERM_MOD_DIR"
-    swiftc -O -swift-version 5 -target "$TERM_TARGET" -parse-as-library -emit-library -static -module-name SwiftTerm \
-        "$TERM_SRC"/Sources/SwiftTerm/*.swift \
-        "$TERM_SRC"/Sources/SwiftTerm/Apple/*.swift \
-        "$TERM_SRC"/Sources/SwiftTerm/Apple/Metal/*.swift \
-        "$TERM_SRC"/Sources/SwiftTerm/Mac/*.swift \
-        "$TERM_SRC"/Sources/SwiftTerm/Portable/*.swift \
-        "$TERM_SRC"/Generated/*.swift \
-        -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
-        -o "$TERM_LIB" >"$TERM_MOD_DIR/build.log" 2>&1 || {
-            cat "$TERM_MOD_DIR/build.log" >&2
-            echo "build-app: SwiftTerm failed to compile" >&2; return 1; }
-    printf '%s\n' "$TERM_TARGET" > "$TERM_SENTINEL"
-}
-
 case "${1:-}" in
     --stale) stale; exit $? ;;
     --force|--dist) ;;
     "") stale || { announce_logs; exit 0; } ;;
     *) echo "usage: build-app.sh [--force|--stale|--dist]" >&2; exit 2 ;;
 esac
-
-"$DIR/ensure-swiftterm.sh" || exit 1
-build_term_lib || exit 1
 
 [ "$DIST" = 1 ] && rm -rf "$APP"
 mkdir -p "$(dirname "$BIN")" "$APP/Contents/Resources"

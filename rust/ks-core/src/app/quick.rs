@@ -121,7 +121,6 @@ pub fn route_command(id: &str) -> PickRoute {
 pub fn forward_message(id: &str) -> String {
     match id {
         "jira-config" => "jira-dashboard".to_string(),
-        "terminal" => "term".to_string(),
         other => other.to_string(),
     }
 }
@@ -140,7 +139,6 @@ pub fn cold_start_mode(message: &str) -> &'static str {
         "jira" | "jira-dashboard" | "jira-setup" => "jira",
         "confluence" => "confluence",
         "ai" => "ai",
-        "term" | "terminal" => "terminal",
         _ => "window",
     }
 }
@@ -1181,17 +1179,15 @@ mod tests {
         assert_eq!(route_command("window"), PickRoute::Forward("window".into()));
         assert_eq!(route_command("files"), PickRoute::Forward("files".into()));
         assert_eq!(route_command("jira-config"), PickRoute::Forward("jira-dashboard".into()));
-        assert_eq!(route_command("terminal"), PickRoute::Forward("term".into()));
         assert_eq!(route_command("health"), PickRoute::Forward("health".into()));
         assert!(pick_keeps_app("window") && pick_keeps_app("jira-config"));
-        assert!(!pick_keeps_app("paths") && !pick_keeps_app("terminal"));
+        assert!(!pick_keeps_app("paths"));
     }
 
     #[test]
     fn cold_start_modes_cover_forwarded_messages() {
         assert_eq!(cold_start_mode("window"), "window");
         assert_eq!(cold_start_mode("jira-dashboard"), "jira");
-        assert_eq!(cold_start_mode("term"), "terminal");
         assert_eq!(cold_start_mode("health"), "window");
         assert_eq!(cold_start_mode("reveal\t/a"), "window");
     }

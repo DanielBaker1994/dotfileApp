@@ -452,9 +452,9 @@ ws_cmd_clean() {
 
     echo
     if [ "$all" = 1 ]; then
-        echo "clean --all done. next: ./ws build  — full cargo + SwiftTerm rebuild."
+        echo "clean --all done. next: ./ws build  — full cargo rebuild."
     else
         echo "clean done. next: ./ws build  — full cargo rebuild."
-        echo "  (--all also wipes $APP_NAME.app, .build/SwiftTerm and .build/dist)"
+        echo "  (--all also wipes $APP_NAME.app and .build/dist)"
     fi
 }

@@ -497,13 +497,6 @@ icon = "notes"
 save-dir = "/tmp/"
 syntax-highlight = true
 
-[terminal]
-enabled = true
-in-palette = false
-label = "Terminal"
-type = "shell"
-icon = "terminal"
-
 [health-checks]
 enabled = true
 label = "Health Checks"

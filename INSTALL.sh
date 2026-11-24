@@ -166,7 +166,7 @@ info "Set its location in pylib/paths.json (configDir)."
 
 STEP="building the app"
 step "4/6 building kitchen-sink.app (cargo build of rust/)"
-info "compiling (first run also fetches crates and precompiles SwiftTerm — a few minutes)…"
+info "compiling (first run also fetches and compiles crates — a few minutes)…"
 "$ROOT/bin/build-app.sh" --force
 ok "compiled + code-signed + permissions granted"
 

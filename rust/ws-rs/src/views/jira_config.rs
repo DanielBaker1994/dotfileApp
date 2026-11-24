@@ -479,6 +479,12 @@ pub fn job_detail(j: &DescribeJob) -> JobDetail {
     }
 }
 
+#[cfg(test)]
+/// The selected job's detail from a describe payload (`None` = no such job).
+pub fn detail_for(d: &Describe, name: &str) -> Option<JobDetail> {
+    d.endpoints.iter().find(|j| j.name == name).map(job_detail)
+}
+
 /// An endpoint `args` object -> the `key=value, key=value` text the pane edits.
 pub fn args_text(args: &Value) -> String {
     args.as_object()
@@ -2055,5 +2061,51 @@ enabled = true
         assert_eq!(config_do("jira-config:job:"), Some(json!({"error": "jira-config:job:<name>"})));
         assert!(config_do("jira-config:nope").is_none());
         assert!(config_do("something-else").is_none());
+    }
+
+    #[test]
+    fn detail_and_upsert_payload_carry_the_editable_fields() {
+        let d = describe(json!({
+            "endpoints": [
+                {
+                    "name": "issues", "window": "10m", "enabled": true,
+                    "jql": "", "extraJql": "project = KAN",
+                    "args": {"a": "1", "b": 2},
+                    "columnsSpec": "[{\"field\":\"key\"}]"
+                },
+                {
+                    // A plain (shared-sync) job: `jql` is the *generated* sync
+                    // query (with ORDER BY), `extraJql` is empty.
+                    "name": "plain", "window": "30m", "enabled": true,
+                    "jql": "project in (\"KAN\") ORDER BY key ASC",
+                    "extraJql": ""
+                }
+            ]
+        }));
+        let detail = detail_for(&d, "issues").unwrap();
+        assert_eq!(detail.name, "issues");
+        assert_eq!(detail.window, "10m");
+        assert!(detail.enabled);
+        assert_eq!(detail.jql, "project = KAN");
+        assert_eq!(detail.args, "a=1, b=2");
+        assert_eq!(detail.columns, "[{\"field\":\"key\"}]");
+        // No such job -> None (the pane stays empty).
+        assert!(detail_for(&d, "nope").is_none());
+
+        let payload = upsert_payload(&detail);
+        assert_eq!(payload["name"], json!("issues"));
+        assert_eq!(payload["jql"], json!("project = KAN"));
+        assert_eq!(payload["args"], json!({"a": "1", "b": "2"}));
+        // The schedule / enabled / columns are the other verbs' concern.
+        assert!(payload.get("window").is_none());
+        assert!(payload.get("enabled").is_none());
+        assert!(payload.get("columns").is_none());
+
+        // A plain job's detail must NOT fall back to the generated `jql`:
+        // saving it would convert the shared-sync job into a standalone-JQL
+        // job (and nest a second ORDER BY on the next sync).
+        let plain = detail_for(&d, "plain").unwrap();
+        assert_eq!(plain.jql, "");
+        assert_eq!(upsert_payload(&plain)["jql"], json!(""));
     }
 }

@@ -106,8 +106,6 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
   client, config, Python helper client; `ui/` popup framework + shared
   window; `views/` files, jira, confluence, AI, screenshot, …;
   `engines/` pure logic; `panes/` pane focus + vim keys
-- `rust/swiftterm-shim` — the one Swift piece: a tiny `NSView` wrapper around
-  the pinned SwiftTerm library for the embedded terminal
 - `rust/ws-helpers` — the notify AX helpers (`dock_badges`, `webex_unread`)
 - `bin/build-app.sh` — `cargo build` → the signed `kitchen-sink.app`
 - `commands.toml` — every user-facing string + window definition (the app is

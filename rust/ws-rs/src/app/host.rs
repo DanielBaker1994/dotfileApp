@@ -106,8 +106,6 @@ pub enum UiCommand {
     HideSwitcher,
     /// The paths shelf tool window (`do:paths:*`).
     Paths(PathsCmd),
-    /// Toggle the `/terminal` tool panel (`do:term`, Ctrl+B T).
-    TerminalPanel,
     /// Open (or re-raise) one of the `openTool` panels (`do:tool:*`).
     Tool(ToolKind),
     /// Order a tool panel out (`do:tool-close:*`).
@@ -283,10 +281,6 @@ struct ControllerInner {
     screenshot: Value,
     pane_shot: Value,
     tools: Map<String, Value>,
-    terminal_panel: bool,
-    /// The live `TerminalPanel.testState()` once the panel is built (the
-    /// daemon UI pushes it each drain); `None` = never built.
-    terminal_panel_state: Option<Value>,
     view_switcher: bool,
     /// The rows `state.viewSwitcher.rows` reports (pushed by the daemon UI
     /// when the palette is built; empty until then).
@@ -368,17 +362,6 @@ impl ControllerInner {
         self.visible = true;
         self.logs.push(format!("shared window: {}", v.raw()));
         self.ui_push(UiCommand::Present(v));
-    }
-
-    /// Toggle the `/terminal` panel: flip the mirror (and the live doc's
-    /// `shown` until the daemon UI's next push) and queue the UI command.
-    fn flip_terminal_panel(&mut self) {
-        self.terminal_panel = !self.terminal_panel;
-        let shown = self.terminal_panel;
-        if let Some(o) = self.terminal_panel_state.as_mut().and_then(Value::as_object_mut) {
-            o.insert("shown".into(), json!(shown));
-        }
-        self.ui_push(UiCommand::TerminalPanel);
     }
 
     fn ui_push(&self, cmd: UiCommand) {
@@ -631,10 +614,6 @@ impl ControllerInner {
             "toast": crate::ui::toast::state(),
             "input": crate::app::synth_input::state(),
             "headerStyle": self.settings.header_style.raw(),
-            "terminalPanel": self
-                .terminal_panel_state
-                .clone()
-                .unwrap_or_else(|| json!({ "shown": self.terminal_panel })),
             "viewSwitcher": {
                 "shown": self.view_switcher,
                 "rows": self.switcher_rows,
@@ -679,7 +658,6 @@ pub struct SwitcherController {
 fn needs_window(action: &str) -> bool {
     action == "paths:show"
         || action == "switcher"
-        || action == "term"
         || action == "jira-jump"
         || action == "reset-size"
         || action.starts_with("tool:")
@@ -747,8 +725,6 @@ impl SwitcherController {
             screenshot: json!({ "shown": false, "permission": false, "displays": [], "buttons": [], "objects": [] }),
             pane_shot: json!({}),
             tools: Map::new(),
-            terminal_panel: false,
-            terminal_panel_state: None,
             view_switcher: false,
             switcher_rows: Vec::new(),
             paths_state: json!({ "shown": false, "rows": [] }),
@@ -1113,17 +1089,46 @@ impl SwitcherController {
             .insert(name.to_string(), state);
     }
 
+    #[cfg(test)]
+    pub fn registry_mut(&mut self) -> &mut Registry {
+        &mut self.registry
+    }
+
+    #[cfg(test)]
+    pub fn set_panes(&self, panes: Vec<PaneSpec>) {
+        self.inner.lock().unwrap().panes = panes;
+    }
+
+    #[cfg(test)]
+    pub fn set_esc_hides(&self, v: SlotView, on: bool) {
+        self.inner
+            .lock()
+            .unwrap()
+            .esc_sections
+            .insert(v.raw().to_string(), i64::from(on));
+    }
+
+    #[cfg(test)]
+    /// `state.paths` — the live `PathsWindow.testState` document.
+    pub fn set_paths_state(&self, state: Value) {
+        self.inner.lock().unwrap().paths_state = state;
+    }
+
+    #[cfg(test)]
+    /// `[paths] enabled` — gates `do:paths:show` (Swift `pathsCommand`).
+    pub fn set_paths_enabled(&self, on: bool) {
+        self.inner.lock().unwrap().paths_enabled = on;
+    }
+
+    #[cfg(test)]
+    pub fn logs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().logs.clone()
+    }
+
     /// Drop a tool panel's `tools` entry (`unregisterSubWindow`).
-    /// `state.terminalPanel` ← the live panel document (daemon UI).
     /// The live `PaneNav.testState` (main thread, after each ring refresh).
     pub fn set_live_pane_state(&self, state: Value) {
         self.inner.lock().unwrap().live_pane = Some(state);
-    }
-
-    pub fn set_terminal_panel_state(&self, state: Value) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.terminal_panel = state["shown"].as_bool().unwrap_or(false);
-        inner.terminal_panel_state = Some(state);
     }
 
     pub fn remove_tool_state(&self, name: &str) {
@@ -1157,7 +1162,6 @@ impl SwitcherController {
             "jira-config" => {
                 self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
             }
-            "terminal" => self.toggle_terminal_panel(),
             "find-window" => self.find_window(),
 "window" | "show" | "files" | "jira" | "confluence" | "ai"
             | "prettyprint" | "filefast" | "health" | "health-checks"
@@ -1584,11 +1588,6 @@ impl SwitcherController {
         }
     }
 
-    /// `SwitcherController.toggleTerminalPanel()`.
-    pub fn toggle_terminal_panel(&self) {
-        self.inner.lock().unwrap().flip_terminal_panel();
-    }
-
     /// `toggleCommand(_:)`: map a hotkey mode name onto a view / toggle.
     pub fn toggle_command(&self, name: &str) {
         match name {
@@ -1597,9 +1596,6 @@ impl SwitcherController {
             }
             "show" => {
                 self.palette_toggle();
-            }
-            "term" => {
-                self.toggle_terminal_panel();
             }
             "jira" => {
                 self.hotkey(SlotView::Jira);
@@ -1619,9 +1615,6 @@ impl SwitcherController {
             }
             "ai" => {
                 self.hotkey(SlotView::Ai);
-            }
-            "terminal" => {
-                self.toggle_terminal_panel();
             }
             "paths" => {
                 let shown = self
@@ -2081,10 +2074,6 @@ impl SwitcherController {
                 self.toggle();
                 None
             }
-            "term" => {
-                self.inner.lock().unwrap().flip_terminal_panel();
-                None
-            }
             "switcher" => {
                 self.view_switcher_show();
                 None
@@ -2486,6 +2475,18 @@ fn fmt_width(w: f64) -> String {
     } else {
         format!("{w:.1}")
     }
+}
+
+#[cfg(test)]
+/// Count `[section]` headers.
+fn count_sections(text: &str) -> usize {
+    crate::engines::config_text::config_lines(text)
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with('[') && t.ends_with(']') && !t.starts_with('#')
+        })
+        .count()
 }
 
 /// `loadCommands().count` — sections with `enabled = "true"` outside the skip
@@ -2900,7 +2901,6 @@ mod daemon_ui {
         gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
         ViewSwitcherPanel,
     };
-    use crate::views::terminal::{TerminalConfig, TerminalPanel};
     use crate::views::tools::{ToolKind, ToolPanel};
     use crate::views::files::FileBrowser;
     use objc2::rc::{Retained, Weak};
@@ -3052,14 +3052,10 @@ mod daemon_ui {
         palette: Option<PalettePanel>,
         /// The `/paths` shelf tool window.
         paths: Option<PathsWindow>,
-        /// The `/terminal` tool panel (`do:term` / Ctrl+B T).
-        terminal_panel: Option<TerminalPanel>,
         /// The `openTool` panels (prettyprint / filefast / health-checks).
         tools: HashMap<String, ToolPanel>,
         /// When each tool panel was opened (the `reclaimToolKey` window).
         tool_opened_at: HashMap<String, f64>,
-        /// When the terminal popup was last shown (its one reclaim check).
-        terminal_opened_at: Option<std::time::Instant>,
     }
 
     /// Every visible `NSWindow` of this app (`state.windows` mirror).
@@ -3815,7 +3811,6 @@ mod daemon_ui {
                         UiCommand::ShowSwitcher => self.show_switcher(),
                         UiCommand::HideSwitcher => self.hide_switcher(),
                         UiCommand::Paths(cmd) => self.run_paths_cmd(cmd),
-                        UiCommand::TerminalPanel => self.toggle_terminal_panel(),
                         UiCommand::Tool(kind) => self.open_tool(kind),
                         UiCommand::ToolClose(name) => self.close_tool(&name),
                         UiCommand::ResetSize => {
@@ -3951,7 +3946,6 @@ mod daemon_ui {
                 Ok(p) => {
                     if p.palette.as_ref().is_some_and(|x| x.is_visible())
                         || !p.tools.is_empty()
-                        || p.terminal_panel.as_ref().is_some_and(|t| t.is_shown())
                         || p.paths
                             .as_ref()
                             .is_some_and(|w| w.window.as_ref().is_some_and(|win| win.isVisible()))
@@ -4660,28 +4654,6 @@ mod daemon_ui {
             }
         }
 
-        /// `toggleTerminalPanel()` — the `/terminal` tool panel.
-        fn toggle_terminal_panel(&self) {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let _ = mtm;
-            let mut st = self.ivars().panels.borrow_mut();
-            let mut panel = st.terminal_panel.take().unwrap_or_else(|| {
-                TerminalPanel::new(TerminalConfig::from_settings(
-                    &self.ivars().controller.settings(),
-                ))
-            });
-            if panel.is_shown() {
-                panel.hide();
-                st.terminal_opened_at = None;
-            } else {
-                panel.show();
-                st.terminal_opened_at = Some(std::time::Instant::now());
-            }
-            st.terminal_panel = Some(panel);
-        }
-
         /// `openTool` for the prettyprint / filefast / health-checks panels.
         fn open_tool(&self, kind: ToolKind) {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -4790,25 +4762,6 @@ mod daemon_ui {
             }
             if let Some((doc, wid)) = paths_doc {
                 self.ivars().controller.set_paths_docs(doc, wid);
-            }
-            {
-                let mut st = self.ivars().panels.borrow_mut();
-                if st.terminal_opened_at.is_some_and(|t| t.elapsed().as_secs_f64() >= 0.25) {
-                    st.terminal_opened_at = None;
-                    if let Some(tp) = st.terminal_panel.as_ref() {
-                        tp.reclaim_key();
-                    }
-                }
-            }
-            let term_doc = self
-                .ivars()
-                .panels
-                .borrow()
-                .terminal_panel
-                .as_ref()
-                .map(|tp| tp.test_state());
-            if let Some(doc) = term_doc {
-                self.ivars().controller.set_terminal_panel_state(doc);
             }
         }
 
@@ -5427,9 +5380,6 @@ mod daemon_ui {
                     } else {
                         c.view_switcher_show();
                     }
-                }
-                't' => {
-                    self.ivars().controller.toggle_terminal_panel();
                 }
                 'b' => {
                     self.route_rail_toggle();
@@ -11940,8 +11890,6 @@ mod tests {
         assert_eq!(c.state_json()["palette"], json!(false));
         c.do_action("switcher-hide");
         assert_eq!(c.state_json()["viewSwitcher"]["shown"], json!(false));
-        c.do_action("term");
-        assert_eq!(c.state_json()["terminalPanel"]["shown"], json!(true));
         let cmds = q.lock().unwrap().clone();
         assert_eq!(
             cmds,
@@ -11950,20 +11898,17 @@ mod tests {
                 UiCommand::HidePalette,
                 UiCommand::ShowSwitcher,
                 UiCommand::HideSwitcher,
-                UiCommand::TerminalPanel,
             ]
         );
     }
 
     #[test]
-    fn toggle_command_handles_show_and_term() {
+    fn toggle_command_handles_show() {
         let c = controller();
         c.toggle_command("show");
         assert_eq!(c.state_json()["palette"], json!(true));
         c.toggle_command("show");
         assert_eq!(c.state_json()["palette"], json!(false));
-        c.toggle_command("term");
-        assert_eq!(c.state_json()["terminalPanel"]["shown"], json!(true));
     }
 
     /// L2: an invalid config is rejected (`ok: false`), parked as
@@ -12656,7 +12601,6 @@ label = \"Assistant\"
             "paths:show",
             "tool:jira",
             "switcher",
-            "term",
             "jira-jump",
             "reset-size",
         ] {
@@ -12671,7 +12615,6 @@ label = \"Assistant\"
         }
         let s = c.state_json();
         assert_eq!(s["paths"]["shown"], json!(false));
-        assert_eq!(s["terminalPanel"]["shown"], json!(false));
         assert_eq!(s["viewSwitcher"]["shown"], json!(false));
         assert!(s["tools"].as_object().map_or(true, |o| o.is_empty()));
     }
@@ -12767,5 +12710,232 @@ label = \"Assistant\"
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn cycle_walks_the_header_views_both_ways() {
+        use SlotView::*;
+        let views = [Files, Jira, Confluence, Ai];
+        assert_eq!(cycle_target(&views, Some(Files), 1), Some(Jira));
+        assert_eq!(cycle_target(&views, Some(Ai), 1), Some(Files), "wraps forward");
+        assert_eq!(cycle_target(&views, Some(Files), -1), Some(Ai), "wraps back");
+        assert_eq!(cycle_target(&views, Some(Detail), 1), Some(Confluence), "a Jira sub view is Jira");
+        assert_eq!(cycle_target(&views, Some(Releases), -1), Some(Files), "a Jira sub view counts as Jira");
+        assert_eq!(cycle_target(&views, None, 1), Some(Files));
+        assert_eq!(cycle_target(&[], Some(Files), 1), None);
+
+        let mut c = controller();
+        c.registry_mut().set_nav(vec![
+            (Files, "Files".into(), None),
+            (Jira, "Jira".into(), None),
+            (Confluence, "Confluence".into(), None),
+            (Ai, "AI".into(), None),
+        ]);
+        c.open(Files);
+        let mut seen = vec![];
+        for _ in 0..4 {
+            assert_eq!(c.do_action("cycle"), None);
+            seen.push(c.current().unwrap());
+        }
+        assert_eq!(seen, [Jira, Confluence, Ai, Files]);
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(Ai));
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(Confluence));
+    }
+
+    #[test]
+    fn dispatch_unknown_delegates_to_registry() {
+        let mut c = controller();
+        c.registry_mut()
+            .register_test_do(|a| (a == "custom:open").then(|| json!({ "ok": true })));
+        assert_eq!(c.do_action("custom:open"), Some(json!({ "ok": true })));
+        assert_eq!(
+            c.do_action("totally-unknown").unwrap()["error"],
+            json!("unknown action totally-unknown")
+        );
+    }
+
+    #[test]
+    fn esc_hide_count_reads_sections_and_app_default() {
+        let c = controller();
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 0, "app default esc-close");
+        c.set_esc_hides(SlotView::Ai, true);
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 1);
+        c.set_esc_hides(SlotView::Ai, false);
+        assert_eq!(c.esc_hide_count(SlotView::Ai), 0);
+    }
+
+    #[test]
+    fn dispatch_tool_open_and_close() {
+        let c = controller();
+        install_gui(&c);
+        // Without an enabled [paths] command, `tool:paths` is not a tool panel.
+        let err = c.do_action("tool:paths").unwrap();
+        assert_eq!(err["error"], json!("not a tool panel: paths"));
+        c.set_paths_enabled(true);
+        assert_eq!(c.do_action("tool:paths"), None);
+        assert_eq!(c.state_json()["tools"]["paths"]["shown"], json!(true));
+        assert_eq!(c.state_json()["paths"]["shown"], json!(true));
+        assert_eq!(c.do_action("tool-close:paths"), None);
+        assert_eq!(c.state_json()["tools"]["paths"]["shown"], json!(false));
+        assert_eq!(c.state_json()["paths"]["shown"], json!(false));
+    }
+
+    #[test]
+    fn paths_grammar_gates_on_enabled_and_queues() {
+        let c = controller();
+        let q = install_gui(&c);
+        let err = c.do_action("paths:show").unwrap();
+        assert_eq!(err["error"], json!("[paths] not enabled"));
+        c.set_paths_enabled(true);
+        assert_eq!(c.do_action("paths:show"), None);
+        assert_eq!(c.state_json()["paths"]["shown"], json!(true));
+        // Selection is bounds-checked against the reported rows (F3).
+        c.set_paths_state(json!({ "shown": true, "rows": [{}, {}, {}] }));
+        assert_eq!(c.do_action("paths:select:2"), None);
+        assert_eq!(c.state_json()["paths"]["selection"], json!(2));
+        assert_eq!(c.do_action("paths:select:x").unwrap()["error"], json!("paths:select:N"));
+        assert_eq!(c.do_action("paths:select:-1").unwrap()["error"], json!("paths:select:N"));
+        assert_eq!(
+            c.do_action("paths:select:9").unwrap()["error"],
+            json!("paths:select: out of range")
+        );
+        assert_eq!(c.do_action("paths:hide"), None);
+        assert_eq!(c.state_json()["paths"]["shown"], json!(false));
+        let err = c.do_action("paths:bogus").unwrap();
+        assert_eq!(err["error"], json!("paths:show|hide|return|select:N"));
+        let cmds = q.lock().unwrap().clone();
+        assert_eq!(
+            cmds,
+            vec![
+                UiCommand::Paths(PathsCmd::Show),
+                UiCommand::Paths(PathsCmd::Select(2)),
+                UiCommand::Paths(PathsCmd::Hide),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_pane_focus_and_move() {
+        let c = controller();
+        // `pane:*` needs a shown view (Swift guards `slot.current`).
+        let err = c.do_action("pane:focus:editor").unwrap();
+        assert_eq!(err["error"], json!("no view shown"));
+        c.open(SlotView::Ai);
+        c.set_panes(vec![
+            PaneSpec { id: "sidebar".into(), rect: RectI::new(0.0, 0.0, 200.0, 600.0) },
+            PaneSpec { id: "editor".into(), rect: RectI::new(200.0, 0.0, 700.0, 600.0) },
+        ]);
+        assert_eq!(c.do_action("pane:focus:editor"), None);
+        assert_eq!(c.state_json()["pane"]["focused"], json!("editor"));
+        assert_eq!(c.do_action("pane:h"), None);
+        assert_eq!(c.state_json()["pane"]["focused"], json!("sidebar"));
+        let err = c.do_action("pane:focus:nope").unwrap();
+        assert_eq!(err["error"], json!("no such pane"));
+    }
+
+    #[test]
+    fn palette_commands_are_listed() {
+        let mut c = controller();
+        c.registry_mut()
+            .add_palette(PaletteCommand::new("ai", "AI", "views"));
+        c.registry_mut()
+            .add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
+        let s = c.state_json();
+        assert_eq!(s["paletteCommands"], json!(["AI"]));
+    }
+
+    #[test]
+    fn hyper_palette_lists_only_the_configured_commands() {
+        let mut c = controller();
+        for (id, title) in [
+            ("paths", "Find Recent Files"),
+            ("jira", "Jira"),
+            ("filefast", "Create File"),
+            ("prettyprint", "Pretty Print"),
+            ("text-table", "Text to Table"),
+            ("window", "Bansho"),
+        ] {
+            c.registry_mut().add_palette(PaletteCommand::new(id, title, "views"));
+        }
+        // Unset: every palette command.
+        assert_eq!(c.hyper_palette_commands().len(), 6);
+        c.inner.lock().unwrap().settings.palette = ["paths", "filefast", "text-table", "prettyprint", "gone"]
+            .map(String::from)
+            .to_vec();
+        let titles: Vec<String> = c.hyper_palette_commands().into_iter().map(|(_, t)| t).collect();
+        assert_eq!(
+            titles,
+            vec!["Find Recent Files", "Create File", "Text to Table", "Pretty Print"],
+            "config order, unknown ids skipped, nothing else"
+        );
+        assert_eq!(c.state_json()["paletteCommands"], json!(titles));
+        // Ctrl+B W's `/` commands keep the full list.
+        assert_eq!(c.registry().palette_commands().len(), 6);
+    }
+
+    #[test]
+    fn palette_screenshot_has_a_handler() {
+        // `/screenshot` must dispatch (`screenshot:show`), not hit the
+        // `no Rust handler yet` fallback log.
+        let c = controller();
+        c.run_palette_command("screenshot");
+        assert!(
+            !c.logs().iter().any(|l| l.contains("no Rust handler")),
+            "palette 'screenshot' must dispatch"
+        );
+        c.run_palette_command("definitely-not-a-command");
+        assert!(c.logs().iter().any(|l| l.contains("no Rust handler")));
+    }
+
+    #[test]
+    fn jira_config_hook_selects_the_config_tab_and_reports_state() {
+        let c = controller();
+        // Unknown verbs still return `{"error": …}`.
+        assert!(c.do_action("jira-nope").unwrap()["error"].is_string());
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
+        // The hook is handled (no error) and switches the surface, so it is
+        // verifiable headless.
+        assert_eq!(c.do_action("jira-dashboard"), None);
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("config"));
+        // The palette name is an alias for the same hook.
+        assert_eq!(c.do_action("jira-config"), None);
+        c.run_palette_command("jira-config");
+        assert!(
+            !c.logs().iter().any(|l| l.contains("no Rust handler")),
+            "palette 'jira-config' must dispatch"
+        );
+        // The pill's own selection is recorded the same way.
+        c.set_jira_tab(crate::views::jira_view::JiraSurface::Tickets);
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
+    }
+
+    #[test]
+    fn reload_reads_disk_and_reports() {
+        let dir = std::env::temp_dir().join(format!("ws-rs-host-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join("commands.toml");
+        std::fs::write(
+            &conf,
+            "[app]\nesc-close = 2\n\n[files]\nesc-close = 1\n",
+        )
+        .unwrap();
+
+        let mut settings = AppSettings::default();
+        settings.shared_width = 1100.0;
+        let c = SwitcherController::new(settings);
+        // Point the controller's config path at the fixture via reload's own
+        // path resolution: AppSettings reads $WS_COMMANDS_CONF indirectly is
+        // not available here, so drive parse + count through reload_config's
+        // helpers directly.
+        let text = std::fs::read_to_string(&conf).unwrap();
+        let sections = parse_esc_close(&text);
+        assert_eq!(sections.get("app"), Some(&2));
+        assert_eq!(sections.get("files"), Some(&1));
+        assert_eq!(count_sections(&text), 2);
+
+        let _ = c;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
