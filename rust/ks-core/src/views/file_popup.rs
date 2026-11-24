@@ -27,8 +27,15 @@ pub const FILE_POPUP_TEXT_LIMIT: u64 = 512 * 1024;
 pub enum FilePopupRoute {
     Image,
     Text(String),
+    /// A PDF, shown with PDFKit.
+    Pdf,
+    /// rtf / doc / docx / odt / html: rendered as rich text, read-only.
+    Rich,
     System,
 }
+
+/// Extensions shown as a rendered document instead of handing off to Pages / TextEdit.
+pub const FILE_POPUP_RICH_EXTS: [&str; 8] = ["rtf", "rtfd", "doc", "docx", "odt", "html", "htm", "webarchive"];
 
 pub struct FilePopup;
 
@@ -81,6 +88,18 @@ impl FilePopup {
 
     /// `FilePopup.open` routing decision.
     pub fn route(path: &str) -> FilePopupRoute {
+        let ext = Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if std::fs::metadata(path).map(|m| m.is_file() || ext == "rtfd").unwrap_or(false) {
+            if ext == "pdf" {
+                return FilePopupRoute::Pdf;
+            }
+            if FILE_POPUP_RICH_EXTS.contains(&ext.as_str()) {
+                return FilePopupRoute::Rich;
+            }
+        }
         if Self::is_image(path) && std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
             FilePopupRoute::Image
         } else if !Self::is_image(path) {
@@ -171,6 +190,16 @@ mod appkit {
                 show_image(img, over, path);
             }
             FilePopupRoute::Text(text) => show_text(&text, over, path),
+            FilePopupRoute::Pdf => {
+                if !show_pdf(over, path) {
+                    open_in_workspace(path);
+                }
+            }
+            FilePopupRoute::Rich => {
+                if !show_rich(over, path) {
+                    open_in_workspace(path);
+                }
+            }
             FilePopupRoute::System => open_in_workspace(path),
         }
     }
@@ -222,6 +251,82 @@ mod appkit {
             layer.setMasksToBounds(true);
         }
         sv
+    }
+
+    /// A PDF in PDFKit's own scrolling / zooming view. PDFView scrolls itself, so it
+    /// rides inside the zoom scroll (magnification off) that the grips expect.
+    fn show_pdf(over: Option<&NSWindow>, path: &str) -> bool {
+        use objc2_foundation::NSURL;
+        use objc2_pdf_kit::{PDFDocument, PDFView};
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let Some(doc) = (unsafe { PDFDocument::initWithURL(PDFDocument::alloc(), &url) }) else { return false };
+        let room = room_for(over);
+        let (w, h) = (room.size.width.min(900.0), room.size.height * 0.96);
+        let frame = NSRect::new(
+            NSPoint::new(room.origin.x + room.size.width / 2.0 - w / 2.0, room.origin.y + room.size.height / 2.0 - h / 2.0),
+            NSSize::new(w, h),
+        );
+        let pv = unsafe { PDFView::initWithFrame(PDFView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), frame.size)) };
+        unsafe {
+            pv.setDocument(Some(&doc));
+            pv.setAutoScales(true);
+        }
+        pv.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        let scroll = zoom_scroll(mtm, &pv, NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        scroll.setAllowsMagnification(false);
+        scroll.setHasVerticalScroller(false);
+        scroll.setHasHorizontalScroller(false);
+        present(mtm, scroll, frame, over, None, path);
+        true
+    }
+
+    /// rtf / docx / html … as read-only rich text on a white page.
+    fn show_rich(over: Option<&NSWindow>, path: &str) -> bool {
+        use objc2_app_kit::{NSAttributedStringDocumentFormats, NSTextStorage};
+        use objc2_foundation::{NSAttributedString, NSDictionary, NSURL};
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let opts = NSDictionary::new();
+        let attr = unsafe {
+            NSAttributedString::initWithURL_options_documentAttributes_error(
+                NSAttributedString::alloc(),
+                &url,
+                &opts,
+                None,
+            )
+        };
+        let Ok(attr) = attr else { return false };
+        let room = room_for(over);
+        let (w, h) = (room.size.width.min(860.0), room.size.height * 0.92);
+        let frame = NSRect::new(
+            NSPoint::new(room.origin.x + room.size.width / 2.0 - w / 2.0, room.origin.y + room.size.height / 2.0 - h / 2.0),
+            NSSize::new(w, h),
+        );
+        let tv = NSTextView::initWithFrame(NSTextView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        tv.setEditable(false);
+        tv.setSelectable(true);
+        tv.setRichText(true);
+        tv.setDrawsBackground(true);
+        tv.setBackgroundColor(&objc2_app_kit::NSColor::whiteColor());
+        tv.setInsertionPointColor(Some(&objc2_app_kit::NSColor::clearColor()));
+        tv.setTextContainerInset(NSSize::new(36.0, 28.0));
+        tv.setVerticallyResizable(true);
+        tv.setHorizontallyResizable(false);
+        tv.setMaxSize(NSSize::new(f64::MAX, f64::MAX));
+        tv.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        if let Some(tc) = unsafe { tv.textContainer() } {
+            tc.setWidthTracksTextView(true);
+        }
+        if let Some(storage) = unsafe { tv.textStorage() } {
+            let storage: &NSTextStorage = &storage;
+            storage.setAttributedString(&attr);
+        }
+        let scroll = zoom_scroll(mtm, &tv, NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        scroll.setDrawsBackground(true);
+        scroll.setBackgroundColor(&objc2_app_kit::NSColor::whiteColor());
+        present(mtm, scroll, frame, over, Some(tv), path);
+        true
     }
 
     /// `FilePopup.show(image:label:over:)`.

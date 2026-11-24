@@ -918,9 +918,21 @@ mod appkit {
                 .files_surface(|b| b.visible_rows().get(b.selection()).filter(|e| !e.is_parent()).map(|e| e.path.clone()))
                 .flatten();
             if let Some(path) = path {
-                crate::platform::open_path(std::path::Path::new(&path));
-                self.hide_files();
+                self.files_open(&path);
             }
+        }
+
+        /// Open in the lightweight preview over the Recent window (Esc returns to
+        /// it); only files the preview can't show go to their default app.
+        fn files_open(&self, path: &str) {
+            use crate::views::file_popup::{FilePopup, FilePopupRoute};
+            if FilePopup::route(path) == FilePopupRoute::System {
+                crate::platform::open_path(std::path::Path::new(path));
+                self.hide_files();
+                return;
+            }
+            let panel = self.files_win.try_borrow().ok().and_then(|g| g.as_ref().and_then(|w| w.panel.clone()));
+            crate::views::file_popup::show(path, panel.as_deref().map(|p| &***p as &objc2_app_kit::NSWindow));
         }
 
         fn files_event(&self, ev: FilesEvent) {
@@ -944,9 +956,7 @@ mod appkit {
                     let (po, pr, pcf, pcp) = (path.clone(), path.clone(), path.clone(), path.clone());
                     // Rename / compress / trash need the main app's Files backends.
                     let actions = crate::views::files::FileMenuActions {
-                        open: Some(Box::new(move || {
-                            crate::platform::open_path(std::path::Path::new(&po));
-                        })),
+                        open: Some(Box::new(move || with_ui(|ui| ui.files_open(&po)))),
                         reveal: Some(Box::new(move || crate::app::hooks::reveal_in_files(&[pr]))),
                         copy_file: Some(Box::new(move || {
                             copy_files_toast(&[pcf]);

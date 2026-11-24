@@ -5923,7 +5923,7 @@ return Some(true)
                     &format!("Open commands.toml — {}", crate::app::config::tilde(&conf)),
                     move || {
                         let _ = &c;
-                        open_path(&conf.to_string_lossy());
+                        crate::platform::open_path(std::path::Path::new(&conf));
                     },
                 ),
             ]);
@@ -5933,7 +5933,7 @@ return Some(true)
                     &format!("{verb} — {}", crate::app::config::tilde(&over)),
                     move || {
                         if let Some(p) = crate::app::config::ensure_override_file() {
-                            open_path(&p.to_string_lossy());
+                            crate::platform::open_path(std::path::Path::new(&p));
                         }
                     },
                 ));
@@ -11545,8 +11545,10 @@ return Some(true)
 
     use ks_core::app::hooks::{copied_what, copy_files_to_pasteboard, copy_files_toast};
 
+    /// Open a file the user picked: images, PDFs, docs and short text show in the
+    /// lightweight preview window (Esc closes); anything else goes to its default app.
     fn open_path(path: &str) {
-        crate::platform::open_path(std::path::Path::new(path));
+        crate::views::file_popup::show(path, None);
     }
 
     /// `clampToScreen`: keep the frame inside the window's screen's visible
