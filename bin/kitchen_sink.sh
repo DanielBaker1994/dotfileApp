@@ -1,7 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# /bin/bash, not `env bash`: every Hyper+S / Hyper+X press starts this script,
+# and Homebrew's bash 5 takes ~7 ms to start against ~2.6 ms (bash 3.2 is
+# enough here). One subshell, no `dirname`: forks are the press's cost.
 set -uo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="$(cd "$DIR/.." && pwd -P)"
+case "${BASH_SOURCE[0]}" in */*) _here="${BASH_SOURCE[0]%/*}" ;; *) _here=. ;; esac
+ROOT="$(cd -P "$_here/.." && pwd -P)"
+DIR="$ROOT/bin"
 . "$ROOT/install.conf"
 APP="$ROOT/$APP_NAME.app"
 BUNDLED=0

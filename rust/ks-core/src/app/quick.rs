@@ -2498,7 +2498,11 @@ mod appkit {
         *ui.monitor.borrow_mut() = Some(monitor);
 
         // Palette prewarm (hidden), then SCK + OCR warm-up off the critical path.
-        crate::views::screenshot::prewarm_capture();
+        // A cold start *for* a capture skips it: the real capture warms SCK
+        // itself, and a second request in flight only competes with it.
+        if action != StartAction::Screenshot {
+            crate::views::screenshot::prewarm_capture();
+        }
         let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::NOW.time(300_000_000), || {
             with_ui(|ui| ui.prewarm_palette());
         });

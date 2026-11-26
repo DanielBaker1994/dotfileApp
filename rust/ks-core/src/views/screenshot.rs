@@ -1153,10 +1153,36 @@ mod sck {
         fresh_displays()
     }
 
-    /// Fill the display cache (and wake replayd) ahead of the first Hyper+X.
+    /// Fill the display cache and run one throwaway 16x16 capture ahead of the
+    /// first Hyper+X: the first `SCScreenshotManager` capture in a process
+    /// lands ~60–90 ms later than the rest (owner's logs: 105–140 ms vs ~47 ms
+    /// once warm), and the display list alone does not pay that.
     /// Blocking; call off the main thread.
     pub fn prewarm() {
-        let _ = fresh_displays();
+        let Ok(displays) = fresh_displays() else { return };
+        let Some(display) = displays.iter().next() else { return };
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_excludingWindows(
+                SCContentFilter::alloc(),
+                &display,
+                &NSArray::<SCWindow>::new(),
+            )
+        };
+        let config = unsafe { SCStreamConfiguration::new() };
+        unsafe {
+            config.setWidth(16);
+            config.setHeight(16);
+            config.setShowsCursor(false);
+        }
+        let (block, rx) = capture_block();
+        unsafe {
+            SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                &filter,
+                &config,
+                Some(&block),
+            );
+        }
+        let _ = rx.recv_timeout(TIMEOUT);
     }
 
     pub fn capture_displays(screens: &[ScreenRef]) -> Result<Vec<CapturedImage>, CaptureError> {
