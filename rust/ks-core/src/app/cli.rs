@@ -132,6 +132,15 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
             if let Some(lock) = DaemonLock::try_acquire(paths.quick_lock_path()) {
                 return Outcome::Quick { action, lock };
             }
+            // `quick resident` (the KeepAlive login item, via `open -W`): an
+            // agent is already up, so stand by until it exits and take over,
+            // instead of exiting (launchd would respawn us every 10 s).
+            if args.get(2).map(String::as_str) == Some("resident") {
+                if let Some(lock) = DaemonLock::acquire_blocking(paths.quick_lock_path()) {
+                    return Outcome::Quick { action, lock };
+                }
+                return Outcome::Exit(1);
+            }
             let qsock = paths.quick_socket_path();
             match action {
                 crate::app::quick::StartAction::Show => {

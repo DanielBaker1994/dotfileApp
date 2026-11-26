@@ -24,6 +24,8 @@ pub mod ipc;
 #[allow(unused_imports)] // pipe_name's only external use is via the `ipc` module path.
 pub use ipc::*;
 
+pub mod global_hotkey;
+
 pub mod lock;
 #[allow(unused_imports)] // Windows-only: the `DaemonLock` re-export has no Unix caller.
 pub use lock::*;

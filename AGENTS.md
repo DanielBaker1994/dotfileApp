@@ -425,19 +425,29 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   `bin/kitchen_sink.sh screenshot`). `kitchen-sink quick` with an agent already
   holding the lock just delivers its action and exits (`open -n` starts a
   second process).
-- **Launch**: `bin/kitchen_sink.sh` (no mode) and `bin/kitchen_sink.sh
-  screenshot` first try `quick-toggle` / `quick-screenshot` (one socket write);
-  a cold start is `open -n -g kitchen-sink.app --args quick show|screenshot`
-  (LaunchServices, for TCC). The aerospace Hyper+S / Hyper+X bindings both call
-  the script. The script's main-app cold starts (`kill_main`) spare the agent;
-  `./ws build` / `bin/lib.sh` stops (`pkill -f …/Contents/MacOS`) kill it too —
-  the next press cold-starts it again.
-- **Login**: `bin/quick-agent.sh install|uninstall|status` writes the LaunchAgent
+- **Hotkeys (no AeroSpace, no shell)**: the agent registers Hyper+S (palette),
+  Hyper+X (screenshot) and Hyper+/ (ws-settings) itself with Carbon
+  `RegisterEventHotKey` (`platform::global_hotkey`, no Accessibility grant):
+  a press lands in its run loop, ~5 ms to shown. Keys: `[app]
+  quick-hotkey-palette|-screenshot|-settings` (missing = default, empty = off,
+  validated by `config_value_problem`; read at agent start). The log says
+  `hotkey hyper+s registered` or why not (-9878 = another app holds the key).
+  No agent = no hotkeys, hence KeepAlive below.
+- **Launch**: `bin/kitchen_sink.sh` (no mode) / `… screenshot` still work as
+  CLI entries: `quick-toggle` / `quick-screenshot` (one socket write), else a
+  cold `open -n -g kitchen-sink.app --args quick show|screenshot`
+  (LaunchServices, for TCC). The script's main-app cold starts (`kill_main`)
+  spare the agent; `./ws build` / `bin/lib.sh` stops (`pkill -f
+  …/Contents/MacOS`) kill it too and launchd brings it back.
+- **Login / KeepAlive**: `bin/quick-agent.sh install|uninstall|status` writes the LaunchAgent
   `~/Library/LaunchAgents/dev.danielbaker.kitchen-sink.quick.plist` from
-  `config/launchd/…plist` (runs `open -g -n <app> --args quick`; INSTALL.sh
-  installs it, UNINSTALL.sh removes it).
-- **Restart / stop**: `kitchen-sink quick-quit` (then any Hyper+S press starts a
-  fresh one), or `bin/kitchen_sink.sh quick`. Logs go to the usual
+  `config/launchd/…plist`: `open -W -g -n <app> --args quick resident`,
+  `KeepAlive` (INSTALL.sh installs it, UNINSTALL.sh removes it). `-W` makes
+  launchd see the agent's lifetime; `resident` waits on the lock
+  (`DaemonLock::acquire_blocking`) when another agent holds it, then takes
+  over, so there is never a 10 s respawn loop.
+- **Restart / stop**: `kitchen-sink quick-quit` (launchd, or a waiting
+  `resident`, starts a fresh one), `bin/quick-agent.sh uninstall` to stop for good. Logs go to the usual
   `logs/YYYY_MM_DD/daemon.log` (`quick: …`, `hotkey: toggle recv->shown Nms`).
 - **Picks**: agent-owned commands open locally (`quick::route_command`);
   workspaces via AeroSpace IPC; everything else (views, "Bansho"/`window`,
@@ -557,11 +567,9 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   through the codec. Never hard-code a user-facing string/size.
 - **Add a keyboard shortcut:** in-window → `route_key_event` /
   `ui::popup::route_key` (respect rule 1) + a `[shortcuts]` row. Global
-  Hyper+KEY → `~/.dotfiles/aerospace/aerospace.toml` binding (via `bin/ks SCRIPT`) (then `aerospace
-  reload-config --dry-run --no-gui`), `hotkey::HOTKEY_MODES` + the host's
-  `toggle_command`, `bin/kitchen_sink.sh`, `commands.toml [shortcuts]`, docs.
-  Hyper+S / Hyper+X are the exception: they go to the quick agent
-  (`app/quick.rs`, `quick::route_command`).
+  Hyper+KEY → an `[app] quick-hotkey-<name>` key + a bind in
+  `quick::install_hotkeys` (the agent registers it; never an AeroSpace
+  binding), plus `commands.toml [shortcuts]` and docs.
 - **Add a view:** extend `SlotView` + nav ids, `content_for`, the registry
   (`app/registry.rs`), and the `[section]` + `enabled` gate.
 - **Add a socket `do:` hook:** `do_host_action` or a view's registry hook

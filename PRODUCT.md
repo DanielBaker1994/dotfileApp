@@ -63,9 +63,9 @@ In priority order:
 
 ## Operating Context
 
-- Summoned by global Hyper hotkeys (caps lock via Karabiner) bound in
-  `~/.dotfiles/aerospace/aerospace.toml`: Hyper+S palette, Hyper+X
-  screenshot, Hyper+/ ws-settings. It is used in short bursts between other
+- Summoned by global Hyper hotkeys (caps lock via Karabiner) that the app's
+  resident quick agent registers itself (`[app] quick-hotkey-*`): Hyper+S
+  palette, Hyper+X screenshot, Hyper+/ ws-settings. It is used in short bursts between other
   work and dismissed with Esc or the hotkey.
 - Lives alongside Ghostty plus herdr panes, nvim, Webex, Outlook, and a
   corporate Jira and Confluence (Server/DC or Cloud).
@@ -73,11 +73,11 @@ In priority order:
   `~/.config/kitchen-sink-local/` (hand-edited or through the ws-settings
   TUI). Themes, presets and header styles switch live.
 - Installed two ways: from the repo checkout (`./ws build`) or from the DMG
-  (everyone else; `./ws dmg` notarizes unless `--no-notarize`). The global
-  hotkeys are AeroSpace bindings, and since Nov 26, 2026 `aerospace.toml`
-  and `bordersrc` live in the owner's `~/.dotfiles`, not this repo: a DMG
-  install on another Mac gets the app but no Hyper+S / Hyper+X wiring until
-  that user binds them to `bin/kitchen_sink.sh` (and `… screenshot`).
+  (everyone else; `./ws dmg` notarizes unless `--no-notarize`). The hotkeys
+  come with the app (the quick agent's login item), so a DMG install needs
+  no hotkey daemon; "Hyper" itself is a Karabiner caps-lock mapping, or set
+  `quick-hotkey-*` to plain combos. AeroSpace is still used for the
+  palette's workspace rows and window placement.
 
 ## Capabilities and Constraints
 

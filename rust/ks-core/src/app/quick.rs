@@ -523,6 +523,14 @@ mod appkit {
             })
         }
 
+        /// Hyper+/: the ws-settings window (the main app's Settings menu item).
+        fn open_settings(&self) {
+            let bin = format!("{}/bin/ws-settings", self.paths.asset_dir());
+            if let Err(e) = std::process::Command::new(&bin).arg("open").spawn() {
+                log(&format!("settings: cannot run {bin}: {e}"));
+            }
+        }
+
         fn palette_visible(&self) -> bool {
             self.palette.try_borrow().map(|p| p.as_ref().is_some_and(|x| x.is_visible())).unwrap_or(false)
         }
@@ -1702,6 +1710,7 @@ mod appkit {
             weak.upgrade().map(|ui| ui.route_key_event(event)).unwrap_or(false)
         });
         *ui.monitor.borrow_mut() = Some(monitor);
+        install_hotkeys(&sections.get("app").cloned().unwrap_or_default());
 
         // Palette prewarm (hidden), then SCK + OCR warm-up off the critical path.
         // A cold start *for* a capture skips it: the real capture warms SCK
@@ -1729,6 +1738,42 @@ mod appkit {
             }),
         }
         app.run();
+    }
+
+    /// Hyper+S / Hyper+X / Hyper+/ registered system-wide by the agent itself
+    /// (`[app] quick-hotkey-*`; missing = the default, empty = off): a press
+    /// lands in this run loop with no hotkey daemon, shell or client process.
+    fn install_hotkeys(app: &HashMap<String, String>) {
+        use crate::platform::global_hotkey;
+        let binds: [(&str, &str, Box<dyn Fn()>); 3] = [
+            (
+                "quick-hotkey-palette",
+                "hyper+s",
+                Box::new(|| {
+                    crate::app::logging::note_recv("toggle");
+                    with_ui(|ui| ui.run(QuickCmd::Verb(LaunchVerb::Toggle)));
+                }),
+            ),
+            (
+                "quick-hotkey-screenshot",
+                "hyper+x",
+                Box::new(|| {
+                    crate::app::logging::note_recv("screenshot");
+                    with_ui(|ui| ui.run(QuickCmd::Screenshot { words: Vec::new(), reply: None }));
+                }),
+            ),
+            ("quick-hotkey-settings", "hyper+/", Box::new(|| with_ui(|ui| ui.open_settings()))),
+        ];
+        for (key, default, callback) in binds {
+            let spec = app.get(key).map(|v| v.trim().to_string()).unwrap_or_else(|| default.to_string());
+            if spec.is_empty() {
+                continue;
+            }
+            match global_hotkey::register(&spec, callback) {
+                Ok(()) => log(&format!("hotkey {spec} registered ({key})")),
+                Err(e) => log(&format!("hotkey {key}: {e}")),
+            }
+        }
     }
 
     fn app_log_start_action(a: &StartAction) {

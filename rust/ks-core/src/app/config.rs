@@ -853,6 +853,9 @@ pub fn config_value_problem(section: &str, key: &str, value: &str) -> Option<Str
             None
         };
     }
+    if section == "app" && key.starts_with("quick-hotkey-") {
+        return crate::platform::global_hotkey::parse_spec(value).err();
+    }
     if key == "favorites" {
         for e in value
             .split(',')

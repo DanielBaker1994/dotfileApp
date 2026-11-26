@@ -34,6 +34,12 @@ palette-first = "paths, filefast, text-table, prettyprint"
 # The Hyper+S palette: these commands, in this order, then your AeroSpace
 # workspaces + their apps — one list. Empty = every in-palette command.
 palette = "paths, filefast, text-table, prettyprint, find-window"
+# System-wide hotkeys the quick agent registers itself (no AeroSpace / shell
+# in the path). hyper = cmd+ctrl+opt+shift; e.g. "hyper+s", "cmd+shift+f5".
+# Empty = that hotkey off. Read at agent start (`kitchen-sink quick-quit` applies a change).
+quick-hotkey-palette = "hyper+s"
+quick-hotkey-screenshot = "hyper+x"
+quick-hotkey-settings = "hyper+/"
 switcher-width = 760
 # The shared window (Files / Jira / Confluence / AI). It opens at this share of
 # the screen's visible area; set shared-width / shared-height (points) for a

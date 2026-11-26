@@ -434,6 +434,25 @@ impl DaemonLock {
         }
         Some(DaemonLock { fd })
     }
+
+    /// `flock(LOCK_EX)`: wait until the holder exits, then take the lock
+    /// (`kitchen-sink quick resident`, the KeepAlive login item).
+    pub fn acquire_blocking<P: AsRef<Path>>(path: P) -> Option<DaemonLock> {
+        let cpath = CString::new(path.as_ref().as_os_str().as_bytes()).ok()?;
+        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC, 0o600) };
+        if fd < 0 {
+            return None;
+        }
+        loop {
+            if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+                return Some(DaemonLock { fd });
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                unsafe { libc::close(fd) };
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
