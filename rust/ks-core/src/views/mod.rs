@@ -1,6 +1,8 @@
 pub mod switcher;
 pub mod tools;
 pub mod files;
+#[cfg(target_os = "macos")]
+pub mod files_actions;
 pub mod files_view;
 pub mod file_popup;
 pub mod paths;
