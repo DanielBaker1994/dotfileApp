@@ -854,10 +854,15 @@ mod appkit {
                 panel.setHasShadow(true);
                 panel.setContentView(Some(&card.root));
                 panel.setTitle(&objc2_foundation::NSString::from_str("Recent files"));
-                // Click-off closes it (no palette), unless the preview popup took key.
+                // Click-off closes it (no palette), unless the preview popup
+                // or one of its own sheets (Get Info, batch rename, the
+                // delete / empty-trash confirms) took key — that closed the
+                // panel with the sheet still attached.
                 panel.set_on_resign(Box::new(|| {
                     defer(|ui| {
-                        if crate::views::file_popup::is_live() {
+                        if crate::views::file_popup::is_live()
+                            || ui.files_window().is_some_and(|p| p.attachedSheet().is_some())
+                        {
                             return;
                         }
                         ui.hide_files();
