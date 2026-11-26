@@ -260,7 +260,7 @@ pub struct QuickHandler {
     pub shared: Arc<QuickShared>,
     /// Whether a capture session is up (read from the socket thread).
     pub screenshot_busy: Box<dyn Fn() -> bool + Send + Sync>,
-    /// Read from the main thread for `state.live` (key window, frontmost app,
+    /// Read from the main thread for `state live` → `live` (key window, frontmost app,
     /// palette query, Find Recent Files): `None` when main did not answer in
     /// time (a hang) or there is no UI.
     pub live: Option<Box<dyn Fn() -> Option<Value> + Send + Sync>>,
@@ -269,14 +269,18 @@ pub struct QuickHandler {
 impl CommandHandler for QuickHandler {
     fn state_json(&self) -> Value {
         let mut v = self.shared.state.lock().map(|g| g.clone()).unwrap_or_else(|_| json!({}));
-        let live = self.live.as_ref().map(|f| f());
         if let Some(o) = v.as_object_mut() {
             o.insert("agent".into(), json!("quick"));
             o.insert("pid".into(), json!(std::process::id()));
             o.insert("screenshotBusy".into(), json!((self.screenshot_busy)()));
-            if let Some(live) = live {
-                o.insert("live".into(), live.unwrap_or(Value::Null));
-            }
+        }
+        v
+    }
+
+    fn state_json_live(&self) -> Value {
+        let mut v = self.state_json();
+        if let (Some(f), Some(o)) = (self.live.as_ref(), v.as_object_mut()) {
+            o.insert("live".into(), f().unwrap_or(Value::Null));
         }
         v
     }

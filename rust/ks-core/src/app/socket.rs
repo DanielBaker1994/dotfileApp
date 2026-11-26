@@ -109,6 +109,11 @@ impl Drop for Reply {
 pub trait CommandHandler: Send + Sync {
     /// Full state document for `state` and for a `do:` that reports no error.
     fn state_json(&self) -> Value;
+    /// `state live`: the state plus what only the main thread can read now
+    /// (costs a main-thread hop, so plain `state` stays cheap for polling).
+    fn state_json_live(&self) -> Value {
+        self.state_json()
+    }
     /// Handle a `do:` verb. `None` = no error: fall through to `state_json`.
     fn do_action(&self, action: &str) -> Option<Value>;
     /// Handle a raw-verb request (`reload`, `screenshot`, `pane-shot`, …).
@@ -328,8 +333,12 @@ fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
     if query == "ping" {
         return;
     }
-    if query != "state" {
+    if query != "state" && query != "state live" {
         crate::app::logging::note_recv(&query);
+    }
+    if query == "state live" {
+        write_json(fd, &handler.state_json_live());
+        return;
     }
 
     if query == "state" {
