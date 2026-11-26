@@ -26,7 +26,16 @@ desktop (AppKit, Human Interface Guidelines for macOS), never web or mobile.
 
 ## Product Purpose
 
-kitchen-sink puts the tools a keyboard-driven developer reaches for all day
+**Name.** The product is **Bansho** (canonical since Nov 21, 2026): every
+name a user sees says Bansho (bundle display name, status menu, About,
+palette row, tooltips). **kitchen-sink** is the technical name and stays on
+purpose: the repo, the executable and bundle (`kitchen-sink.app`), the bundle
+id `dev.danielbaker.kitchen-sink` (TCC grants hang off it), the CLI, the
+config and cache paths (`~/.config/kitchen-sink`, `~/.cache/kitchen-sink`) and
+the sockets. Write Bansho in user-facing text and kitchen-sink for code,
+paths and commands.
+
+Bansho puts the tools a keyboard-driven developer reaches for all day
 behind two hotkeys. Hyper+S opens a palette (tools and AeroSpace workspaces in
 one list); Hyper+X takes a screenshot. Both must feel instant and never move
 the user's focus. Success: the owner reaches for it before any separate app
@@ -64,7 +73,11 @@ In priority order:
   `~/.config/kitchen-sink-local/` (hand-edited or through the ws-settings
   TUI). Themes, presets and header styles switch live.
 - Installed two ways: from the repo checkout (`./ws build`) or from the DMG
-  (everyone else).
+  (everyone else; `./ws dmg` notarizes unless `--no-notarize`). The global
+  hotkeys are AeroSpace bindings, and since Nov 26, 2026 `aerospace.toml`
+  and `bordersrc` live in the owner's `~/.dotfiles`, not this repo: a DMG
+  install on another Mac gets the app but no Hyper+S / Hyper+X wiring until
+  that user binds them to `bin/kitchen_sink.sh` (and `… screenshot`).
 
 ## Capabilities and Constraints
 

@@ -457,11 +457,23 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
 - **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
   `PathShelf` via Python `shelf.save`, agent via `path_shelf::pure_add`); both
   write tmp + rename, and the main shelf reloads when the file's mtime moved
-  (`PathShelf::refresh_from_disk`). The agent has no Recent-files FSEvents feed:
-  it shows what is on disk and adds screenshots.
-- **Not in the agent**: rename / compress / trash in the paths shelf (rows menu
-  offers open / reveal / copy), the screenshot `do:` hooks (registered only in
-  the main daemon), health checks.
+  (`PathShelf::refresh_from_disk`). The agent runs its own Recent engine
+  (`views::files::start_recent` from `show_files`, mdfind seed off-main), so
+  Find Recent Files is live without the main app.
+- **Find Recent Files has the full file actions**: the "paths" pick opens
+  `show_files` (a `FileBrowser` in a panel), whose actions are the shared
+  `files_actions::FilesHost` set — rename (F2 / Cmd+R / click-to-rename),
+  compress, trash, copy/cut/paste, duplicate, Get Info, batch rename, menus,
+  vim keys, Ctrl+H/J/K/L. The old paths-shelf window (`show_paths`,
+  `PathsWindow`, read-only row menu) is still in `quick.rs` but nothing opens it.
+- **Not in the agent**: the views (Files, Jira, Confluence, AI — forwarded to
+  the main socket), health checks (forwarded), the screenshot `do:` hooks and
+  every other `do:` verb (the quick socket answers `{"error"}`), `reload`,
+  `pane-shot`. Its `state` carries `live` (key window, frontmost app, palette
+  query/selection, tool panels, Find Recent Files cwd/selection/filter/pane),
+  read on the main thread with a 1.5 s cap (`null` = main did not answer).
+- **Naming**: user-facing name is Bansho, technical name kitchen-sink (see
+  `PRODUCT.md` "Name"); don't rename paths, bundle id or binaries.
 
 ### Keyboard / focus
 
