@@ -290,8 +290,10 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 `bin/` (build/test/install tooling; `lib.sh` for `ws_*` helpers;
 `preflight.sh`, `grant-permissions.sh`, `setup-home.sh`, `symlinks.sh` at
 root); `Tests/` (Python tests,
-`test_install.sh`); `config/` (aerospace + borders rc, per-file symlinks from
-`~/.config/<name>`, plus `paths.ignore`); `rules/` (AI rule markdown),
+`test_install.sh`); `config/` (borders rc, per-file symlinks from
+`~/.config/<name>`; **aerospace.toml lives in `~/.dotfiles/aerospace/`**, linked by
+`~/.dotfiles/symlinks.sh`, and calls kitchen-sink scripts through the guard
+`~/.dotfiles/aerospace/bin/ks`, plus `paths.ignore`); `rules/` (AI rule markdown),
 `templates/`, `samples/`,
 `.claude/skills/` (repo skills incl.
 `ui-check`; `.agents/` is gitignored).
@@ -528,7 +530,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   through the codec. Never hard-code a user-facing string/size.
 - **Add a keyboard shortcut:** in-window → `route_key_event` /
   `ui::popup::route_key` (respect rule 1) + a `[shortcuts]` row. Global
-  Hyper+KEY → `config/aerospace/aerospace.toml` binding (then `aerospace
+  Hyper+KEY → `~/.dotfiles/aerospace/aerospace.toml` binding (via `bin/ks SCRIPT`) (then `aerospace
   reload-config --dry-run --no-gui`), `hotkey::HOTKEY_MODES` + the host's
   `toggle_command`, `bin/kitchen_sink.sh`, `commands.toml [shortcuts]`, docs.
   Hyper+S / Hyper+X are the exception: they go to the quick agent

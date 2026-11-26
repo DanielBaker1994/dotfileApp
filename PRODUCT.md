@@ -51,7 +51,7 @@ All three of these together; no single one leads:
 ## Operating Context
 
 - Summoned by global Hyper hotkeys (caps lock via Karabiner) bound in
-  `aerospace.toml`: Hyper+N window, Hyper+S palette, Hyper+X screenshot,
+  `aerospace.toml` (in `~/.dotfiles/aerospace/`): Hyper+N window, Hyper+S palette, Hyper+X screenshot,
   Hyper+/ ws-settings. It is used in short bursts between other work, and
   hidden again on Esc (when enabled), the hotkey, or focus loss.
 - Lives alongside Ghostty plus herdr panes, nvim, Webex, Outlook, and a

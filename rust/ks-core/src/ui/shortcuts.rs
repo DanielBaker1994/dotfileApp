@@ -9,7 +9,7 @@
 //! bindings live elsewhere — the in-window key router (`route_key_event` /
 //! `ui::popup::route_key`), the global hotkey modes (`hotkey::HOTKEY_MODES`,
 //! launched via `bin/kitchen_sink.sh`), and the Hyper+KEY bindings in
-//! `config/aerospace/aerospace.toml` — and are not derived from these rows.
+//! `~/.dotfiles/aerospace/aerospace.toml` — and are not derived from these rows.
 
 /// One `[shortcuts]` row: `"view: keys" = "what"`.
 #[derive(Clone, Debug, PartialEq, Eq)]

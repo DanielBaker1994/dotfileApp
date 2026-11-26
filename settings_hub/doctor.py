@@ -40,10 +40,6 @@ def run(cat: Catalog, verbose: bool = False) -> list:
         else:
             out.append(("warn", f"{layer}: source not found"))
     aero = paths.aerospace_conf()
-    home_copy = os.path.join(paths.home(), "config", "aerospace", "aerospace.toml")
-    if os.path.exists(home_copy) and os.path.exists(aero) and \
-            os.path.realpath(aero) != os.path.realpath(home_copy):
-        out.append(("warn", f"AeroSpace reads {aero}, not the repo's {home_copy}"))
     if os.path.exists(os.path.expanduser("~/.aerospace.toml")) and \
             os.path.exists(os.path.expanduser("~/.config/aerospace/aerospace.toml")):
         out.append(("warn", "both ~/.aerospace.toml and ~/.config/aerospace/aerospace.toml exist (AeroSpace refuses)"))

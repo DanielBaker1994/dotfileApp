@@ -194,7 +194,7 @@ if [ -f "$ROOT/symlinks.sh" ]; then
     else
         BAD="$(printf '%s\n' "$LINKS" | grep -c -e '✘' -e '·' || true)"
         add links stack warn 0 "Config links" "$BAD link(s) missing or pointing elsewhere" \
-            "Link the aerospace / borders configs (a real file in the way is left alone and reported)." stack
+            "Link the borders config (a real file in the way is left alone and reported)." stack
     fi
 fi
 
