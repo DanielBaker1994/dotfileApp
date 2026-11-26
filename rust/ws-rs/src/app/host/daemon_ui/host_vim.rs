@@ -268,11 +268,7 @@ impl DaemonUi {
                 // Esc in the Files filter also clears it (it used to leave the
                 // list filtered with no visible way out).
                 if pane_id == "files-filter" {
-                    self.files_surface(|b| {
-                        if !b.query.is_empty() {
-                            b.set_query("");
-                        }
-                    });
+                    self.files_escape();
                 }
                 if let Some(p) = normal_to.and_then(|id| panes.iter().find(|p| p.id == id)) {
                     live_panes::take_focus(&w, p);

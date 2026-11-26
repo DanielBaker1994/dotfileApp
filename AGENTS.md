@@ -234,7 +234,11 @@ gitignored.
     `jira_setup.rs` (popup, popup_keys, theme, chrome, style, list_panel,
     view_base, toast, menu_kit, preview_ring, sidebar, field, ...).
   - `views/` — `switcher`, `tools`, `paths`, `screenshot`, `files`,
-    `files_view`, `file_popup`.
+    `files_view`, `file_popup`, and **`files_actions`**: the one
+    implementation of every file-browser action (menus, sheets, clipboard,
+    trash, rename, clicks, Finder keys) for BOTH the main Files view and the
+    quick agent's Find Recent Files, via the `FilesHost` trait. Never copy an
+    action into `host.rs` or `quick.rs` (they were ~1,300 drifted lines apart).
   - `engines/` — config_text, file_ops, list_filter, pane_shot, path_shelf,
     recent_files, screenshot_annotations/text, switcher_status, text_edit_keys,
     ansi_render. `panes/` — pane_nav, pane_geometry, vim_keys, vim_search.

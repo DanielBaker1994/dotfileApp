@@ -2988,7 +2988,7 @@ mod daemon_ui {
     };
     use crate::views::tools::{ToolKind, ToolPanel};
     use crate::views::files::FileBrowser;
-    use ks_core::views::files_actions::{pasteboard_file_paths, FilesHost};
+    use ks_core::views::files_actions::{cancel_click_rename, pasteboard_file_paths, schedule_click_rename, FilesHost};
     use objc2::rc::{Retained, Weak};
     use serde_json::json;
     use objc2::runtime::{AnyObject, NSObject};
@@ -3261,49 +3261,8 @@ mod daemon_ui {
     }
 
     thread_local! {
-        /// `(cwd, row)` of the last plain click in the file list: a second
-        /// click on the same row arms the inline rename.
-        static FILES_LAST_CLICK: std::cell::RefCell<Option<(String, usize)>> = const { std::cell::RefCell::new(None) };
-    }
-
-
-    thread_local! {
         /// The daemon UI, for main-thread hops from worker threads.
         static UI_WEAK: RefCell<Option<objc2::rc::Weak<DaemonUi>>> = const { RefCell::new(None) };
-    }
-
-    thread_local! {
-        /// Generation of the pending click-to-rename; a double-click or a
-        /// newer click bumps it so the older timer does nothing.
-        static CLICK_RENAME_GEN: Cell<u64> = const { Cell::new(0) };
-    }
-
-    pub fn cancel_click_rename() {
-        CLICK_RENAME_GEN.with(|g| g.set(g.get() + 1));
-    }
-
-    /// Run `f` after the system double-click interval unless a double-click
-    /// (or another click) arrived first — single click renames, double opens.
-    fn schedule_click_rename(f: impl FnOnce(&DaemonUi) + Send + 'static) {
-        cancel_click_rename();
-        let gen = CLICK_RENAME_GEN.with(|g| g.get());
-        let secs = unsafe { objc2_app_kit::NSEvent::doubleClickInterval() }.max(0.2) + 0.05;
-        let Ok(when) = dispatch2::DispatchTime::try_from(std::time::Duration::from_secs_f64(secs)) else {
-            return;
-        };
-        let _ = dispatch2::DispatchQueue::main().after(when, move || {
-            // Still holding the button: a press-and-hold that is about to
-            // become a drag, not a click — opening the rename field now
-            // would sit under the pointer and swallow the drag (Finder only
-            // renames after a click is released).
-            let held = objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0;
-            if !held && CLICK_RENAME_GEN.with(|g| g.get()) == gen {
-                let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
-                if let Some(ui) = ui {
-                    f(&ui);
-                }
-            }
-        });
     }
 
     /// Run `f` on the main thread against the live daemon UI.
@@ -3871,11 +3830,41 @@ mod daemon_ui {
                 st.window.makeFirstResponder(Some(&list));
             }
         }
-        fn files_start_rename(&self) {
-            self.files_begin_rename()
-        }
         fn files_open_file(&self, path: &str) {
             open_path(path)
+        }
+        /// Esc clears the filter (model and field text) and goes back to the list.
+        fn files_escape(&self) {
+            self.files_surface(|b| {
+                if !b.query.is_empty() {
+                    b.set_query("");
+                    if let Some(v) = &b.view {
+                        v.search_field().setStringValue(&NSString::from_str(""));
+                    }
+                }
+            });
+            self.focus_files_list();
+        }
+        fn files_focus(&self) -> (bool, bool) {
+            (self.focused_pane_id().as_deref() == Some("files-list"), self.key_in_text())
+        }
+        fn files_focus_filter(&self, select_all: bool) {
+            self.live_pane_focus("files-filter");
+            if select_all {
+                self.files_select_filter_text();
+            }
+        }
+        /// The field's cwd text is selected on focus, so the typed key
+        /// replaces it.
+        fn files_type_ahead(&self, c: char) -> bool {
+            if self.live_pane_focus("files-filter") {
+                let field = self.files_surface(|b| b.view.as_ref().map(|v| v.search_field())).flatten();
+                if let Some(ed) = field.and_then(|f| f.currentEditor()) {
+                    let ns = NSString::from_str(&c.to_string());
+                    let _: () = unsafe { objc2::msg_send![&*ed, insertText: &*ns] };
+                }
+            }
+            true
         }
         fn files_screenshot(&self) -> Option<Arc<std::sync::Mutex<super::ScreenshotController>>> {
             self.ivars().controller.screenshot_controller()
@@ -3890,6 +3879,33 @@ mod daemon_ui {
         }
         fn files_remember(&self, key: &str, value: &str) {
             defaults_set_string(key, value)
+        }
+    }
+
+    impl DaemonUi {
+        /// Files view keys: the two this window adds, then the shared Finder
+        /// table (`FilesHost::files_finder_key`).
+        fn files_key(&self, key: &popup::KeyInput) -> bool {
+            let cmd_only = key.cmd && !key.shift && !key.opt && !key.ctrl;
+            // Cmd+Opt+S: show / hide the sidebar (Cmd+\'s Finder twin).
+            if key.key_code == 1 && key.cmd && key.opt && !key.shift && !key.ctrl {
+                return self.route_rail_toggle();
+            }
+            // Cmd+C typed in the filter while a row is highlighted (Down / Up
+            // there move the row but leave focus in the field): copy the row,
+            // not the query. Only a hand-made partial text selection keeps
+            // the field's own Cmd+C.
+            if key.key_code == 8
+                && cmd_only
+                && self.key_in_text()
+                && self.focused_pane_id().as_deref() == Some("files-filter")
+                && !self.files_filter_partial_selection()
+                && self.files_surface(|b| !b.selected_paths().is_empty()).unwrap_or(false)
+            {
+                self.files_copy();
+                return true;
+            }
+            self.files_finder_key(key)
         }
     }
 
@@ -4725,7 +4741,11 @@ mod daemon_ui {
                     if double {
                         cancel_click_rename();
                     } else if was_selected == Some(true) {
-                        schedule_click_rename(|ui| ui.paths_begin_rename());
+                        schedule_click_rename(|| {
+                            if let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) {
+                                ui.paths_begin_rename();
+                            }
+                        });
                     } else {
                         cancel_click_rename();
                     }
@@ -5642,258 +5662,6 @@ return Some(true)
             }
             let view = browser.content_view()?;
             Some((browser, view))
-        }
-
-        /// A click / keystroke from the live file browser view.
-        fn files_event(&self, ev: crate::views::files_view::FilesEvent) {
-            use crate::ui::sidebar::SidebarEvent;
-            use crate::views::files_view::FilesEvent as E;
-            match ev {
-                E::Click { row, cmd, shift, double } => {
-                    // Only a row the user already clicked counts as "selected" (the
-                    // default selection of row 0 must not arm a rename).
-                    let click_key = self.files_surface(|b| (b.cwd.clone(), row));
-                    let was_selected = self.files_surface(|b| b.list.selection == row && b.list.marked.is_empty()) == Some(true)
-                        && FILES_LAST_CLICK.with(|c| *c.borrow() == click_key);
-                    FILES_LAST_CLICK.with(|c| *c.borrow_mut() = click_key);
-                    self.files_surface(|b| {
-                        b.status_note = None;
-                        if shift {
-                            b.list.extend_selection(row);
-                        } else if cmd {
-                            b.list.command_click(row);
-                        } else {
-                            b.list.marked.clear();
-                            b.list.selection = row;
-                        }
-                    });
-                    // Click on an already-selected row renames it (after the
-                    // double-click window, like Finder); in Recent a double-click
-                    // previews in the dismissable popup instead of descending.
-                    let target = (!cmd && !shift)
-                        .then(|| {
-                            self.files_surface(|b| {
-                                let in_recent = b.in_recent();
-                                b.visible_rows()
-                                    .get(row)
-                                    .filter(|e| !e.is_parent())
-                                    .map(|e| (e.path.clone(), in_recent && !e.is_dir))
-                            })
-                            .flatten()
-                        })
-                        .flatten();
-                    self.focus_files_list();
-                    match target {
-                        Some((path, true)) if double => {
-                            cancel_click_rename();
-                            crate::views::file_popup::show(&path, None);
-                        }
-                        Some(_) if double => {
-                            cancel_click_rename();
-                            self.files_accept_selected();
-                        }
-                        Some(_) if was_selected => schedule_click_rename(|ui| ui.files_begin_rename()),
-                        _ => {
-                            cancel_click_rename();
-                            if double && !cmd && !shift {
-                                self.files_accept_selected();
-                            }
-                        }
-                    }
-                }
-                E::RowMenu { row, x, y } => {
-                    self.files_surface(|b| {
-                        if !b.list.marked.contains(&row) {
-                            b.list.marked.clear();
-                            b.list.selection = row;
-                        }
-                    });
-                    self.files_row_menu(x, y);
-                }
-                E::BlankMenu { x, y } => self.files_blank_menu(x, y),
-                E::Drop { row, paths, copy, force_move } => {
-                    use std::os::unix::fs::MetadataExt;
-                    let dest = self
-                        .files_surface(|b| match row {
-                            Some(i) => b.visible_rows().get(i).map(|e| e.path.clone()),
-                            None => b.ops_directory(),
-                        })
-                        .flatten();
-                    let Some(dest) = dest else {
-                        crate::ui::toast::show("Can't drop here — open a folder first", "exclamationmark.triangle.fill");
-                        return;
-                    };
-                    // Dropping a file back into the folder it already lives in
-                    // (or a folder onto itself) is a no-op.
-                    let src: Vec<String> = paths
-                        .into_iter()
-                        .filter(|p| {
-                            p != &dest
-                                && std::path::Path::new(p).parent().map(|d| d.to_string_lossy() != dest.trim_end_matches('/')) != Some(false)
-                        })
-                        .collect();
-                    if src.is_empty() {
-                        return;
-                    }
-                    // Finder rule: same volume = move, other volume = copy;
-                    // Option forces a copy, Command forces a move.
-                    let dev = |p: &str| std::fs::metadata(p).map(|m| m.dev()).ok();
-                    let same_volume = src.iter().all(|p| dev(p).is_some() && dev(p) == dev(&dest));
-                    let mv = force_move || (!copy && same_volume);
-                    let name = std::path::Path::new(&dest).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dest.clone());
-                    self.files_transfer(src, dest, mv, format!("into {name}"));
-                }
-                E::PreviewOpen(i) => {
-                    let target = self.files_surface(|b| match b.preview().1 {
-                        crate::views::files_view::Preview::Folder(rows) => rows.get(i).cloned(),
-                        _ => None,
-                    });
-                    if let Some(Some(e)) = target {
-                        if e.is_dir {
-                            self.files_surface(|b| b.cd(&e.path));
-                        } else {
-                            open_path(&e.path);
-                        }
-                    }
-                }
-                E::Parent => {
-                    self.files_surface(|b| b.cd_parent());
-                }
-                E::TogglePin => {
-                    self.files_surface(|b| b.toggle_pin());
-                }
-                E::ToggleOrder => {
-                    self.files_surface(|b| b.toggle_order());
-                }
-                E::SortMenu { x, y } => {
-                    use crate::ui::menu_kit::{popup, MenuEntry};
-                    use crate::views::files::SortKey;
-                    let cur = self.files_surface(|b| b.sort_key).unwrap_or(SortKey::Name);
-                    let view = self.files_surface(|b| b.view.clone()).flatten();
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let entries = SortKey::ALL
-                        .iter()
-                        .map(|k| {
-                            let k = *k;
-                            let weak = weak.clone();
-                            MenuEntry::checked(k.label(), k == cur, move || {
-                                if let Some(ui) = weak.load() {
-                                    ui.files_surface(|b| b.set_sort(k));
-                                }
-                            })
-                        })
-                        .collect();
-                    if let Some(v) = view {
-                        popup(entries, Some(&v), x, y);
-                    }
-                }
-                E::Query(q) => {
-                    self.files_surface(|b| {
-                        b.status_note = None;
-                        b.list.selection = 0;
-                        b.set_query(&q);
-                    });
-                }
-                E::Enter => {
-                    let jumped = self.files_surface(|b| {
-                        let q = b.query.trim().to_string();
-                        if (q.contains('/') || q.starts_with('~')) && !crate::views::files::has_glob(&q) {
-                            let p = crate::views::files::resolve_path(&q, &b.cwd);
-                            if std::path::Path::new(&p).is_dir() {
-                                b.cd(&p);
-                                return Some(None);
-                            }
-                            if std::path::Path::new(&p).exists() {
-                                return Some(Some(p));
-                            }
-                        }
-                        None
-                    });
-                    match jumped {
-                        Some(Some(Some(p))) => open_path(&p),
-                        Some(Some(None)) => self.focus_files_list(),
-                        _ => {
-                            self.files_accept_selected();
-                        }
-                    }
-                }
-                E::Move(d) => {
-                    self.files_surface(|b| b.list.move_selection(d));
-                }
-                E::Tab(i) => {
-                    self.files_surface(|b| b.select_tab(i));
-                    self.files_relayout();
-                }
-                E::DragEnded => {
-                    self.files_surface(|b| b.reload());
-                }
-                E::Escape => {
-                    self.files_surface(|b| {
-                        if !b.query.is_empty() {
-                            b.set_query("");
-                        }
-                    });
-                    self.focus_files_list();
-                }
-                E::Sidebar(SidebarEvent::Select(i)) => {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let places = crate::views::files::places(&home);
-                    self.files_surface(|b| {
-                        b.status_note = None;
-                        if i < 2 {
-                            b.show_virtual(i);
-                        } else if let Some(p) = places.get(i - 2) {
-                            b.cd(&p.path);
-                        }
-                    });
-                }
-                E::Sidebar(SidebarEvent::Pinned(path)) => {
-                    if std::path::Path::new(&path).is_dir() {
-                        self.files_surface(|b| b.cd(&path));
-                    }
-                }
-                E::Sidebar(SidebarEvent::MenuPinned(path, x, y)) => {
-                    use crate::ui::menu_kit::{popup, MenuEntry};
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let pinned = self
-                        .files_surface(|b| b.pinned_favorites.contains(&path))
-                        .unwrap_or(false);
-                    let (p1, p2, p3, p4) = (path.clone(), path.clone(), path.clone(), path.clone());
-                    let w1 = weak.clone();
-                    let w4 = weak.clone();
-                    let mut entries = vec![
-                        MenuEntry::item("Open", move || {
-                            if let Some(ui) = w1.load() {
-                                ui.files_surface(|b| b.cd(&p1));
-                            }
-                        }),
-                        MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p2])),
-                        MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p3)),
-                    ];
-                    entries.extend(crate::views::files::copy_contents_entry(&path));
-                    if pinned {
-                        entries.push(MenuEntry::Separator);
-                        entries.push(MenuEntry::item("Unpin", move || {
-                            if let Some(ui) = w4.load() {
-                                ui.files_surface(|b| {
-                                    b.pinned_favorites.retain(|x| x != &p4);
-                                    b.toggle_pin_save();
-                                });
-                            }
-                        }));
-                    }
-                    popup(entries, None, x, y);
-                }
-                E::Sidebar(SidebarEvent::Rail(_)) => {
-                    self.files_surface(|b| {
-                        if let Some(v) = &b.view {
-                            v.layout_panes();
-                            v.setNeedsDisplay(true);
-                        }
-                    });
-                }
-                E::Sidebar(_) => {}
-            }
         }
 
         /// The header app-icon menu (`onChromeIconClick`): Theme ▸ and the
@@ -8935,267 +8703,6 @@ return Some(true)
             self.ivars().state.borrow().as_ref().map(|st| st.window.clone())
         }
 
-        /// Cmd+Ctrl+N: Finder's New Folder with Selection — one undo step.
-        fn files_new_folder_with_selection(&self) {
-            use crate::engines::file_ops::FileOps;
-            let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
-            if paths.is_empty() {
-                self.files_new_item(true);
-                return;
-            }
-            let Some(Some(dir)) = self.files_surface(|b| b.ops_directory()) else {
-                crate::ui::toast::show("Can't create here — open a folder first", "exclamationmark.triangle.fill");
-                return;
-            };
-            let stack = FileOps::shared();
-            let since = stack.count();
-            let made = FileOps::create("New Folder With Items", &dir, true, stack);
-            let Some(folder) = made.paths().into_iter().next() else {
-                self.files_op_done(String::new(), made.failed.or(Some("Couldn't create the folder".into())));
-                return;
-            };
-            let moved = FileOps::transfer(&paths, &folder, true, stack);
-            stack.collapse(since, "New Folder with Items");
-            if let Some(f) = moved.failed {
-                crate::ui::toast::show(&f, "exclamationmark.triangle.fill");
-            }
-            self.files_surface(|b| {
-                if !b.query.is_empty() {
-                    b.set_query("");
-                }
-                b.reload();
-                b.select_path(&folder);
-            });
-            self.focus_files_list();
-            self.files_begin_rename();
-        }
-
-        fn files_key(&self, key: &popup::KeyInput) -> bool {
-            use crate::engines::file_ops::FileOps;
-            let in_list = self.focused_pane_id().as_deref() == Some("files-list");
-            let (cmd, shift, opt, ctrl) = (key.cmd, key.shift, key.opt, key.ctrl);
-            let plain = !cmd && !ctrl && !opt && !shift;
-            // Cmd alone / Cmd+Shift / Cmd+Opt / Cmd+Ctrl — exact chords, so a
-            // Finder key never fires for a neighbouring one.
-            let cmd_only = cmd && !shift && !opt && !ctrl;
-            let cmd_shift = cmd && shift && !opt && !ctrl;
-            let cmd_opt = cmd && opt && !shift && !ctrl;
-            let cmd_ctrl = cmd && ctrl && !shift && !opt;
-            let text = self.key_in_text();
-            let home = std::env::var("HOME").unwrap_or_default();
-            // Finder's Go menu and the other Finder keys first: several share
-            // a key code with an older, looser arm below (Cmd+Opt+C vs Cmd+C).
-            match key.key_code {
-                // Cmd+Shift+H / D / O, Cmd+Opt+L: Home, Desktop, Documents, Downloads.
-                4 if cmd_shift => return self.files_go(&home),
-                2 if cmd_shift => return self.files_go(&format!("{home}/Desktop")),
-                31 if cmd_shift => return self.files_go(&format!("{home}/Documents")),
-                37 if cmd_opt => return self.files_go(&format!("{home}/Downloads")),
-                // Cmd+Shift+G: Go to Folder — the address bar, its text selected.
-                5 if cmd_shift => {
-                    self.live_pane_focus("files-filter");
-                    self.files_select_filter_text();
-                    return true;
-                }
-                // Cmd+F: search (Finder) — the same filter box as Cmd+L.
-                3 if cmd_only => {
-                    self.live_pane_focus("files-filter");
-                    return true;
-                }
-                // Cmd+O: open the selection (Cmd+Down's twin).
-                31 if cmd_only => {
-                    self.files_accept_selected();
-                    return true;
-                }
-                // Cmd+Y: Quick Look (Space's twin); Cmd+Opt+Y: full screen.
-                16 if cmd_only || cmd_opt => {
-                    if let Some(mtm) = MainThreadMarker::new() {
-                        self.files_quick_look(mtm);
-                        if cmd_opt {
-                            crate::views::files::quick_look_full_screen(mtm);
-                        }
-                    }
-                    return true;
-                }
-                // Cmd+I: Get Info.
-                34 if cmd_only => {
-                    self.files_get_info();
-                    return true;
-                }
-                // Cmd+Opt+C: Copy as Pathname (Cmd+K's Finder twin).
-                8 if cmd_opt => {
-                    return self.route_file_browser(popup::FileBrowserAction::CopyPath) || true;
-                }
-                // Cmd+Opt+A: Deselect All.
-                0 if cmd_opt => {
-                    self.files_surface(|b| b.list.deselect_all());
-                    return true;
-                }
-                // Cmd+Shift+Z: redo the last undone file operation (a text
-                // field keeps Cmd+Shift+Z for its own typing).
-                6 if cmd_shift && !text => {
-                    match FileOps::redo(FileOps::shared()) {
-                        Some((what, o)) => self.files_op_done(format!("Redid {what}"), o.failed),
-                        None => crate::ui::toast::show("Nothing to redo", "arrow.uturn.forward"),
-                    }
-                    return true;
-                }
-                // Cmd+Ctrl+N: New Folder with Selection.
-                45 if cmd_ctrl => {
-                    self.files_new_folder_with_selection();
-                    return true;
-                }
-                // Cmd+Opt+Delete: delete immediately (asks first).
-                51 if cmd_opt && !text => {
-                    self.files_delete_now();
-                    return true;
-                }
-                // Cmd+Shift+Delete: Empty Trash (asks first).
-                51 if cmd_shift && !text => {
-                    self.files_empty_trash();
-                    return true;
-                }
-                // Cmd+Ctrl+T: Add to Sidebar (pin the selected / current folder).
-                17 if cmd_ctrl => {
-                    self.files_surface(|b| b.pin_selection_or_cwd());
-                    return true;
-                }
-                // Cmd+Shift+P: show / hide the preview pane.
-                35 if cmd_shift => {
-                    self.files_toggle_preview();
-                    return true;
-                }
-                // Tabs (Finder): Cmd+T new, Cmd+W closes a tab while there are
-                // several (the last one: Cmd+W hides as before), Cmd+Shift+[ / ].
-                17 if cmd_only => {
-                    self.files_surface(|b| b.new_tab());
-                    self.files_relayout();
-                    return true;
-                }
-                13 if cmd_only && self.files_surface(|b| b.tab_count()).unwrap_or(1) > 1 => {
-                    self.files_surface(|b| b.close_tab());
-                    self.files_relayout();
-                    return true;
-                }
-                30 | 33 if cmd_shift => {
-                    let d = if key.key_code == 30 { 1 } else { -1 };
-                    if self.files_surface(|b| b.cycle_tab(d)).unwrap_or(false) {
-                        return true;
-                    }
-                    return false;
-                }
-                // Opt+→ / Opt+←: expand / collapse the selected folder in
-                // place (Finder's list-view disclosure triangles).
-                124 if opt && !cmd && !ctrl && !shift && in_list => {
-                    self.files_surface(|b| b.expand_selected());
-                    return true;
-                }
-                123 if opt && !cmd && !ctrl && !shift && in_list => {
-                    self.files_surface(|b| b.collapse_selected());
-                    return true;
-                }
-                // Cmd+Opt+S: show / hide the sidebar (Cmd+\'s Finder twin).
-                1 if cmd_opt => return self.route_rail_toggle(),
-                // Cmd+E: eject the selected volume.
-                14 if cmd_only => {
-                    self.files_eject();
-                    return true;
-                }
-                // Cmd+Ctrl+Opt+1/2/5/6/7: sort by Name / Kind / Date Modified /
-                // Date Created / Size (Finder's View ▸ Sort By numbers).
-                18 | 19 | 23 | 22 | 26 if cmd && ctrl && opt && !shift => {
-                    use crate::views::files::SortKey;
-                    let k = match key.key_code {
-                        18 => SortKey::Name,
-                        19 => SortKey::Kind,
-                        23 => SortKey::Modified,
-                        22 => SortKey::Created,
-                        _ => SortKey::Size,
-                    };
-                    self.files_surface(|b| b.set_sort(k));
-                    return true;
-                }
-                _ => {}
-            }
-            match key.key_code {
-                33 if cmd => {
-                    self.files_surface(|b| b.go_back());
-                }
-                30 if cmd => {
-                    self.files_surface(|b| b.go_forward());
-                }
-                47 if cmd && shift => {
-                    self.files_surface(|b| b.toggle_hidden());
-                }
-                37 if cmd && !shift => {
-                    self.live_pane_focus("files-filter");
-                }
-                45 if cmd && shift => self.files_new_item(true),
-                126 if cmd && !shift => {
-                    self.files_surface(|b| b.cd_parent());
-                }
-                125 if cmd && !shift && in_list => {
-                    self.files_accept_selected();
-                }
-                123 if plain && in_list => {
-                    self.files_surface(|b| b.cd_parent());
-                }
-                124 if plain && in_list => {
-                    let dir = self.files_surface(|b| {
-                        b.visible_rows().get(b.selection()).filter(|e| e.is_dir).map(|e| e.path.clone())
-                    });
-                    if let Some(Some(d)) = dir {
-                        self.files_surface(|b| b.cd(&d));
-                    }
-                }
-                49 if plain && in_list => {
-                    if let Some(mtm) = MainThreadMarker::new() {
-                        self.files_quick_look(mtm);
-                    }
-                }
-                15 if cmd && !shift => self.files_begin_rename(),
-                120 if !cmd && !ctrl => self.files_begin_rename(),
-                51 if cmd_only && in_list => self.files_trash(),
-                2 if cmd_only && in_list => self.files_duplicate(),
-                8 if cmd_only && in_list => self.files_copy(),
-                // Cmd+C typed in the filter while a row is highlighted (Down /
-                // Up there move the row but leave focus in the field): copy
-                // the row, not the query. Only a hand-made partial text
-                // selection keeps the field's own Cmd+C; the whole-text
-                // select-on-focus does not count.
-                8 if cmd_only && text
-                    && self.focused_pane_id().as_deref() == Some("files-filter")
-                    && !self.files_filter_partial_selection()
-                    && self.files_surface(|b| !b.selected_paths().is_empty()).unwrap_or(false) =>
-                {
-                    self.files_copy()
-                }
-                7 if cmd_only && in_list => self.files_cut(),
-                9 if cmd && !shift && !ctrl && in_list => self.files_paste(opt),
-                // Type-ahead: a printable key with the list focused starts the
-                // filter with that character (the field's cwd text is selected
-                // on focus, so it is replaced).
-                _ if in_list && !cmd && !ctrl && !opt && key.chars.is_some_and(|c| !c.is_control() && !c.is_whitespace() && (c.is_alphanumeric() || "._-~/*+".contains(c))) => {
-                    let c = key.chars.unwrap();
-                    if self.live_pane_focus("files-filter") {
-                        let field = self.files_surface(|b| b.view.as_ref().map(|v| v.search_field())).flatten();
-                        if let Some(ed) = field.and_then(|f| f.currentEditor()) {
-                            let ns = NSString::from_str(&c.to_string());
-                            let _: () = unsafe { objc2::msg_send![&*ed, insertText: &*ns] };
-                        }
-                    }
-                }
-                6 if cmd && !shift && in_list => {
-                    match FileOps::undo(FileOps::shared()) {
-                        Some((what, o)) => self.files_op_done(format!("Undid {what}"), o.failed),
-                        None => crate::ui::toast::show("Nothing to undo", "arrow.uturn.backward"),
-                    }
-                }
-                _ => return false,
-            }
-            true
-        }
-
         /// `true` when the shared window's first responder is an editable
         /// `NSText` (a field editor: the search box or the embedded setup form).
         fn jira_text_focused(&self) -> bool {
@@ -9576,61 +9083,6 @@ return Some(true)
             let x = r.x + 30.0 + list.row_indent(i);
             // A 22pt field centred on the row (rows grow with the list zoom).
             NSRect::new(NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()), NSSize::new((r.width * 0.55 - x).max(r.width - x - 280.0).max(160.0), 22.0))
-        }
-
-        /// `PopupFileBrowser.beginRename()` (Cmd+R / F2).
-        fn files_begin_rename(&self) {
-            // Several selected: Finder's "Rename N Items…" sheet.
-            if self.files_surface(|b| b.list.marked.len()).unwrap_or(0) > 1 {
-                self.files_batch_rename();
-                return;
-            }
-            let Some(Some((i, path, is_dir, list))) = self.files_surface(|b| {
-                b.begin_rename(None);
-                let (path, _) = b.rename.clone()?;
-                let i = b.list.selection;
-                let is_dir = b.list.rows.get(i).is_some_and(|e| e.is_dir);
-                Some((i, path, is_dir, b.view.as_ref()?.list_view()))
-            }) else {
-                return;
-            };
-            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let wl = objc2::rc::Weak::from_retained(&list);
-            crate::ui::inline_rename::begin(
-                &list,
-                Self::rename_rect(&list, i),
-                &name,
-                is_dir,
-                crate::ui::theme::section_colors("files"),
-                12.0,
-                Box::new(move |text| {
-                    let Some(ui) = weak.load() else { return };
-                    let msg = ui.files_surface(|b| match &text {
-                        Some(t) => {
-                            if let Some((p, _)) = b.rename.clone() {
-                                b.rename = Some((p, t.clone()));
-                            }
-                            b.commit_rename()
-                        }
-                        None => {
-                            b.cancel_rename();
-                            None
-                        }
-                    });
-                    if let Some(Some(m)) = msg {
-                        crate::ui::toast::show(&m, "exclamationmark.triangle.fill");
-                    }
-                    // Back to the list — unless the rename ended by clicking
-                    // into another text field, which keeps its focus.
-                    if let (Some(l), Some(w)) = (wl.load(), wl.load().and_then(|l| l.window())) {
-                        let typing = w.firstResponder().is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSTextView as objc2::ClassType>::class()));
-                        if !typing {
-                            w.makeFirstResponder(Some(&l));
-                        }
-                    }
-                }),
-            );
         }
 
         /// `PathsWindow.beginRename()` (Cmd+R).
@@ -10044,7 +9496,7 @@ return Some(true)
         /// a file (a directory re-roots the browser and swaps the view tree).
         fn route_list_accept(&self) -> bool {
             match self.ivars().controller.current() {
-                Some(SlotView::Files) => self.files_accept_selected(),
+                Some(SlotView::Files) => self.files_open_selected(),
                 Some(v) if v.is_jira() => {
                     self.jira_event(crate::views::jira_view::JiraEvent::OpenDetail);
                     true
@@ -10068,30 +9520,6 @@ return Some(true)
                             b.list.marked.insert(i);
                         }
                     });
-                    true
-                }
-                _ => false,
-            }
-        }
-
-        /// `openIndex(_:)` on the files list: descend into a directory (rebuild
-        /// the browser rooted there) or open the file.
-        fn files_accept_selected(&self) -> bool {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return false;
-            };
-            let action = self.files_surface(|b| {
-                let rows = b.visible_rows().to_vec();
-                crate::views::files::open_index(&rows, b.selection())
-            });
-            match action {
-                Some(crate::views::files::OpenOutcome::Open(path)) => {
-                    open_path(&path);
-                    true
-                }
-                Some(crate::views::files::OpenOutcome::Cd(dir)) => {
-                    let _ = mtm;
-                    self.files_surface(|b| b.cd(&dir));
                     true
                 }
                 _ => false,
@@ -10307,7 +9735,7 @@ return Some(true)
                     self.files_surface(|_| ()).is_some()
                 }
                 popup::FileBrowserAction::Rename => {
-                    self.files_begin_rename();
+                    self.files_begin_rename(None);
                     true
                 }
                 popup::FileBrowserAction::Copy
