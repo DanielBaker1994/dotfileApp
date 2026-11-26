@@ -1,10 +1,11 @@
 exec-on-workspace-change = [
-  '/opt/homebrew/bin/bash', '-c', '~/.config/kitchen-sink/bin/no_stray_workspaces.sh &'
+  '/opt/homebrew/bin/bash', '-c', '~/.config/kitchen-sink/bin/no_stray_workspaces.sh & ~/.config/kitchen-sink/bin/stack_border.sh &'
 ]
 
 # The focused window id for kitchen-sink.
 on-focus-changed = [
-  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"'
+  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"',
+  'exec-and-forget ~/.config/kitchen-sink/bin/stack_border.sh'
 ]
 
 config-version = 2
@@ -16,7 +17,7 @@ auto-reload-config = true
 enable-normalization-flatten-containers = true
 enable-normalization-opposite-orientation-for-nested-containers = true
 
-accordion-padding = 30
+accordion-padding = 60
 
 default-root-container-layout = 'accordion'
 
