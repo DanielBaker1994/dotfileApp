@@ -325,6 +325,8 @@ pub fn merge_preview_order(n: usize, drag: Option<(usize, usize)>) -> Vec<usize>
 pub struct MergeStripLayout {
     pub strip: Rect,
     pub hint: Rect,
+    /// The stacking toggle: [vertical, horizontal].
+    pub direction: [Rect; 2],
     /// One row per slot, top to bottom (slot 0 = photo 1).
     pub rows: Vec<Rect>,
 }
@@ -334,7 +336,9 @@ pub struct MergeStripLayout {
 pub struct MergeStrip;
 
 impl MergeStrip {
-    pub const WIDTH: f64 = 128.0;
+    pub const WIDTH: f64 = 156.0;
+    /// The ↓ Vertical | → Horizontal toggle's height.
+    pub const TOGGLE: f64 = 24.0;
     pub const PAD: f64 = 8.0;
     pub const HINT: f64 = 22.0;
     pub const ROW: f64 = 84.0;
@@ -356,24 +360,31 @@ impl MergeStrip {
             return None;
         }
         let avail = (bounds.h - top - 2.0 * Self::INSET).max(1.0);
-        let chrome = 2.0 * Self::PAD + Self::HINT;
+        let chrome = 2.0 * Self::PAD + Self::HINT + Self::TOGGLE + Self::GAP;
         let per = ((avail - chrome + Self::GAP) / n as f64 - Self::GAP).floor();
         let row = per.clamp(Self::MIN_ROW, Self::ROW);
         let h = chrome + n as f64 * row + (n as f64 - 1.0) * Self::GAP;
         let y = (bounds.y + top + Self::INSET + ((avail - h) / 2.0).max(0.0)).round();
         let strip = Rect::new(x0, y, Self::WIDTH, h);
-        let hint = Rect::new(x0 + Self::PAD, y + Self::PAD, Self::WIDTH - 2.0 * Self::PAD, Self::HINT);
+        let iw = Self::WIDTH - 2.0 * Self::PAD;
+        let hint = Rect::new(x0 + Self::PAD, y + Self::PAD, iw, Self::HINT);
+        let half = (iw / 2.0).floor();
+        let direction = [
+            Rect::new(x0 + Self::PAD, hint.max_y(), half, Self::TOGGLE),
+            Rect::new(x0 + Self::PAD + half, hint.max_y(), iw - half, Self::TOGGLE),
+        ];
+        let top = hint.max_y() + Self::TOGGLE + Self::GAP;
         let rows = (0..n)
             .map(|i| {
                 Rect::new(
                     x0 + Self::PAD,
-                    hint.max_y() + i as f64 * (row + Self::GAP),
+                    top + i as f64 * (row + Self::GAP),
                     Self::WIDTH - 2.0 * Self::PAD,
                     row,
                 )
             })
             .collect();
-        Some(MergeStripLayout { strip, hint, rows })
+        Some(MergeStripLayout { strip, hint, direction, rows })
     }
 
     /// The row under `p`.
@@ -2696,6 +2707,11 @@ impl ShotSession {
         if !l.strip.contains_point(p) {
             return false;
         }
+        if let Some(h) = l.direction.iter().position(|r| r.contains_point(p)) {
+            self.set_merge_horizontal(Some(h == 1));
+            self.chrome_press = Some(ChromePress::Dead);
+            return true;
+        }
         match MergeStrip::row_at(&l, p) {
             Some(i) => {
                 if let Some(m) = self.merge.as_mut() {
@@ -2708,24 +2724,50 @@ impl ShotSession {
         true
     }
 
-    /// Move photo `from` to slot `to` in a merged stack: rebuild the canvas
-    /// in the new order, move each number to its slot and every annotation
-    /// with the photo it sits on. The stack's total size never changes (same
-    /// photos), so the stage and the selection stay put. Clears undo: the
-    /// old snapshots belong to the old canvas.
+    /// Move photo `from` to slot `to` in a merged stack (the strip drag).
     #[cfg(target_os = "macos")]
     pub fn move_merged(&mut self, from: usize, to: usize) -> bool {
-        let mcfg = self.cfg.merge.clone();
-        let outline = self.cfg.counter_outline;
-        let Some(m) = self.merge.as_mut() else { return false };
+        let Some(m) = self.merge.as_ref() else { return false };
         let n = m.images.len();
         if from >= n || to >= n || from == to {
             return false;
         }
         let mut order: Vec<usize> = (0..n).collect();
         move_item(&mut order, from, to);
-        let mut images = m.images.clone();
-        move_item(&mut images, from, to);
+        let h = m.horizontal;
+        self.rebuild_merge(&order, h)
+    }
+
+    /// Stack the merged photos the other way (the strip's ↓ / → toggle):
+    /// `Some(h)` sets it, `None` flips it. `false` when nothing changed.
+    #[cfg(target_os = "macos")]
+    pub fn set_merge_horizontal(&mut self, horizontal: Option<bool>) -> bool {
+        let Some(m) = self.merge.as_ref() else { return false };
+        let want = horizontal.unwrap_or(!m.horizontal);
+        if want == m.horizontal {
+            return false;
+        }
+        let order: Vec<usize> = (0..m.images.len()).collect();
+        self.rebuild_merge(&order, want)
+    }
+
+    /// Rebuild a merged stack with its photos in `order` (`order[slot]` =
+    /// the current index of the photo for that slot), stacked `horizontal`:
+    /// a new canvas, each number moved to its slot's cell and every
+    /// annotation carried with the photo it sits on (scaled with it when
+    /// the stack had to change size to fit). The selection becomes the new
+    /// stack. Clears undo: the old snapshots belong to the old canvas.
+    #[cfg(target_os = "macos")]
+    fn rebuild_merge(&mut self, order: &[usize], horizontal: bool) -> bool {
+        let mcfg = self.cfg.merge.clone();
+        let outline = self.cfg.counter_outline;
+        let Some(m) = self.merge.as_ref() else { return false };
+        let n = m.images.len();
+        if order.len() != n || order.iter().any(|&i| i >= n) {
+            return false;
+        }
+        let Some(disp) = self.displays.get(m.display) else { return false };
+        let images: Vec<BaseImage> = order.iter().map(|&i| m.images[i].clone()).collect();
         let sizes: Vec<(f64, f64)> = images
             .iter()
             .map(|i| {
@@ -2736,12 +2778,27 @@ impl ShotSession {
             })
             .collect();
         let gap = mcfg.gap * m.px;
-        let layout = merge_layout(&sizes, m.horizontal, mcfg.gutter * m.px, gap, gap);
+        let layout = merge_layout(&sizes, horizontal, mcfg.gutter * m.px, gap, gap);
+        let stage = merge_stage_left(
+            layout.width,
+            layout.height,
+            disp.frame.w,
+            disp.frame.h,
+            disp.top_inset,
+            MergeStrip::reserve(),
+            48.0,
+            disp.scale,
+            mcfg.max_scale,
+        );
+        let canvas_size = (
+            (disp.frame.w * stage.scale).round() as i64,
+            (disp.frame.h * stage.scale).round() as i64,
+        );
         let Some(canvas) = shot_cg::merge_canvas(
             &images,
-            m.canvas.0,
-            m.canvas.1,
-            &m.stage,
+            canvas_size.0,
+            canvas_size.1,
+            &stage,
             &layout,
             mcfg.background,
             mcfg.border_color,
@@ -2749,19 +2806,16 @@ impl ShotSession {
         ) else {
             return false;
         };
-        let stage = m.stage.clone();
-        let to_pt = |r: Rect| {
-            let k = stage.fit / stage.scale;
-            Rect::new(stage.rect.x + r.x * k, stage.rect.y + r.y * k, r.w * k, r.h * k)
+        let to_pt = |st: &MergeStage, r: Rect| {
+            let k = st.fit / st.scale;
+            Rect::new(st.rect.x + r.x * k, st.rect.y + r.y * k, r.w * k, r.h * k)
         };
-        let old_rects: Vec<Rect> = m.layout.images.iter().map(|r| to_pt(*r)).collect();
-        let new_rects: Vec<Rect> = layout.images.iter().map(|r| to_pt(*r)).collect();
+        let old_rects: Vec<Rect> = m.layout.images.iter().map(|r| to_pt(&m.stage, *r)).collect();
+        let new_rects: Vec<Rect> = layout.images.iter().map(|r| to_pt(&stage, *r)).collect();
         let labels = merge_labels(&stage, &layout, &mcfg, m.px, outline);
+        // Old stage points per new stage point (1 unless the fit changed).
+        let ratio = (stage.fit / stage.scale) / (m.stage.fit / m.stage.scale);
         let display = m.display;
-        move_item(&mut m.paths, from, to);
-        m.images = images;
-        m.layout = layout;
-        m.drag = None;
         for o in self.doc.objects.iter_mut() {
             if o.tool == ShotTool::Counter && o.fixed_number && o.number >= 1 && (o.number as usize) <= n {
                 // A slot number: it stays "k" and goes to slot k's cell.
@@ -2773,11 +2827,24 @@ impl ShotSession {
             let Some(old) = old_rects.iter().position(|r| r.contains_point(c)) else { continue };
             let Some(slot) = order.iter().position(|&i| i == old) else { continue };
             let (a, z) = (old_rects[old], new_rects[slot]);
-            *o = o.moved(z.x - a.x, z.y - a.y);
+            o.points = o
+                .points
+                .iter()
+                .map(|p| Point::new(z.x + (p.x - a.x) * ratio, z.y + (p.y - a.y) * ratio))
+                .collect();
         }
+        let Some(m) = self.merge.as_mut() else { return false };
+        m.paths = order.iter().map(|&i| m.paths[i].clone()).collect();
+        m.images = images;
+        m.layout = layout;
+        m.stage = stage.clone();
+        m.canvas = canvas_size;
+        m.horizontal = horizontal;
+        m.drag = None;
         self.doc.clear_history();
         self.doc.selected = None;
         self.set_base_image(display, Some(canvas));
+        self.test_select(stage.rect, Some(display));
         self.base_dirty = true;
         true
     }
@@ -6749,6 +6816,14 @@ mod overlay {
         fill_round(ctx, l.strip, 10.0, cfg.contrast_color.mixed(&ShotColor::BLACK, 0.45).with_alpha(0.92));
         stroke_round(ctx, l.strip, 10.0, ui.with_alpha(0.6), 1.0);
         draw_text_centered(ctx, &cfg.merge.order_hint, l.hint, 11.0, fg.with_alpha(0.75), false);
+        // ↓ Vertical | → Horizontal: the live stacking, click to switch.
+        let [v, h] = l.direction;
+        let pill = Rect::new(v.x, v.y, h.max_x() - v.x, v.h);
+        fill_round(ctx, pill, 6.0, ShotColor::WHITE.with_alpha(0.08));
+        let on = if m.horizontal { h } else { v };
+        fill_round(ctx, Rect::new(on.x + 2.0, on.y + 2.0, on.w - 4.0, on.h - 4.0), 5.0, ui);
+        draw_text_centered(ctx, &cfg.merge.vertical_label, v, 10.0, fg.with_alpha(if m.horizontal { 0.6 } else { 1.0 }), !m.horizontal);
+        draw_text_centered(ctx, &cfg.merge.horizontal_label, h, 10.0, fg.with_alpha(if m.horizontal { 1.0 } else { 0.6 }), m.horizontal);
         let order = super::merge_preview_order(m.images.len(), m.drag);
         let dragged = m.drag.map(|(from, _)| from);
         for (slot, row) in l.rows.iter().enumerate() {
@@ -9086,10 +9161,11 @@ impl ScreenshotController {
     /// grid open again and the same screenshots picked.
     #[cfg(target_os = "macos")]
     fn return_from_merge(&mut self) {
-        let Some((mut parent, mut picks, horizontal)) = self.merge_parent.take() else { return };
-        // The strip may have reordered the photos: come back in that order.
+        let Some((mut parent, mut picks, mut horizontal)) = self.merge_parent.take() else { return };
+        // The strip may have reordered / restacked: come back that way.
         if let Some(m) = self.session.as_ref().and_then(|s| s.merge.as_ref()) {
             picks = m.paths.clone();
+            horizontal = m.horizontal;
         }
         self.dismiss_overlay();
         parent.recent_open = false;
@@ -9747,10 +9823,30 @@ impl ScreenshotController {
                     None => Err("no session".to_string()),
                 }
             }
+            // `merge-direction:vertical|horizontal|toggle` — the strip's toggle.
+            #[cfg(target_os = "macos")]
+            "merge-direction" => {
+                let want = match arg {
+                    "vertical" => Some(false),
+                    "horizontal" => Some(true),
+                    "toggle" => None,
+                    _ => return Err("merge-direction:vertical|horizontal|toggle".to_string()),
+                };
+                if self.session.as_ref().and_then(|s| s.merge.as_ref()).is_none() {
+                    return Err("no merged stack".to_string());
+                }
+                if self.session.as_mut().is_some_and(|s| s.set_merge_horizontal(want))
+                    && objc2::MainThreadMarker::new().is_some()
+                {
+                    self.reload_overlay_bases();
+                }
+                Ok(())
+            }
             _ => Err(
                 "show[:MS] | show-text[:MS] | mode:text|screenshot | text | select:X,Y,W,H | \
                  tool:NAME | draw:X1,Y1,X2,Y2 | key:SPEC | copy | accept | save:PATH | save-ok \
-                 | pin | unpin | close | side-panel | panel-click:X,Y | merge-move:FROM,TO"
+                 | pin | unpin | close | side-panel | panel-click:X,Y | merge-move:FROM,TO \
+                 | merge-direction:vertical|horizontal|toggle"
                     .to_string(),
             ),
         }
@@ -9889,6 +9985,7 @@ impl ScreenshotController {
                 "horizontal": m.horizontal,
                 "strip": strip.as_ref().map(|l| r(l.strip)),
                 "rows": strip.as_ref().map(|l| l.rows.iter().map(|x| r(*x)).collect::<Vec<_>>()),
+                "direction": strip.as_ref().map(|l| l.direction.iter().map(|x| r(*x)).collect::<Vec<_>>()),
             });
         }
         st["toolSize"] = match s.panel_size() {
@@ -10931,7 +11028,9 @@ mod tests {
         let layout = merge_layout(&sizes, false, m.gutter * px, m.gap * px, m.gap * px);
         let stage = merge_stage_left(layout.width, layout.height, 1440.0, 900.0, 25.0, MergeStrip::reserve(), 48.0, 2.0, m.max_scale);
         let mut s = ShotSession::new(cfg.clone(), ShotArgs::default(), temp_path("mergemove"));
-        s.add_display(ShotDisplay::new(1, Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0));
+        let mut disp = ShotDisplay::new(1, Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0);
+        disp.top_inset = 25.0;
+        s.add_display(disp);
         s.test_select(stage.rect, Some(0));
         s.doc.objects = merge_labels(&stage, &layout, &m, px, false);
         let k = stage.fit / stage.scale;
@@ -10975,6 +11074,30 @@ mod tests {
         assert!(!s.doc.can_undo(), "undo cleared with the old canvas");
         // A click on a row without moving changes nothing.
         assert!(!s.move_merged(1, 1));
+
+        // The strip's → Horizontal segment restacks left to right in place.
+        s.base_dirty = false;
+        let l = s.merge_strip(0).unwrap();
+        s.mouse_down(0, mid(l.direction[1]), 1, false, false);
+        s.mouse_up(0, mid(l.direction[1]), false, false);
+        let me = s.merge.as_ref().unwrap();
+        assert!(me.horizontal && s.base_dirty);
+        assert_eq!(me.paths, ["2.png", "3.png", "1.png"], "order kept");
+        let ys: Vec<f64> = me.layout.images.iter().map(|r| r.y).collect();
+        assert!(ys.iter().all(|y| *y == ys[0]), "one row");
+        assert_eq!(s.selection, Some(me.stage.rect), "selection = the new stack");
+        let want = merge_labels(&me.stage, &me.layout, &m, px, false);
+        let one = s.doc.objects.iter().find(|o| o.fixed_number && o.number == 1).unwrap();
+        assert_eq!(one.points, want[0].points);
+        let k = me.stage.fit / me.stage.scale;
+        let st = me.stage.clone();
+        let last = Rect::new(st.rect.x + me.layout.images[2].x * k, st.rect.y + me.layout.images[2].y * k, 1.0, 1.0);
+        let arrow = s.doc.objects.iter().find(|o| o.tool == ShotTool::Arrow).unwrap();
+        assert!((arrow.points[0].x - last.x) > 0.0 && (arrow.points[0].y - last.y) > 0.0, "arrow still on photo 1");
+        // ↓ Vertical goes back; pressing the lit segment is a no-op.
+        assert!(!s.set_merge_horizontal(Some(true)));
+        assert!(s.set_merge_horizontal(None));
+        assert!(!s.merge.as_ref().unwrap().horizontal);
     }
 
     /// Paint the strip offscreen (no window, nothing on screen) mid-drag
