@@ -290,10 +290,10 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 `bin/` (build/test/install tooling; `lib.sh` for `ws_*` helpers;
 `preflight.sh`, `grant-permissions.sh`, `setup-home.sh`, `symlinks.sh` at
 root); `Tests/` (Python tests,
-`test_install.sh`); `config/` (borders rc, per-file symlinks from
-`~/.config/<name>`; **aerospace.toml lives in `~/.dotfiles/aerospace/`**, linked by
-`~/.dotfiles/symlinks.sh`, and calls kitchen-sink scripts through the guard
-`~/.dotfiles/aerospace/bin/ks`, plus `paths.ignore`); `rules/` (AI rule markdown),
+`test_install.sh`); `config/` (launchd plist, `paths.ignore`; `CONFIG_DIRS` is empty — **aerospace.toml,
+bordersrc, `stack_border.sh` and `no_stray_workspaces.sh` live in `~/.dotfiles`**
+(`aerospace/`, `borders/`), linked by `~/.dotfiles/symlinks.sh`; the config calls
+kitchen-sink scripts through the guard `~/.dotfiles/aerospace/bin/ks`, plus `paths.ignore`); `rules/` (AI rule markdown),
 `templates/`, `samples/`,
 `.claude/skills/` (repo skills incl.
 `ui-check`; `.agents/` is gitignored).

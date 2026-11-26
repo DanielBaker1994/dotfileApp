@@ -31,7 +31,7 @@ t "setup-home app succeeds" grep -q '^result=ok' <<<"$OUT"
 t "commands.toml is the user's own file" real_file "$WSH/commands.toml"
 t "no personal note paths in the default" bash -c "! grep -q 'ZimaSetup\|fake.json' '$WSH/commands.toml'"
 t "rules seeded" real_file "$WSH/rules/grammar-check.md"
-t "configs are copies, not links into the app" real_file "$WSH/config/borders/bordersrc"
+t "configs are copies, not links into the app" real_file "$WSH/config/paths.ignore"
 t "bin resolves into the bundle" is_link_to "$WSH/bin" "$APP/Contents/Resources/bin"
 t "jira resolves into the bundle" test -f "$WSH/jira/jira_poll.py"
 t "pylib + settings_hub resolve into the bundle" test -f "$WSH/pylib/config_text.py" -a -f "$WSH/settings_hub/cli.py"
@@ -73,15 +73,8 @@ t "deleted rule stays deleted" test ! -e "$WSH/rules/ask.md"
 t "version recorded" grep -q '^version=9.9.9' "$WSH/.install"
 
 echo "stack: config links"
-mkdir -p "$HOME/.config/borders"
-echo "mine" > "$HOME/.config/borders/bordersrc"
-OUT="$(bash "$SETUP" stack 2>&1)"; RC=$?
-t "stack stops on a real file in the way" test "$RC" != 0
-t "the file in the way is untouched" bash -c "[ ! -L '$HOME/.config/borders/bordersrc' ] && grep -qx mine '$HOME/.config/borders/bordersrc'"
-rm "$HOME/.config/borders/bordersrc"
 OUT="$(bash "$SETUP" stack 2>&1)"
 t "stack succeeds" grep -q 'result=ok' <<<"$OUT"
-t "bordersrc links to the home's copy" is_link_to "$HOME/.config/borders/bordersrc" "$WSH/config/borders/bordersrc"
 t "helpers precompiled into the cache" test -x "$HOME/.cache/kitchen-sink/helpers/dock_badges"
 t "symlinks --check passes" env WS_LINK_ROOT="$WSH" bash "$RES/symlinks.sh" --check
 
@@ -120,23 +113,21 @@ rm -rf "$WSH"   # the user removes it by hand
 t "repo takes the empty home" bash "$REPO/bin/setup-home.sh" repo
 ROOT="$REPO" bash "$REPO/symlinks.sh" --fix >/dev/null 2>&1
 t "home links to the checkout" is_link_to "$WSH" "$REPO"
-t "bordersrc now points into the checkout" is_link_to "$HOME/.config/borders/bordersrc" "$REPO/config/borders/bordersrc"
 t "owner = repo" test "$(bash "$REPO/bin/setup-home.sh" status)" = repo
 
 echo "repo -> app"
 OUT="$(bash "$SETUP" app "$APP")"; RC=$?
 t "a checkout is left alone" test "$RC" = 3
 t "still the link" is_link_to "$WSH" "$REPO"
-echo "# edited in the checkout" >> "$REPO/config/borders/bordersrc"
+echo "# edited in the checkout" >> "$REPO/config/paths.ignore"
 OUT="$(bash "$SETUP" app "$APP" --switch)"
 t "--switch hands over" grep -q '^result=ok' <<<"$OUT"
 t "home is a real directory" bash -c "[ -d '$WSH' ] && [ ! -L '$WSH' ]"
 t "the checkout is kept" test -f "$REPO/commands.toml"
 t "its commands.toml carried over" grep -q "the checkout's config" "$WSH/commands.toml"
-t "its config edits carried over" grep -q 'edited in the checkout' "$WSH/config/borders/bordersrc"
+t "its config edits carried over" grep -q 'edited in the checkout' "$WSH/config/paths.ignore"
 t "the checkout itself is untouched by the app" test ! -e "$REPO/bin/jira"
 bash "$SETUP" stack >/dev/null 2>&1
-t "links re-pointed at the home" is_link_to "$HOME/.config/borders/bordersrc" "$WSH/config/borders/bordersrc"
 
 echo "repo -> app (the checkout IS the home)"
 rm -rf "$WSH"; cp -R "$REPO" "$WSH"
