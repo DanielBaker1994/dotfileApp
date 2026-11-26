@@ -88,6 +88,7 @@ All paths are relative to the repo root. `$LANE` is the lane id, `$OUT` its fold
 ```bash
 # The VM: headless macOS 26 (Tart, `ks-test`), own window server; the host is never touched.
 bin/ks-vm setup                        # once
+bin/ks-vm grant                        # once: Accessibility + Screen Recording for ssh-run tools (done 2026-11-26; --check verifies)
 bin/ks-vm test                         # build the tree, copy in, run all flows -> .build/flow-runs/vm-<ts>/
 bin/ks-vm test --ids files-open-listing --repeat 3
 bin/ks-vm test --replay .build/hammer/RUN/G-SOAK/findings.jsonl --repeat 3

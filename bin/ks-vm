@@ -9,6 +9,7 @@
 #   bin/ks-vm ssh [CMD…]       shell (or one command) in the VM
 #   bin/ks-vm sync             build the working tree and copy it in (no flows run)
 #   bin/ks-vm pull GUEST HOST  copy a file out of the VM
+#   bin/ks-vm grant [--check]  one-time: let ssh-run tools send keys + capture the screen
 #
 # KS_VM picks the VM (default ks-test). Each VM has its own lock, app build and run
 # log, so two VMs (Apple's licence allows two per host) can run side by side.
@@ -163,6 +164,59 @@ sync_in() {
     gssh "touch $G_REPO/.build/ks-input/ks-input $G_REPO/.build/ks-ocr/ks-ocr"
 }
 
+# Can a tool started over ssh post real keys and capture the screen? (TextEdit
+# round trip: type, save, read the file; then one screencapture.)
+grant_check() {
+    gssh 'KI=/Users/admin/ks/.build/ks-input/ks-input; f=/tmp/ks-grant.txt; : > $f
+          pkill -x TextEdit; open -a TextEdit $f; sleep 3; TE=$(pgrep -x TextEdit)
+          $KI activate --pid $TE >/dev/null 2>&1; $KI type --pid $TE ok >/dev/null 2>&1
+          $KI key --pid $TE cmd+s >/dev/null 2>&1; sleep 1
+          keys=no; [ "$(cat $f)" = ok ] && keys=yes
+          shot=no; screencapture -x /tmp/ks-grant.png 2>/dev/null && shot=yes
+          pkill -x TextEdit; rm -f $f /tmp/ks-grant.png
+          echo "keys=$keys screen=$shot"; [ $keys = yes ] && [ $shot = yes ]'
+}
+
+# One-time (the grant lives in the VM's disk): macOS only lets a person grant
+# Accessibility / Screen Recording, and SIP keeps TCC.db read-only (it can be
+# read). Boots the VM with a window on the host, opens each pane, waits for
+# the grant to show up in TCC.db, checks with real input, goes back headless.
+tcc_granted() {   # tcc_granted SERVICE
+    gssh "echo $GPASS | sudo -S -p '' sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db' \
+          \"select 1 from access where service='$1' and client='/usr/libexec/sshd-keygen-wrapper' and auth_value=2\"" \
+        2>/dev/null | grep -q 1
+}
+cmd_grant() {
+    if [ "${1:-}" = "--check" ]; then cmd_up >/dev/null; grant_check; return; fi
+    if vm_running; then "$TART" stop "$VM" >/dev/null; while vm_running; do sleep 1; done; fi
+    mkdir -p "$VSTATE"
+    say "booting $VM WITH a window …"
+    # Through LaunchServices: a tart started from a background shell gets no window.
+    local tart_bin tart_app
+    tart_bin=$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$TART" 2>/dev/null | head -1)   # ~/.local/bin/tart is an exec wrapper
+    tart_app=$(cd "$(dirname "${tart_bin:-$TART}")/../.." 2>/dev/null && pwd -P)
+    case "$tart_app" in *.app) open -n -a "$tart_app" --args run "$VM" ;; *) nohup "$TART" run "$VM" >"$VSTATE/run.log" 2>&1 & ;; esac
+    cmd_up >/dev/null
+    local svc pane label i
+    for svc in kTCCServiceAccessibility kTCCServiceScreenCapture; do
+        tcc_granted "$svc" && continue
+        pane=Privacy_Accessibility; label=Accessibility
+        [ "$svc" = kTCCServiceScreenCapture ] && { pane=Privacy_ScreenCapture; label="Screen & System Audio Recording"; }
+        gssh "open 'x-apple.systempreferences:com.apple.preference.security?$pane'"
+        say "VM window → $label: click +, password admin, Cmd+Shift+G, /usr/libexec/sshd-keygen-wrapper, Return, Open; switch ON"
+        for i in $(seq 1 180); do tcc_granted "$svc" && break; sleep 2; done
+        tcc_granted "$svc" && say "$label granted" || { say "gave up waiting for $label"; return 1; }
+    done
+    gssh "osascript -e 'quit app \"System Settings\"'" 2>/dev/null || true
+    say "checking …"
+    local rc=0
+    if grant_check; then say "granted"; else say "grant is in TCC.db but input/capture still fail"; rc=1; fi
+    "$TART" stop "$VM" >/dev/null; while vm_running; do sleep 1; done
+    nohup "$TART" run --no-graphics "$VM" >"$VSTATE/run.log" 2>&1 &
+    cmd_up >/dev/null && say "back to headless"
+    return $rc
+}
+
 cmd_test() {
     # One `test` at a time on this host (several workers may call it): queue on a lock.
     if [ -z "${KS_VM_LOCKED:-}" ]; then
@@ -208,6 +262,7 @@ case "${1:-}" in
     ssh)    shift; gssh "$@" ;;
     test)   shift; cmd_test "$@" ;;
     sync)   cmd_sync ;;
+    grant)  shift; cmd_grant "$@" ;;
     pull)   [ $# -eq 3 ] || die "usage: bin/ks-vm pull GUEST_PATH HOST_PATH"; grsync ":$2" "$3" ;;
-    *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]|sync|pull GUEST HOST" ;;
+    *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]|sync|grant [--check]|pull GUEST HOST" ;;
 esac
