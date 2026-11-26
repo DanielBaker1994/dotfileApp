@@ -56,9 +56,10 @@ on-window-detected = [
 { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
-# Webex (Cisco Spark) and Citrix share workspace 9, every window they open
-# (chat popups, image viewers, call windows) is stacked there the same way.
-{ if = "test %{app-bundle-id} = Cisco-Systems.Spark || test %{app-bundle-id} ~= 'citrix' || test %{app-name} ~= '[Cc]itrix' || test %{app-name} ~= '[Ww]ebex'", run = ['move-node-to-workspace 9'] },
+# Webex (Cisco Spark) -> W, Citrix (virtual machine) -> 9. Every window they
+# open (chat popups, image viewers, call windows) is stacked there the same way.
+{ if = "test %{app-bundle-id} = Cisco-Systems.Spark || test %{app-name} ~= '[Ww]ebex'", run = ['move-node-to-workspace W'] },
+{ if = "test %{app-bundle-id} ~= 'citrix' || test %{app-name} ~= '[Cc]itrix'", run = ['move-node-to-workspace 9'] },
 { if = 'test %{app-bundle-id} = com.spotify.client', run = ['move-node-to-workspace W'] }
 ]
 
