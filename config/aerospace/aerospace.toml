@@ -20,7 +20,7 @@ accordion-padding = 30
 
 default-root-container-layout = 'accordion'
 
-default-root-container-orientation = 'auto'
+default-root-container-orientation = 'horizontal'
 
 on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
 
@@ -36,14 +36,18 @@ key-mapping.preset = 'qwerty'
 
 on-window-detected = [
 
+  # ONE window style for everything: a stack (accordion) where the focused
+  # window is full size and the others peek out as thin strips at the left/right.
+  # Never "tiling" (side-by-side splits). Per-app rules below only pick a workspace.
+  { run = ['layout h_accordion'], check-further-callbacks = true },
+
   # kitchen-sink lives on workspace 2 (Ghostty keeps 1); an accordion keeps
   # it full size beside anything else there.
-  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace 2', 'layout h_accordion'] },
+  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['move-node-to-workspace 2'] },
 
-  { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
 
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty && test %{window-title} = ws-settings', run = ['layout floating'] },
-{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1', 'layout h_accordion'] },
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace G'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
@@ -51,8 +55,9 @@ on-window-detected = [
 { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
-  { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['layout v_accordion', 'move-node-to-workspace W'] },
-{ if = "test %{app-bundle-id} ~= 'citrix' || test %{app-name} ~= '[Cc]itrix'", run = ['move-node-to-workspace 9'] },
+# Webex (Cisco Spark) and Citrix share workspace 9, every window they open
+# (chat popups, image viewers, call windows) is stacked there the same way.
+{ if = "test %{app-bundle-id} = Cisco-Systems.Spark || test %{app-bundle-id} ~= 'citrix' || test %{app-name} ~= '[Cc]itrix' || test %{app-name} ~= '[Ww]ebex'", run = ['move-node-to-workspace 9'] },
 { if = 'test %{app-bundle-id} = com.spotify.client', run = ['move-node-to-workspace W'] }
 ]
 
