@@ -91,8 +91,8 @@ a rewritten `commands.default.toml` and the AX helpers in
 ("kitchen-sink codesign") for stable TCC grants. **A non-dist build `pkill`s
 the running daemon before swapping the binary.** `--stale` exits 0 when a
 rebuild is needed (`kitchen_sink.sh` uses it for build-if-stale). `ws clean`
-stops the daemon and removes `.build/rust-target` (plus `rust/target` so the
-next build is a full cargo rebuild); `--all` also wipes `.build/dist` and the repo-root app bundle (a wiped
+stops the daemon and removes `.build/rust-target` (the one cargo tree: builds
+and `./ws test` share it; there is no `rust/target`); `--all` also wipes `.build/dist` and the repo-root app bundle (a wiped
 bundle is recreated by `mkdir -p` + a full build). Toolchain:
 cargo (brew `rust` or rustup) + Xcode CLT.
 Don't export `MACOSX_DEPLOYMENT_TARGET=26.7` (corrupt proc-macro dylibs).
@@ -105,7 +105,8 @@ the whole cargo workspace; module cases map to `cargo test -p ws-rs -p ks-core <
 `vim-keys`, `recent`, `helper-client`),
 the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
 `WS_PYTHON`), `settings`, `jira-*`, `confluence-*`,
-…). Direct: `cd rust && cargo test` (~680 tests) or
+…). Direct: `cd rust && CARGO_TARGET_DIR=../.build/rust-target cargo test` (one cargo tree; a bare
+`cargo test` makes a second 12 GB `rust/target`, which `ws build` deletes) (~680 tests) or
 `python3 Tests/test_x.py`.
 
 UI test suites (`ui`, `vim`, `focus`) were **deleted by owner decision** — they
@@ -469,7 +470,7 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
 - **Not in the agent**: the views (Files, Jira, Confluence, AI — forwarded to
   the main socket), health checks (forwarded), the screenshot `do:` hooks and
   every other `do:` verb (the quick socket answers `{"error"}`), `reload`,
-  `pane-shot`. Its `state` carries `live` (key window, frontmost app, palette
+  `pane-shot`. `state live` (not plain `state`, which stays cheap to poll) adds `live` (key window, frontmost app, palette
   query/selection, tool panels, Find Recent Files cwd/selection/filter/pane),
   read on the main thread with a 1.5 s cap (`null` = main did not answer).
 - **Naming**: user-facing name is Bansho, technical name kitchen-sink (see

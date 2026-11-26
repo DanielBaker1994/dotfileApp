@@ -23,8 +23,30 @@ ws_python() {
     return 1
 }
 
+# Build leftovers are never kept: every `ws build` (and `ws clean`) removes
+# everything under .build/ that is not on this list, the old second cargo tree
+# rust/target, and run output (flow-runs/, hammer/) older than 3 days.
+# Scratch output belongs in the agent's scratchpad, not here.
+WS_BUILD_KEEP="rust-target dist vm ks-input ks-ocr mcp-sandbox gui-sandbox.lock flow-runs hammer sandbox-app"
+ws_prune_build() {
+    local d name
+    rm -rf "$WS_ROOT/rust/target"
+    [ -d "$WS_ROOT/.build" ] || return 0
+    for d in "$WS_ROOT/.build"/* "$WS_ROOT/.build"/.[!.]*; do
+        [ -e "$d" ] || continue
+        name="${d##*/}"
+        case " $WS_BUILD_KEEP " in *" $name "*) continue ;; esac
+        rm -rf "$d"
+    done
+    for d in flow-runs hammer; do
+        [ -d "$WS_ROOT/.build/$d" ] && find "$WS_ROOT/.build/$d" -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} +
+    done
+    return 0
+}
+
 ws_cmd_build() {
     ws_ensure_signing_identity
+    ws_prune_build
     if [ "${1:-}" = "--force" ]; then
         "$WS_ROOT/bin/build-app.sh" --force || exit 1
         shift
@@ -396,8 +418,8 @@ ws_cmd_test() {
 
 # ---------------------------------------------------------------- clean -----
 # `ws clean` — stop the running app and wipe build objects so the next build
-# is done from scratch. Default wipes the cargo objects (.build/rust-target and
-# rust/target); `--all` also wipes .build/dist and the
+# is done from scratch. Default wipes the cargo objects (.build/rust-target)
+# and prunes .build/ (ws_prune_build); `--all` also wipes .build/dist and the
 # repo-root app bundle. The socket/lock files under $TMPDIR are left alone —
 # a stale ws-notes.sock is re-claimed on the next start.
 ws_cmd_clean() {
@@ -428,8 +450,8 @@ ws_cmd_clean() {
 
     local paths=(
         "$WS_ROOT/.build/rust-target"
-        "$WS_ROOT/rust/target"
     )
+    ws_prune_build
     if [ "$all" = 1 ]; then
         paths+=(
             "$WS_ROOT/.build/dist"
