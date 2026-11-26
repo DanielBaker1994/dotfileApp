@@ -687,6 +687,11 @@ pub const CONFIG_COLOR_KEYS: &[&str] = &[
 pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("limit", 1.0, 25.0),
     ("side-panel-width", 180.0, 480.0),
+    ("merge-gap", 0.0, 200.0),
+    ("merge-gutter", 0.0, 200.0),
+    ("merge-label-size", 8.0, 96.0),
+    ("merge-max-scale", 1.0, 6.0),
+    ("merge-border-width", 0.0, 20.0),
     ("draw-thickness", 0.0, 100.0),
     ("draw-font-size", 0.0, 100.0),
     ("width", 100.0, 8000.0),

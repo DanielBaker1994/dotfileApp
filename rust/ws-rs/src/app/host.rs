@@ -3762,7 +3762,7 @@ mod daemon_ui {
                     let plan = shot.lock().unwrap().prewarm_plan();
                     #[cfg(target_os = "macos")]
                     if let Some(cfg) = plan {
-                        let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
+                        crate::engines::screenshot_text::ShotOCR::warm_up_in_background(cfg);
                     }
                 })
                 .ok();

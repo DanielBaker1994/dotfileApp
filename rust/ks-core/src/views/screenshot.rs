@@ -105,6 +105,193 @@ pub fn output_size(crop: Rect, scale: f64) -> (i64, i64) {
 /// to a `(local rect, display index)`. `screenN` names a display; otherwise a
 /// global `WxH+X+Y` is offset into the first display whose local bounds contain
 /// its top-left; `--last-region` matches the saved region by display id.
+/// `[screenshot] merge-*`: how Recents ▸ Shift-click stacks screenshots.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeConfig {
+    /// Space between stacked screenshots (points).
+    pub gap: f64,
+    /// The left column that holds each screenshot's number (points).
+    pub gutter: f64,
+    /// The number labels' font size (points).
+    pub label_size: f64,
+    /// Fill behind and between the screenshots.
+    pub background: ShotColor,
+    /// The number discs (an editable Counter per screenshot; the number
+    /// itself is drawn black or white for contrast).
+    pub label_color: ShotColor,
+    /// The line around each screenshot (points; 0 = none) and its colour.
+    pub border_width: f64,
+    pub border_color: ShotColor,
+    /// Most pixels per point the merged editor canvas may use. A stack too
+    /// tall to fit the screen at native resolution within this is scaled down.
+    pub max_scale: f64,
+    /// Recents header hint while nothing is picked ("" hides it).
+    pub hint: String,
+    /// Recents header hint while picking (`{}` = how many).
+    pub picked_hint: String,
+    /// The stacking the Recents pill starts on (`merge-direction`).
+    pub horizontal: bool,
+    /// The Recents pill's two labels.
+    pub vertical_label: String,
+    pub horizontal_label: String,
+}
+
+impl Default for MergeConfig {
+    fn default() -> Self {
+        MergeConfig {
+            gap: 16.0,
+            gutter: 44.0,
+            label_size: 18.0,
+            background: ShotColor::new_a(0x1e as f64 / 255.0, 0x1e as f64 / 255.0, 0x1e as f64 / 255.0, 1.0),
+            label_color: ShotColor::from_hex("#ffc400").unwrap_or(ShotColor::WHITE),
+            border_width: 1.0,
+            border_color: ShotColor::from_hex("#8c8c8c").unwrap_or(ShotColor::WHITE),
+            max_scale: 3.0,
+            hint: "Shift-click to merge".to_string(),
+            picked_hint: "{} picked \u{b7} release Shift to merge".to_string(),
+            horizontal: false,
+            vertical_label: "\u{2193} Vertical".to_string(),
+            horizontal_label: "\u{2192} Horizontal".to_string(),
+        }
+    }
+}
+
+/// Where each screenshot and its number go in a merged stack (pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeLayout {
+    pub width: f64,
+    pub height: f64,
+    /// One per screenshot, top to bottom, in pick order.
+    pub images: Vec<Rect>,
+    /// The number cell left of each image (gutter width × image height).
+    pub labels: Vec<Rect>,
+}
+
+/// Stack `sizes` (pixels): top to bottom (`horizontal = false`) or left to
+/// right. Vertical: the widest screenshot sets the column width, narrower
+/// ones sit left-aligned, each row keeps its own height, and the numbers go
+/// in a `gutter`-wide column on the left. Horizontal: the tallest sets the
+/// row height, shorter ones sit top-aligned, each keeps its own width, and
+/// the numbers go in a `gutter`-high strip above. Never upscaled (screenshots
+/// stay sharp); the background fills the rest. All values are pixels.
+pub fn merge_layout(sizes: &[(f64, f64)], horizontal: bool, gutter: f64, gap: f64, pad: f64) -> MergeLayout {
+    if horizontal {
+        let row_h = sizes.iter().map(|s| s.1).fold(0.0, f64::max);
+        let mut x = pad;
+        let mut images = Vec::new();
+        let mut labels = Vec::new();
+        for (i, &(w, h)) in sizes.iter().enumerate() {
+            if i > 0 {
+                x += gap;
+            }
+            labels.push(Rect::new(x, pad, w, gutter));
+            images.push(Rect::new(x, pad + gutter, w, h));
+            x += w;
+        }
+        return MergeLayout { width: x + pad, height: pad + gutter + row_h + pad, images, labels };
+    }
+    let col_w = sizes.iter().map(|s| s.0).fold(0.0, f64::max);
+    let mut y = pad;
+    let mut images = Vec::new();
+    let mut labels = Vec::new();
+    for (i, &(w, h)) in sizes.iter().enumerate() {
+        if i > 0 {
+            y += gap;
+        }
+        labels.push(Rect::new(pad, y, gutter, h));
+        images.push(Rect::new(pad + gutter, y, w, h));
+        y += h;
+    }
+    MergeLayout {
+        width: pad + gutter + col_w + pad,
+        height: y + pad,
+        images,
+        labels,
+    }
+}
+
+/// How the merged stack sits on the editor canvas for one display.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeStage {
+    /// Canvas pixels per point (the editor's output resolution).
+    pub scale: f64,
+    /// Merged-stack pixels → canvas pixels (1 = native, < 1 = shrunk to fit).
+    pub fit: f64,
+    /// Where the stack sits on the display, in points (top-left origin):
+    /// the editor's preselected region.
+    pub rect: Rect,
+}
+
+/// Fit a `w`×`h` px stack on a display of `frame_w`×`frame_h` points (minus
+/// `top_inset` for the menu bar and `margin` all round). Native pixels when
+/// that fits within `max_scale` px/pt (never below the display's own
+/// `min_scale`); otherwise the stack is shrunk to fit.
+pub fn merge_stage(
+    w: f64,
+    h: f64,
+    frame_w: f64,
+    frame_h: f64,
+    top_inset: f64,
+    margin: f64,
+    min_scale: f64,
+    max_scale: f64,
+) -> MergeStage {
+    let avail_w = (frame_w - 2.0 * margin).max(1.0);
+    let avail_h = (frame_h - top_inset - 2.0 * margin).max(1.0);
+    let need = (w / avail_w).max(h / avail_h).max(f64::MIN_POSITIVE);
+    let scale = need.clamp(min_scale.max(1.0), max_scale.max(min_scale).max(1.0));
+    let fit = (scale / need).min(1.0);
+    let (rw, rh) = (w * fit / scale, h * fit / scale);
+    // Whole canvas pixels, so the native case copies pixels 1:1.
+    let snap = |v: f64| (v * scale).round() / scale;
+    let x = snap((frame_w - rw) / 2.0);
+    let y = snap(top_inset + margin + (avail_h - rh) / 2.0);
+    MergeStage { scale, fit, rect: Rect::new(x, y, rw, rh) }
+}
+
+/// One fixed-number Counter per merged screenshot, at the top of its gutter
+/// cell, in session points (`px` = screenshot pixels per gutter point).
+pub fn merge_labels(stage: &MergeStage, layout: &MergeLayout, m: &MergeConfig, px: f64, outline: bool) -> Vec<ShotObject> {
+    let to_pt = |v: f64| v * stage.fit / stage.scale;
+    let gutter_pt = to_pt(m.gutter * px);
+    let r = (m.label_size * 0.85).min(gutter_pt * 0.45).max(12.0);
+    layout
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            // The disc sits in the cell's top-left gutter-sized square: the
+            // left column (vertical) or the strip above (horizontal).
+            let c = Point::new(
+                stage.rect.x + to_pt(cell.x) + gutter_pt / 2.0,
+                stage.rect.y + to_pt(cell.y) + gutter_pt / 2.0,
+            );
+            let mut o = ShotObject::new(ShotTool::Counter, vec![c], m.label_color, (r - 12.0).round() as i64);
+            o.number = i as i64 + 1;
+            o.fixed_number = true;
+            o.outline = outline;
+            o
+        })
+        .collect()
+}
+
+/// Put each captured display image into the session slot for that display.
+#[cfg(target_os = "macos")]
+fn set_session_images(s: &mut ShotSession, images: &[CapturedImage]) {
+    for image in images {
+        if let Some(i) = s.displays.iter().position(|d| d.id == image.display) {
+            s.set_base_image(i, image.image.clone());
+        }
+    }
+}
+
+/// A capture result carried from the capture thread back to main.
+#[cfg(target_os = "macos")]
+struct SendCapture(Result<Vec<CapturedImage>, CaptureError>);
+// SAFETY: the CGImages inside are immutable once created and only read on main.
+#[cfg(target_os = "macos")]
+unsafe impl Send for SendCapture {}
+
 pub fn initial_region(args: &ShotArgs, s: &ShotSession) -> Option<(Rect, usize)> {
     if let Some(reg) = args.region.as_deref() {
         if let Some(rest) = reg.strip_prefix("screen") {
@@ -182,6 +369,9 @@ fn tri(s: Option<&str>) -> Option<bool> {
 pub struct ShotOCRConfigModel {
     pub languages: Vec<String>,
     pub correction: bool,
+    /// `[screenshot] text-accuracy = accurate` (default `fast`; see
+    /// `ShotOCRConfig::accurate`).
+    pub accurate: bool,
     /// `[screenshot] text-column-gap`: blocks on one row further apart than
     /// this × the line height are joined with a tab (0 = a space).
     pub column_gap: f64,
@@ -192,6 +382,7 @@ impl Default for ShotOCRConfigModel {
         ShotOCRConfigModel {
             languages: Vec::new(),
             correction: true,
+            accurate: false,
             column_gap: 0.0,
         }
     }
@@ -260,6 +451,8 @@ pub struct ScreenshotConfig {
     pub preview: bool,
     pub save_last_region: bool,
     pub undo_limit: i64,
+    /// Recents ▸ Shift-click merge (`[screenshot] merge-*`).
+    pub merge: MergeConfig,
     pub arrow_style: i64,
     pub reverse_arrow: bool,
     pub counter_outline: bool,
@@ -311,6 +504,7 @@ impl Default for ScreenshotConfig {
             preview: true,
             save_last_region: false,
             undo_limit: 100,
+            merge: MergeConfig::default(),
             arrow_style: 0,
             reverse_arrow: false,
             counter_outline: true,
@@ -452,6 +646,22 @@ impl ScreenshotConfig {
         c.preview = b("preview", true);
         c.save_last_region = b("save-last-region", false);
         c.undo_limit = i("undo-limit", 100, 1, 1000);
+        let md = MergeConfig::default();
+        c.merge = MergeConfig {
+            gap: i("merge-gap", md.gap as i64, 0, 200) as f64,
+            gutter: i("merge-gutter", md.gutter as i64, 0, 200) as f64,
+            label_size: i("merge-label-size", md.label_size as i64, 8, 96) as f64,
+            background: col("merge-background", md.background),
+            label_color: col("merge-label-color", md.label_color),
+            border_width: i("merge-border-width", md.border_width as i64, 0, 20) as f64,
+            border_color: col("merge-border-color", md.border_color),
+            max_scale: i("merge-max-scale", md.max_scale as i64, 1, 6) as f64,
+            hint: e.get("merge-hint").cloned().unwrap_or(md.hint),
+            picked_hint: s("merge-picked-hint", &md.picked_hint),
+            horizontal: s("merge-direction", "vertical").to_lowercase().starts_with('h'),
+            vertical_label: s("merge-vertical-label", &md.vertical_label),
+            horizontal_label: s("merge-horizontal-label", &md.horizontal_label),
+        };
         c.arrow_style = i("arrow-style", 0, 0, 1);
         c.reverse_arrow = b("reverse-arrow", false);
         c.counter_outline = b("counter-outline", true);
@@ -481,6 +691,7 @@ impl ScreenshotConfig {
             .filter(|p| !p.is_empty())
             .collect();
         c.ocr.correction = b("text-correction", true);
+        c.ocr.accurate = s("text-accuracy", "fast").eq_ignore_ascii_case("accurate");
         c.ocr.column_gap = e
             .get("text-column-gap")
             .and_then(|v| v.trim().parse::<f64>().ok())
@@ -624,6 +835,11 @@ impl std::error::Error for CaptureError {}
 
 /// The Swift `SCShareableContent` + `SCScreenshotManager.captureImage` flow.
 pub trait ScreenCapture {
+    /// The real ScreenCaptureKit backend: the interactive overlay may go up
+    /// first and capture behind it (see `start_async_session`).
+    fn live(&self) -> bool {
+        false
+    }
     fn shareable_content(&self) -> Result<(), CaptureError>;
     fn capture(&self, screens: &[ScreenRef]) -> Result<Vec<CapturedImage>, CaptureError>;
 }
@@ -654,6 +870,9 @@ pub struct RealCapture;
 
 #[cfg(target_os = "macos")]
 impl ScreenCapture for RealCapture {
+    fn live(&self) -> bool {
+        true
+    }
     fn shareable_content(&self) -> Result<(), CaptureError> {
         sck::fetch_shareable_content().map(|_| ())
     }
@@ -746,12 +965,59 @@ mod sck {
             .find(|display| unsafe { display.displayID() } == id)
     }
 
+    /// The `SCDisplay` list from the last `SCShareableContent` fetch. A fetch
+    /// enumerates every on-screen window through the WindowServer (15–20 ms
+    /// warm, 40+ ms cold) and displays almost never change, so the capture
+    /// path reuses this list. It is fetched again when a screen id is missing
+    /// (display plugged in / swapped) or when a capture with it fails.
+    struct DisplayCache(Retained<NSArray<SCDisplay>>);
+    // SAFETY: `SCDisplay` is an immutable descriptor (id + frame); ScreenCaptureKit
+    // hands these out on its own queues, and we only read them.
+    unsafe impl Send for DisplayCache {}
+    static DISPLAYS: std::sync::Mutex<Option<DisplayCache>> = std::sync::Mutex::new(None);
+
+    fn fresh_displays() -> Result<Retained<NSArray<SCDisplay>>, CaptureError> {
+        let content = fetch_shareable_content()?;
+        let displays = unsafe { content.displays() };
+        if let Ok(mut g) = DISPLAYS.lock() {
+            *g = Some(DisplayCache(displays.clone()));
+        }
+        Ok(displays)
+    }
+
+    fn cached_displays(screens: &[ScreenRef]) -> Result<Retained<NSArray<SCDisplay>>, CaptureError> {
+        let cached = DISPLAYS.lock().ok().and_then(|g| g.as_ref().map(|c| c.0.clone()));
+        if let Some(d) = cached {
+            if screens.iter().all(|s| match_display(&d, s.id).is_some()) {
+                return Ok(d);
+            }
+        }
+        fresh_displays()
+    }
+
+    /// Fill the display cache (and wake replayd) ahead of the first Hyper+X.
+    /// Blocking; call off the main thread.
+    pub fn prewarm() {
+        let _ = fresh_displays();
+    }
+
     pub fn capture_displays(screens: &[ScreenRef]) -> Result<Vec<CapturedImage>, CaptureError> {
         if screens.is_empty() {
             return Err(CaptureError::new("no screens to capture"));
         }
-        let content = fetch_shareable_content()?;
-        let displays = unsafe { content.displays() };
+        let displays = cached_displays(screens)?;
+        match capture_with(&displays, screens) {
+            Ok(out) => Ok(out),
+            // A stale descriptor (display reconfigured under the same id):
+            // refetch once and retry.
+            Err(_) => capture_with(&*fresh_displays()?, screens),
+        }
+    }
+
+    fn capture_with(
+        displays: &NSArray<SCDisplay>,
+        screens: &[ScreenRef],
+    ) -> Result<Vec<CapturedImage>, CaptureError> {
         let excluded = NSArray::<SCWindow>::new();
 
         let mut pending: Vec<(
@@ -884,6 +1150,18 @@ pub fn current_screens() -> Vec<ScreenRef> {
 #[cfg(target_os = "macos")]
 pub fn screen_capture_permitted() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Fill the ScreenCaptureKit display cache on a background thread so the first
+/// Hyper+X skips the window enumeration. No-op without Screen Recording.
+#[cfg(target_os = "macos")]
+pub fn prewarm_capture() {
+    if !screen_capture_permitted() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("ks-sck-prewarm".into())
+        .spawn(sck::prewarm);
 }
 
 #[cfg(target_os = "macos")]
@@ -1872,6 +2150,14 @@ impl ShotSession {
         if cur == 2 {
             self.recent_requested = true;
         }
+        // Copy Text and Screenshot are separate tasks: switching between them
+        // starts clean, so a region (and its annotations) drawn in one mode
+        // does not carry over into the other (Tab, draw, Tab back left the
+        // screenshot rectangle up in Copy Text).
+        let switching = (n == 0 && !self.text_mode) || (n == 1 && self.text_mode);
+        if switching {
+            self.clear_selection();
+        }
         match n {
             0 if !self.text_mode => self.toggle_text_mode(),
             1 if self.text_mode => self.toggle_text_mode(),
@@ -1884,6 +2170,15 @@ impl ShotSession {
     pub fn cycle_stop(&mut self, back: bool) {
         let cur = self.stop();
         self.goto_stop(if back { (cur + 2) % 3 } else { (cur + 1) % 3 });
+    }
+
+    /// Drop the region and everything drawn in it (a fresh start, as on open).
+    pub fn clear_selection(&mut self) {
+        self.editing = None;
+        self.close_save_card();
+        self.doc.reset();
+        self.selection = None;
+        self.drag = Drag::None;
     }
 
     pub fn toggle_text_mode(&mut self) {
@@ -4464,6 +4759,45 @@ mod shot_cg {
         unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) }
     }
 
+    /// Recents ▸ merge: the editor canvas for one display (`canvas_w` ×
+    /// `canvas_h` px) with the stacked screenshots placed per `stage` /
+    /// `layout`, each outlined by a `border_px` line. The numbers are not
+    /// drawn here: they are Counter annotations, so the editor can delete them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_canvas(
+        images: &[Retained<CGImage>],
+        canvas_w: i64,
+        canvas_h: i64,
+        stage: &super::MergeStage,
+        layout: &super::MergeLayout,
+        background: ShotColor,
+        border: ShotColor,
+        border_px: f64,
+    ) -> Option<Retained<CGImage>> {
+        let ctx_owner = bitmap_context(canvas_w, canvas_h)?;
+        let ctx: &CGContext = &ctx_owner;
+        // Top-left, y-down canvas pixels (like `render_shot`).
+        CGContext::translate_ctm(Some(ctx), 0.0, canvas_h as f64);
+        CGContext::scale_ctm(Some(ctx), 1.0, -1.0);
+        set_fill(ctx, background);
+        CGContext::fill_rect(Some(ctx), cg_rect(Rect::new(0.0, 0.0, canvas_w as f64, canvas_h as f64)));
+        // Into stack pixels.
+        CGContext::translate_ctm(Some(ctx), stage.rect.x * stage.scale, stage.rect.y * stage.scale);
+        CGContext::scale_ctm(Some(ctx), stage.fit, stage.fit);
+        let smooth = stage.fit < 1.0;
+        for (img, r) in images.iter().zip(&layout.images) {
+            draw_image(ctx, img, *r, smooth);
+            // A line just outside each screenshot, so 1 | 2 | 3 read apart.
+            if border_px > 0.0 {
+                set_stroke(ctx, border);
+                CGContext::set_line_width(Some(ctx), border_px);
+                let o = border_px / 2.0;
+                CGContext::stroke_rect(Some(ctx), cg_rect(Rect::new(r.x - o, r.y - o, r.w + border_px, r.h + border_px)));
+            }
+        }
+        CGBitmapContextCreateImage(Some(ctx)).map(|i| i.into())
+    }
+
     /// `(string as NSString).size(withAttributes:).width` for the overlay chrome
     /// (help-card columns, button badges), via the shared CoreText font path.
     pub fn measure_text_width(text: &str, point_size: f64, bold: bool) -> f64 {
@@ -5073,10 +5407,8 @@ mod overlay {
                     // The pill / loupe follow the pointer across displays.
                     if let Some(mtm) = MainThreadMarker::new() {
                         for w in NSApplication::sharedApplication(mtm).windows().iter() {
-                            if let Some(cv) = w.contentView() {
-                                if cv.downcast_ref::<ShotOverlayView>().is_some() {
-                                    cv.setNeedsDisplay(true);
-                                }
+                            if let Some(p) = w.downcast_ref::<ShotOverlayPanel>() {
+                                p.redraw();
                             }
                         }
                     }
@@ -5150,19 +5482,33 @@ mod overlay {
             let full = Rect::new(0.0, 0.0, w, h);
             let cfg = &session.cfg;
 
-            // 1. The frozen capture, placed upright.
-            match session.base_images.get(d).and_then(|b| b.as_deref()) {
-                Some(img) => shot_cg::draw_image(&ctx, img, full, true),
-                None => fill_rect(&ctx, full, ShotColor::BLACK),
-            }
-
-            // 2. Dim outside the selection (even-odd bounds + selection) for
-            //    the active display; a plain fill when the display is not active.
             let mine = if session.active == Some(d) {
                 session.selection
             } else {
                 None
             };
+
+            // 1. The frozen capture is the panel container's layer (GPU
+            //    composited, see `ShotOverlayPanel::create`). Redraw it here
+            //    only inside the selection, where annotations draw: Multiply
+            //    (marker) and Difference need real pixels under them. Outside
+            //    it this view stays transparent, so a mouse move no longer
+            //    re-blits the whole full-resolution capture.
+            if let Some(sel) = mine.filter(|s| s.w > 0.0 && s.h > 0.0) {
+                if let Some(img) = session.base_images.get(d).and_then(|b| b.as_deref()) {
+                    // 1:1 with the backing store for a capture; a merge canvas
+                    // can carry more pixels per point and needs filtering.
+                    let backing = session.displays.get(d).map(|x| x.frame.w * x.scale).unwrap_or(w);
+                    let smooth = (objc2_core_graphics::CGImage::width(Some(img)) as f64 - backing.round()).abs() > 1.0;
+                    CGContext::save_g_state(Some(&ctx));
+                    CGContext::clip_to_rect(Some(&ctx), cg_rect(sel));
+                    shot_cg::draw_image(&ctx, img, full, smooth);
+                    CGContext::restore_g_state(Some(&ctx));
+                }
+            }
+
+            // 2. Dim outside the selection (even-odd bounds + selection) for
+            //    the active display; a plain fill when the display is not active.
             let dim = cfg
                 .contrast_color
                 .with_alpha(cfg.contrast_opacity as f64 / 255.0);
@@ -6052,6 +6398,8 @@ mod overlay {
 
     pub struct ShotOverlayPanelIvars {
         overlay: RefCell<Option<Retained<ShotOverlayView>>>,
+        /// The content view whose layer shows the frozen capture.
+        container: RefCell<Option<Retained<NSView>>>,
     }
 
     define_class!(
@@ -6088,7 +6436,10 @@ mod overlay {
         ) -> Retained<ShotOverlayPanel> {
             let rect = cg_rect(frame);
             let this = ShotOverlayPanel::alloc(mtm)
-                .set_ivars(ShotOverlayPanelIvars { overlay: RefCell::new(None) });
+                .set_ivars(ShotOverlayPanelIvars {
+                    overlay: RefCell::new(None),
+                    container: RefCell::new(None),
+                });
             let panel: Retained<ShotOverlayPanel> = unsafe {
                 msg_send![
                     super(this),
@@ -6099,8 +6450,12 @@ mod overlay {
                 ]
             };
             panel.setLevel(NSScreenSaverWindowLevel);
-            panel.setOpaque(true);
-            panel.setBackgroundColor(Some(&NSColor::blackColor()));
+            // Transparent until the frozen capture lands (the async Hyper+X
+            // path shows the overlay over the live screen first), and never
+            // part of a screen capture, so that capture sees what is under it.
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
+            panel.setSharingType(objc2_app_kit::NSWindowSharingType::None);
             panel.setHasShadow(false);
             panel.setHidesOnDeactivate(false);
             panel.setAcceptsMouseMovedEvents(true);
@@ -6112,11 +6467,35 @@ mod overlay {
             );
             panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
             unsafe { panel.setReleasedWhenClosed(false) };
+            // The frozen capture is the container's layer contents: the GPU
+            // composites it, so `drawRect:` never re-blits the full-resolution
+            // image (it did on every mouse move). The overlay view on top draws
+            // the dim, chrome and annotations, plus the base pixels inside the
+            // selection only (blend-mode tools need them; see `render`).
+            let bounds = NSRect::new(NSPoint::new(0.0, 0.0), rect.size);
+            let container = NSView::initWithFrame(NSView::alloc(mtm), bounds);
+            container.setWantsLayer(true);
             let view = ShotOverlayView::create(mtm, display, session, rect.size);
-            let base: &NSView = &view;
-            panel.setContentView(Some(base));
+            container.addSubview(&view);
+            panel.setContentView(Some(&container));
             *panel.ivars().overlay.borrow_mut() = Some(view);
+            *panel.ivars().container.borrow_mut() = Some(container);
+            // SAFETY: `session` is live on the main thread (see `feed`).
+            let base = unsafe { session.as_ref() }
+                .and_then(|s| s.base_images.get(display).cloned().flatten());
+            panel.set_base(base.as_deref());
             panel
+        }
+
+        /// Show `img` (the frozen capture) as the container layer's contents;
+        /// `None` leaves the panel see-through (capture still in flight).
+        pub fn set_base(&self, img: Option<&objc2_core_graphics::CGImage>) {
+            let Some(container) = self.ivars().container.borrow().clone() else { return };
+            let Some(layer) = container.layer() else { return };
+            let obj = img.map(|i| unsafe {
+                &*(i as *const objc2_core_graphics::CGImage as *const objc2::runtime::AnyObject)
+            });
+            unsafe { layer.setContents(obj) };
         }
 
         /// `orderFrontRegardless` — show without activating the app.
@@ -6480,6 +6859,13 @@ pub mod recent_grid {
     use crate::ui::style::{self, Weight};
     use crate::ui::theme::Rgba;
 
+    /// Shift, Cmd or Ctrl held = picking screenshots to merge.
+    const PICK_MODS: objc2_app_kit::NSEventModifierFlags = objc2_app_kit::NSEventModifierFlags(
+        objc2_app_kit::NSEventModifierFlags::Shift.0
+            | objc2_app_kit::NSEventModifierFlags::Command.0
+            | objc2_app_kit::NSEventModifierFlags::Control.0,
+    );
+
     pub const COLS: usize = 4;
     const CELL_W: f64 = 172.0;
     const CELL_H: f64 = 132.0;
@@ -6509,6 +6895,18 @@ pub mod recent_grid {
     }
 
     pub type EntryCb = Rc<dyn Fn(ShotRecentEntry)>;
+    pub type MergeCb = Rc<dyn Fn(Vec<ShotRecentEntry>, bool)>;
+
+    /// The header hints for Shift-click merging (`[screenshot] merge-hint`,
+    /// `merge-picked-hint`; `{}` = how many are picked).
+    #[derive(Clone, Debug, Default)]
+    pub struct MergeHints {
+        pub idle: String,
+        pub picked: String,
+        /// The direction pill's labels.
+        pub vertical: String,
+        pub horizontal: String,
+    }
 
     pub struct ViewIvars {
         entries: RefCell<Vec<ShotRecentEntry>>,
@@ -6519,7 +6917,13 @@ pub mod recent_grid {
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
         pub on_open: RefCell<Option<EntryCb>>,
         pub on_menu: RefCell<Option<EntryCb>>,
-        pub on_folder: RefCell<Option<Rc<dyn Fn()>>>,
+        /// Shift/Cmd-clicked screenshots, in click order (1, 2, 3 …).
+        picked: RefCell<Vec<String>>,
+        hints: RefCell<MergeHints>,
+        /// The direction pill: stack left to right instead of top to bottom.
+        horizontal: Cell<bool>,
+        /// Release Shift (or Return) with 2+ picked: merge them, in order.
+        pub on_merge: RefCell<Option<MergeCb>>,
     }
 
     define_class!(
@@ -6541,6 +6945,11 @@ pub mod recent_grid {
 
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
+                // Backstop for a Shift release the panel never saw as
+                // `flagsChanged:` (it was not key at the time).
+                if !e.modifierFlags().intersects(PICK_MODS) {
+                    self.merge_if_ready();
+                }
                 let p = view_base::mouse_point(self, e);
                 let i = self.index_at(p.x, p.y);
                 view_base::set_hover(self, &self.ivars().hover, i);
@@ -6569,18 +6978,23 @@ pub mod recent_grid {
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
                 let p = view_base::mouse_point(self, e);
-                if self.folder_rect().contains(p.x, p.y) {
-                    let cb = self.ivars().on_folder.borrow().clone();
-                    if let Some(cb) = cb {
-                        cb();
+                for (seg, horizontal) in [(self.pill_rect(false), false), (self.pill_rect(true), true)] {
+                    if seg.contains(p.x, p.y) {
+                        self.set_horizontal(horizontal);
+                        return;
                     }
+                }
+                let picking = e.modifierFlags().intersects(PICK_MODS);
+                let Some(entry) = self.index_at(p.x, p.y).and_then(|i| self.ivars().entries.borrow().get(i).cloned()) else {
+                    return;
+                };
+                if picking {
+                    self.toggle_pick(&entry.path);
                     return;
                 }
-                if let Some(e) = self.index_at(p.x, p.y).and_then(|i| self.ivars().entries.borrow().get(i).cloned()) {
-                    let cb = self.ivars().on_open.borrow().clone();
-                    if let Some(cb) = cb {
-                        cb(e);
-                    }
+                let cb = self.ivars().on_open.borrow().clone();
+                if let Some(cb) = cb {
+                    cb(entry);
                 }
             }
 
@@ -6612,6 +7026,10 @@ pub mod recent_grid {
                 .filter_map(|e| style::image_file(&e.path).map(|i| (e.path.clone(), i)))
                 .collect();
             let this = Self::alloc(mtm).set_ivars(ViewIvars {
+                picked: RefCell::new(Vec::new()),
+                hints: RefCell::new(MergeHints::default()),
+                horizontal: Cell::new(false),
+                on_merge: RefCell::new(None),
                 entries: RefCell::new(entries),
                 thumbs: RefCell::new(thumbs),
                 hover: Cell::new(None),
@@ -6620,21 +7038,96 @@ pub mod recent_grid {
                 tracking: RefCell::new(None),
                 on_open: RefCell::new(None),
                 on_menu: RefCell::new(None),
-                on_folder: RefCell::new(None),
             });
             unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h))] }
         }
 
+        pub fn set_hints(&self, hints: MergeHints) {
+            *self.ivars().hints.borrow_mut() = hints;
+            self.setNeedsDisplay(true);
+        }
+
+        /// Shift/Cmd-click: add `path` to the merge picks (next number), or
+        /// drop it (the rest renumber).
+        fn toggle_pick(&self, path: &str) {
+            {
+                let mut picked = self.ivars().picked.borrow_mut();
+                match picked.iter().position(|p| p == path) {
+                    Some(i) => {
+                        picked.remove(i);
+                    }
+                    None => picked.push(path.to_string()),
+                }
+            }
+            self.setNeedsDisplay(true);
+        }
+
+        /// The picks, in order; `true` when something was picked.
+        pub fn has_picks(&self) -> bool {
+            !self.ivars().picked.borrow().is_empty()
+        }
+
+        pub fn set_horizontal(&self, on: bool) {
+            self.ivars().horizontal.set(on);
+            self.setNeedsDisplay(true);
+        }
+
+        /// One half of the Vertical | Horizontal pill, at the header's right.
+        fn pill_rect(&self, horizontal: bool) -> Rect {
+            let seg = 92.0;
+            let x = self.bounds().size.width - PAD - 2.0 * seg + if horizontal { seg } else { 0.0 };
+            Rect::new(x, 9.0, seg, 24.0)
+        }
+
+        /// Restore picks (in order), e.g. after Esc out of the merge editor.
+        pub fn set_picks(&self, paths: Vec<String>) {
+            let known: Vec<String> = {
+                let entries = self.ivars().entries.borrow();
+                paths.into_iter().filter(|p| entries.iter().any(|e| &e.path == p)).collect()
+            };
+            *self.ivars().picked.borrow_mut() = known;
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn clear_picks(&self) {
+            self.ivars().picked.borrow_mut().clear();
+            self.setNeedsDisplay(true);
+        }
+
+        /// Hand 2+ picks to `on_merge` (in click order) and clear them. A
+        /// single pick stays picked (Shift-click another to go on).
+        pub fn merge_if_ready(&self) -> bool {
+            let picks: Vec<ShotRecentEntry> = {
+                let picked = self.ivars().picked.borrow();
+                if picked.len() < 2 {
+                    return false;
+                }
+                let entries = self.ivars().entries.borrow();
+                picked
+                    .iter()
+                    .filter_map(|p| entries.iter().find(|e| &e.path == p).cloned())
+                    .collect()
+            };
+            self.ivars().picked.borrow_mut().clear();
+            self.setNeedsDisplay(true);
+            if picks.len() < 2 {
+                return false;
+            }
+            let cb = self.ivars().on_merge.borrow().clone();
+            if let Some(cb) = cb {
+                cb(picks, self.ivars().horizontal.get());
+            }
+            true
+        }
+
         /// `ShotRecentView.remove(_:)` (after menu ▸ Delete).
         pub fn remove(&self, path: &str) {
+            self.ivars().picked.borrow_mut().retain(|p| p != path);
             self.ivars().entries.borrow_mut().retain(|e| e.path != path);
             self.ivars().thumbs.borrow_mut().remove(path);
             self.setNeedsDisplay(true);
         }
 
-        fn folder_rect(&self) -> Rect {
-            Rect::new(self.bounds().size.width - PAD - 96.0, 9.0, 96.0, 24.0)
-        }
 
         fn cell(&self, i: usize) -> Rect {
             let (c, r) = ((i % COLS) as f64, (i / COLS) as f64);
@@ -6655,9 +7148,32 @@ pub mod recent_grid {
             style::fill_rounded(all, 14.0, Rgba::new(0.10, 0.10, 0.10, 0.96));
             style::stroke_rounded(all, 14.0, 1.0, white(0.12));
             style::draw_text("Recent screenshots", PAD, 12.0, &style::system_font(13.0, Weight::Semibold), white(1.0));
-            let f = self.folder_rect();
-            style::fill_rounded(f, 6.0, white(0.08));
-            style::draw_text_centered("Open Folder", f, &style::system_font(11.5, Weight::Medium), white(0.85));
+            {
+                let n = self.ivars().picked.borrow().len();
+                let hints = self.ivars().hints.borrow();
+                let (text, alpha) = if n == 0 {
+                    (hints.idle.clone(), 0.45)
+                } else {
+                    (hints.picked.replace("{}", &n.to_string()), 0.9)
+                };
+                if !text.is_empty() {
+                    let color = if n == 0 { white(alpha) } else { self.ivars().ui.get() };
+                    style::draw_text(&text, PAD + 150.0, 13.5, &style::system_font(11.5, Weight::Medium), color);
+                }
+            }
+            {
+                // Vertical | Horizontal: how a Shift-click merge stacks.
+                let hints = self.ivars().hints.borrow();
+                let on = self.ivars().horizontal.get();
+                let (a, b) = (self.pill_rect(false), self.pill_rect(true));
+                let all = Rect::new(a.x, a.y, a.width + b.width, a.height);
+                style::fill_rounded(all, 6.0, white(0.08));
+                let lit = if on { b } else { a };
+                style::fill_rounded(lit, 6.0, self.ivars().ui.get());
+                let font = style::system_font(11.5, Weight::Medium);
+                style::draw_text_centered(&hints.vertical, a, &font, white(if on { 0.6 } else { 1.0 }));
+                style::draw_text_centered(&hints.horizontal, b, &font, white(if on { 1.0 } else { 0.6 }));
+            }
             let entries = self.ivars().entries.borrow();
             if entries.is_empty() {
                 style::draw_text(
@@ -6691,7 +7207,20 @@ pub mod recent_grid {
                         style::draw_image(t, r, 1.0);
                     }
                 }
-                if self.ivars().hover.get() == Some(i) {
+                let pick = self.ivars().picked.borrow().iter().position(|p| p == &e.path);
+                if let Some(n) = pick {
+                    // Picked for merging: a thick ring and its order badge.
+                    let ui = self.ivars().ui.get();
+                    style::stroke_rounded(well, 8.0, 3.0, ui);
+                    let badge = Rect::new(well.x + 6.0, well.y + 6.0, 24.0, 24.0);
+                    style::fill_rounded(badge, 12.0, ui);
+                    style::draw_text_centered(
+                        &(n + 1).to_string(),
+                        badge,
+                        &style::system_font(12.5, Weight::Bold),
+                        white(1.0),
+                    );
+                } else if self.ivars().hover.get() == Some(i) {
                     style::stroke_rounded(well, 8.0, 2.0, self.ivars().ui.get());
                 }
                 style::draw_text(&age(e.at, now), c.x + 2.0, well.y + well.height + 4.0, &age_font, white(0.6));
@@ -6724,8 +7253,21 @@ pub mod recent_grid {
 
             #[unsafe(method(keyDown:))]
             fn key_down(&self, e: &NSEvent) {
-                if e.keyCode() == 53 {
-                    self.escape();
+                match e.keyCode() {
+                    53 => self.escape(),
+                    // Return / Enter: merge the picks now.
+                    36 | 76 => {
+                        self.ivars().grid.merge_if_ready();
+                    }
+                    _ => {}
+                }
+            }
+
+            /// Letting go of Shift (and Cmd) with 2+ picked merges them.
+            #[unsafe(method(flagsChanged:))]
+            fn flags_changed(&self, e: &NSEvent) {
+                if !e.modifierFlags().intersects(PICK_MODS) {
+                    self.ivars().grid.merge_if_ready();
                 }
             }
         }
@@ -6764,6 +7306,11 @@ pub mod recent_grid {
         }
 
         fn escape(&self) {
+            // Esc peels the merge picks first, then closes the grid.
+            if self.ivars().grid.has_picks() {
+                self.ivars().grid.clear_picks();
+                return;
+            }
             let cb = self.ivars().on_escape.borrow().clone();
             if let Some(cb) = cb {
                 cb();
@@ -6999,11 +7546,6 @@ fn recent_image(path: &str) -> Option<ShotImage> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_in_workspace(path: &str) {
-    crate::platform::open_path(std::path::Path::new(path));
-}
-
-#[cfg(target_os = "macos")]
 fn reveal_in_workspace(path: &str) {
     // Uniform "reveal": the app's own file browser, never macOS Finder.
     crate::app::hooks::reveal_in_files(&[path.to_string()]);
@@ -7095,6 +7637,15 @@ pub struct ScreenshotController {
     pub prewarmed: bool,
     permission_asked: bool,
     capturing: bool,
+    /// The overlay is up over the live screen and its frozen capture is still
+    /// in flight (the async Hyper+X path). A finish waits for it.
+    capture_pending: bool,
+    /// Bumped per async capture; a late capture for an older session is dropped.
+    capture_gen: u64,
+    /// The merged-screenshot editor's origin: the session it replaced and the
+    /// picked paths. Esc in the merge editor restores both (Recents reopens
+    /// with the picks); any other finish drops them.
+    merge_parent: Option<(ShotSession, Vec<String>, bool)>,
     /// A `-d` / `[screenshot] delay` timer is outstanding (Swift's `capturing`
     /// stays true across the `asyncAfter`, so a delayed capture is not idle).
     delay_pending: bool,
@@ -7150,6 +7701,9 @@ impl ScreenshotController {
             prewarmed: false,
             permission_asked: false,
             capturing: false,
+            capture_pending: false,
+            capture_gen: 0,
+            merge_parent: None,
             delay_pending: false,
             forced_save_path: None,
             ocr_warm: false,
@@ -7359,8 +7913,10 @@ impl ScreenshotController {
         let cfg = crate::engines::screenshot_text::ShotOCRConfig {
             languages: self.config.ocr.languages.clone(),
             correction: self.config.ocr.correction,
+            accurate: self.config.ocr.accurate,
         };
-        // The AppKit bitmap context and Vision are main-thread only.
+        // Planned on main (once per process); the warm-up itself runs on a
+        // background thread (`ShotOCR::warm_up_in_background`).
         #[cfg(target_os = "macos")]
         {
             if objc2::MainThreadMarker::new().is_some() {
@@ -7531,10 +8087,24 @@ impl ScreenshotController {
             }
         }
 
+        // The interactive overlay goes up first, over the live screen, and the
+        // capture runs behind it (the overlay panels are left out of capture).
+        #[cfg(target_os = "macos")]
+        if capture.live()
+            && matches!(args.mode, ShotMode::Gui | ShotMode::Text)
+            && self.self_ref.strong_count() > 0
+            && objc2::MainThreadMarker::new().is_some()
+        {
+            self.start_async_session(args, &cfg);
+            return Ok(());
+        }
+
         // KR1 (PRD §7.3.4): time the capture and the path to the overlay.
         let t0 = std::time::Instant::now();
         self.capturing = true;
-        let _ = capture.shareable_content();
+        // No separate `shareable_content()` round-trip here: `capture` gets its
+        // display list itself (from a cache). A second SCShareableContent fetch
+        // cost 15–20 ms on every Hyper+X press.
         let cap_t0 = std::time::Instant::now();
         let res = capture.capture(&self.screens);
         let capture_ms = cap_t0.elapsed().as_millis() as i64;
@@ -7544,45 +8114,20 @@ impl ScreenshotController {
             Ok(images) if !images.is_empty() => {
                 match args.mode {
                     ShotMode::Gui | ShotMode::Text => {
-                        let mut s =
-                            ShotSession::new(cfg.clone(), args.clone(), self.state_path.clone());
-                        for scr in &self.screens {
-                            let mut disp = ShotDisplay::new(scr.id, scr.frame, scr.scale);
-                            disp.top_inset = scr.top_inset;
-                            s.add_display(disp);
-                        }
-                        // Start with the pointer where it is, so the mode pill
-                        // (and loupe) show before the first mouse move.
+                        let mut s = self.new_overlay_session(args, &cfg);
                         #[cfg(target_os = "macos")]
-                        {
-                            let m = objc2_app_kit::NSEvent::mouseLocation();
-                            let hit = s.displays.iter().position(|d| {
-                                m.x >= d.frame.x && m.x < d.frame.x + d.frame.w
-                                    && m.y >= d.frame.y && m.y < d.frame.y + d.frame.h
-                            });
-                            if let Some(i) = hit {
-                                let f = s.displays[i].frame;
-                                s.mouse = Some((i, Point::new(m.x - f.x, f.y + f.h - m.y)));
-                            }
-                        }
-                        #[cfg(target_os = "macos")]
-                        for image in &images {
-                            if let Some(i) = s.displays.iter().position(|d| d.id == image.display) {
-                                s.set_base_image(i, image.image.clone());
-                            }
-                        }
-                        // `--region` / `--last-region`: preselect before the
-                        // panel presents so the ring/selection show on open.
-                        if let Some((rect, idx)) = initial_region(args, &s) {
-                            s.test_select(rect, Some(idx));
-                        }
+                        set_session_images(&mut s, &images);
                         self.session = Some(s);
                         #[cfg(target_os = "macos")]
                         self.present_overlay();
-                        self.note(format!(
-                            "screenshot: capture {} ms, {} ms to overlay",
-                            capture_ms, path_to_overlay_ms
-                        ));
+                        let line = format!(
+                            "screenshot: capture {} ms, {} ms to overlay (overlay built in {} ms)",
+                            capture_ms,
+                            path_to_overlay_ms,
+                            t0.elapsed().as_millis() as i64 - path_to_overlay_ms
+                        );
+                        crate::app::logging::ws_log(&line);
+                        self.note(line);
                     }
                     ShotMode::Full | ShotMode::Screen => {
                         self.direct(args, &cfg, &images);
@@ -7604,6 +8149,125 @@ impl ScreenshotController {
                 self.note("screenshot: capture failed");
                 self.reply = Some(Vec::new());
                 Ok(())
+            }
+        }
+    }
+
+    /// A fresh interactive session over the current screens (no frozen
+    /// images yet): displays, the pointer, and any `--region` preselect.
+    fn new_overlay_session(&self, args: &ShotArgs, cfg: &ScreenshotConfig) -> ShotSession {
+        let mut s = ShotSession::new(cfg.clone(), args.clone(), self.state_path.clone());
+        for scr in &self.screens {
+            let mut disp = ShotDisplay::new(scr.id, scr.frame, scr.scale);
+            disp.top_inset = scr.top_inset;
+            s.add_display(disp);
+        }
+        // Start with the pointer where it is, so the mode pill
+        // (and loupe) show before the first mouse move.
+        #[cfg(target_os = "macos")]
+        {
+            let m = objc2_app_kit::NSEvent::mouseLocation();
+            let hit = s.displays.iter().position(|d| {
+                m.x >= d.frame.x && m.x < d.frame.x + d.frame.w
+                    && m.y >= d.frame.y && m.y < d.frame.y + d.frame.h
+            });
+            if let Some(i) = hit {
+                let f = s.displays[i].frame;
+                s.mouse = Some((i, Point::new(m.x - f.x, f.y + f.h - m.y)));
+            }
+        }
+        // `--region` / `--last-region`: preselect before the
+        // panel presents so the ring/selection show on open.
+        if let Some((rect, idx)) = initial_region(args, &s) {
+            s.test_select(rect, Some(idx));
+        }
+        s
+    }
+
+    /// Hyper+X fast path: present the overlay at once over the live screen,
+    /// capture on a background thread, and drop the frozen image in when it
+    /// lands ([`Self::land_capture`], ~30–60 ms later). The screen is assumed
+    /// not to change in that window, so the swap is invisible; the overlay
+    /// panels are `NSWindowSharingType::None`, so the capture never contains
+    /// them. A finish before the image lands waits for it.
+    #[cfg(target_os = "macos")]
+    fn start_async_session(&mut self, args: &ShotArgs, cfg: &ScreenshotConfig) {
+        let t0 = std::time::Instant::now();
+        let s = self.new_overlay_session(args, cfg);
+        self.session = Some(s);
+        self.capture_pending = true;
+        self.capture_gen = self.capture_gen.wrapping_add(1);
+        let gen = self.capture_gen;
+        self.present_overlay();
+        let shown_ms = t0.elapsed().as_millis();
+        let screens = self.screens.clone();
+        let weak = self.self_ref.clone();
+        let spawned = std::thread::Builder::new().name("ks-shot-capture".into()).spawn(move || {
+            let cap_t0 = std::time::Instant::now();
+            let res = sck::capture_displays(&screens);
+            let capture_ms = cap_t0.elapsed().as_millis();
+            let res = SendCapture(res);
+            crate::platform::run_on_main(move || {
+                let res = res;
+                let Some(ctrl) = weak.upgrade() else { return };
+                let Ok(mut c) = ctrl.lock() else { return };
+                c.land_capture(gen, res.0, shown_ms, capture_ms);
+            });
+        });
+        if spawned.is_err() {
+            self.land_capture(gen, Err(CaptureError::new("capture thread")), shown_ms, 0);
+        }
+    }
+
+    /// Main thread: the async capture is back. Fill the frozen images (model +
+    /// panel layers), then complete a finish that was waiting on it; a failed
+    /// capture closes the overlay with the fail toast.
+    #[cfg(target_os = "macos")]
+    fn land_capture(
+        &mut self,
+        gen: u64,
+        res: Result<Vec<CapturedImage>, CaptureError>,
+        shown_ms: u128,
+        capture_ms: u128,
+    ) {
+        if gen != self.capture_gen || !self.capture_pending {
+            return;
+        }
+        self.capture_pending = false;
+        if self.session.is_none() {
+            return; // closed (Esc) before the image landed
+        }
+        match res {
+            Ok(images) if !images.is_empty() => {
+                if let Some(s) = self.session.as_mut() {
+                    set_session_images(s, &images);
+                }
+                for (i, panel) in self.overlay_panels.0.iter().enumerate() {
+                    let img = self
+                        .session
+                        .as_ref()
+                        .and_then(|s| s.base_images.get(i).cloned().flatten());
+                    panel.set_base(img.as_deref());
+                }
+                self.redraw_overlays();
+                let line = format!(
+                    "screenshot: overlay shown in {shown_ms} ms, capture landed {capture_ms} ms later"
+                );
+                crate::app::logging::ws_log(&line);
+                self.note(line);
+                self.complete_finished_session();
+            }
+            _ => {
+                let cfg = self.config.clone();
+                ScreenToast::show(
+                    &mut self.toast,
+                    cfg.fail_toast.clone(),
+                    "exclamationmark.triangle.fill",
+                );
+                self.note("screenshot: capture failed");
+                crate::app::logging::ws_log("screenshot: async capture failed");
+                self.end_session(ShotOutcome::Abort, None, None);
+                self.reply = Some(Vec::new());
             }
         }
     }
@@ -7860,8 +8524,18 @@ impl ScreenshotController {
         *grid.ivars().on_open.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             w(Box::new(move |c| c.reopen_recent_as_pin(&e.path)))
         }));
-        let dir = self.history.dir.clone();
-        *grid.ivars().on_folder.borrow_mut() = Some(Rc::new(move || open_in_workspace(&dir)));
+        let w = with.clone();
+        *grid.ivars().on_merge.borrow_mut() = Some(Rc::new(move |picks: Vec<ShotRecentEntry>, horizontal: bool| {
+            let paths: Vec<String> = picks.into_iter().map(|e| e.path).collect();
+            w(Box::new(move |c| c.open_merged_in_editor(&paths, horizontal)))
+        }));
+        grid.set_hints(recent_grid::MergeHints {
+            idle: cfg.merge.hint.clone(),
+            picked: cfg.merge.picked_hint.clone(),
+            vertical: cfg.merge.vertical_label.clone(),
+            horizontal: cfg.merge.horizontal_label.clone(),
+        });
+        grid.set_horizontal(cfg.merge.horizontal);
         let w = with.clone();
         // "Open in Popup" returns the keyboard to the overlay under the grid.
         let popup_parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> =
@@ -7946,8 +8620,27 @@ impl ScreenshotController {
         }
     }
 
+    /// Leave the merge editor for the session it replaced, with the Recents
+    /// grid open again and the same screenshots picked.
+    #[cfg(target_os = "macos")]
+    fn return_from_merge(&mut self) {
+        let Some((mut parent, picks, horizontal)) = self.merge_parent.take() else { return };
+        self.dismiss_overlay();
+        parent.recent_open = false;
+        parent.recent_requested = false;
+        self.session = Some(parent);
+        self.present_overlay();
+        self.toggle_recent();
+        if let Some(panel) = self.recent_panel.0.as_ref() {
+            panel.grid().set_picks(picks);
+            panel.grid().set_horizontal(horizontal);
+        }
+        self.redraw_overlays();
+    }
+
     /// `finish(s, .abort)`: drop the overlay session (and the grid).
     pub fn abort_session(&mut self) {
+        self.merge_parent = None;
         #[cfg(target_os = "macos")]
         self.close_recent();
         if let Some(s) = self.session.as_mut() {
@@ -7956,6 +8649,106 @@ impl ScreenshotController {
             }
         }
         self.complete_finished_session();
+    }
+
+    /// Recents ▸ Shift-click 2+ screenshots: stack them top to bottom (pick
+    /// order, numbered 1, 2, 3 … in a left gutter) and open the result in
+    /// the screenshot editor with the stack preselected, ready to annotate,
+    /// copy, save or pin. The editor canvas uses enough pixels per point
+    /// (up to `merge-max-scale`) to keep the screenshots at native
+    /// resolution; a stack too tall for that is shrunk to fit the screen.
+    #[cfg(target_os = "macos")]
+    pub fn open_merged_in_editor(&mut self, paths: &[String], horizontal: bool) {
+        let images: Vec<objc2::rc::Retained<objc2_core_graphics::CGImage>> = paths
+            .iter()
+            .filter_map(|p| std::fs::read(p).ok())
+            .filter_map(|png| pin_window::decode_png(&png))
+            .collect();
+        if images.len() < 2 {
+            self.note("screenshot: merge needs 2+ readable screenshots");
+            return;
+        }
+        let screens = current_screens();
+        if !screens.is_empty() {
+            self.screens = screens;
+        }
+        let Some(scr) = self.screen_under_mouse() else { return };
+        self.close_recent();
+        // Keep the capture the merge was started from (Esc comes back to it
+        // with the Recents grid), instead of aborting it.
+        self.dismiss_overlay();
+        let parent = self.session.take().filter(|p| !p.finished);
+        let cfg = ScreenshotConfig::load();
+        self.config = cfg.clone();
+        let m = &cfg.merge;
+        // Gutter / gap / label are points on a `px` display: the stack is
+        // built in screenshot pixels.
+        let px = scr.scale.max(1.0);
+        let sizes: Vec<(f64, f64)> = images
+            .iter()
+            .map(|i| {
+                (
+                    objc2_core_graphics::CGImage::width(Some(i)) as f64,
+                    objc2_core_graphics::CGImage::height(Some(i)) as f64,
+                )
+            })
+            .collect();
+        let layout = merge_layout(&sizes, horizontal, m.gutter * px, m.gap * px, m.gap * px);
+        let stage = merge_stage(
+            layout.width,
+            layout.height,
+            scr.frame.w,
+            scr.frame.h,
+            scr.top_inset,
+            48.0,
+            scr.scale,
+            m.max_scale,
+        );
+        let (cw, ch) = (
+            (scr.frame.w * stage.scale).round() as i64,
+            (scr.frame.h * stage.scale).round() as i64,
+        );
+        let Some(canvas) = shot_cg::merge_canvas(
+            &images,
+            cw,
+            ch,
+            &stage,
+            &layout,
+            m.background,
+            m.border_color,
+            m.border_width * px,
+        ) else {
+            self.note("screenshot: merge canvas failed");
+            return;
+        };
+        let mut args = ShotArgs::default();
+        args.mode = ShotMode::Gui;
+        let mut s = ShotSession::new(cfg.clone(), args, self.state_path.clone());
+        let mut disp = ShotDisplay::new(scr.id, scr.frame, scr.scale);
+        disp.top_inset = scr.top_inset;
+        s.add_display(disp);
+        s.set_base_image(0, Some(canvas));
+        s.text_mode = false;
+        let ms = objc2_app_kit::NSEvent::mouseLocation();
+        s.mouse = Some((0, Point::new(ms.x - scr.frame.x, scr.frame.y + scr.frame.h - ms.y)));
+        s.test_select(stage.rect, Some(0));
+        // The numbers: real annotations, so Layers / Delete can remove them.
+        s.doc.objects = merge_labels(&stage, &layout, m, px, cfg.counter_outline);
+        self.session = Some(s);
+        self.merge_parent = parent.map(|p| (p, paths.to_vec(), horizontal));
+        self.capture_pending = false;
+        self.capture_gen = self.capture_gen.wrapping_add(1);
+        self.present_overlay();
+        self.redraw_overlays();
+        let line = format!(
+            "screenshot: merged {} screenshots ({}x{} px, {:.0}% of native)",
+            images.len(),
+            (layout.width * stage.fit).round(),
+            (layout.height * stage.fit).round(),
+            stage.fit * 100.0
+        );
+        crate::app::logging::ws_log(&line);
+        self.note(line);
     }
 
     /// The grid's `onOpen`: abort the overlay, then pin that file centred on
@@ -8097,6 +8890,16 @@ impl ScreenshotController {
         if !self.session.as_ref().map(|s| s.finished).unwrap_or(false) {
             return;
         }
+        // The frozen image is still in flight: `land_capture` completes it.
+        if self.capture_pending && outcome != ShotOutcome::Abort {
+            return;
+        }
+        // Esc in the merge editor: back to the capture + Recents it came from.
+        #[cfg(target_os = "macos")]
+        if outcome == ShotOutcome::Abort && self.merge_parent.is_some() {
+            self.return_from_merge();
+            return;
+        }
         // Swift renders `objects: o != .text`: a text capture is rendered
         // without the annotations so OCR reads the frozen image. Abort renders
         // nothing (its image is discarded).
@@ -8124,6 +8927,7 @@ impl ScreenshotController {
         img: Option<ShotImage>,
         screen: Option<ScreenRef>,
     ) {
+        self.merge_parent = None;
         let (cfg, args) = match &self.session {
             Some(s) => (s.cfg.clone(), s.args.clone()),
             None => (self.config.clone(), ShotArgs::default()),
@@ -8604,6 +9408,7 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
         let cfg = crate::engines::screenshot_text::ShotOCRConfig {
             languages: ocr.languages.clone(),
             correction: ocr.correction,
+            accurate: ocr.accurate,
         };
         let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
         crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap)
@@ -9447,6 +10252,154 @@ mod tests {
         assert_eq!(s.size(ShotTool::Marker), 5, "marker keeps its own default");
         s.state.sizes.insert("line".to_string(), 2);
         assert_eq!(s.size(ShotTool::Line), 2, "a remembered size wins");
+    }
+
+    #[test]
+    fn merge_layout_stacks_in_order_widest_sets_the_column() {
+        // A wide shot, a narrow one, a medium one: gutter 88, gap 32, pad 32.
+        let l = merge_layout(&[(1000.0, 400.0), (300.0, 200.0), (600.0, 500.0)], false, 88.0, 32.0, 32.0);
+        assert_eq!(l.width, 32.0 + 88.0 + 1000.0 + 32.0, "column = widest shot");
+        assert_eq!(l.height, 32.0 + 400.0 + 32.0 + 200.0 + 32.0 + 500.0 + 32.0);
+        // Top to bottom in pick order, left-aligned after the gutter, native size.
+        assert_eq!(l.images[0], Rect::new(120.0, 32.0, 1000.0, 400.0));
+        assert_eq!(l.images[1], Rect::new(120.0, 464.0, 300.0, 200.0), "narrow: not upscaled");
+        assert_eq!(l.images[2], Rect::new(120.0, 696.0, 600.0, 500.0));
+        // Each number cell sits left of its own row, row-high.
+        assert_eq!(l.labels[1], Rect::new(32.0, 464.0, 88.0, 200.0));
+    }
+
+    #[test]
+    fn merge_layout_horizontal_runs_left_to_right_tallest_sets_the_row() {
+        let l = merge_layout(&[(1000.0, 400.0), (300.0, 200.0)], true, 88.0, 32.0, 32.0);
+        assert_eq!(l.width, 32.0 + 1000.0 + 32.0 + 300.0 + 32.0);
+        assert_eq!(l.height, 32.0 + 88.0 + 400.0 + 32.0, "row = tallest + number strip");
+        assert_eq!(l.images[0], Rect::new(32.0, 120.0, 1000.0, 400.0));
+        assert_eq!(l.images[1], Rect::new(1064.0, 120.0, 300.0, 200.0), "top-aligned, native");
+        assert_eq!(l.labels[1], Rect::new(1064.0, 32.0, 300.0, 88.0), "number strip above");
+    }
+
+    #[test]
+    fn merge_stage_keeps_native_pixels_or_shrinks_to_fit() {
+        // A small stack on a 1440x900 @2x display: native, at the display scale.
+        let st = merge_stage(800.0, 600.0, 1440.0, 900.0, 25.0, 48.0, 2.0, 3.0);
+        assert_eq!((st.scale, st.fit), (2.0, 1.0));
+        assert_eq!((st.rect.w, st.rect.h), (400.0, 300.0), "800x600 px at 2 px/pt");
+        assert!(st.rect.y >= 25.0 + 48.0, "below the menu bar + margin");
+        // Taller than the screen at 2x: more pixels per point, still native.
+        let st = merge_stage(1200.0, 2000.0, 1440.0, 900.0, 25.0, 48.0, 2.0, 3.0);
+        assert_eq!(st.fit, 1.0);
+        assert!(st.scale > 2.0 && st.scale <= 3.0);
+        assert!(st.rect.h <= 900.0 - 25.0 - 96.0 + 0.01, "fits the screen");
+        // Too tall even at max-scale: shrunk, and still fits.
+        let st = merge_stage(3000.0, 9000.0, 1440.0, 900.0, 25.0, 48.0, 2.0, 3.0);
+        assert_eq!(st.scale, 3.0);
+        assert!(st.fit < 1.0);
+        assert!(st.rect.h <= 900.0 - 25.0 - 96.0 + 0.01);
+    }
+
+    #[test]
+    fn merge_config_keys() {
+        let mut e = HashMap::new();
+        e.insert("merge-gap".to_string(), "8".to_string());
+        e.insert("merge-gutter".to_string(), "60".to_string());
+        e.insert("merge-max-scale".to_string(), "9".to_string());
+        e.insert("merge-background".to_string(), "#ffffff".to_string());
+        e.insert("merge-hint".to_string(), "".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        assert_eq!((c.merge.gap, c.merge.gutter), (8.0, 60.0));
+        assert_eq!(c.merge.max_scale, 6.0, "clamped");
+        assert_eq!(c.merge.background, ShotColor::from_hex("#ffffff").unwrap());
+        assert_eq!(c.merge.hint, "", "an empty hint hides it");
+        assert_eq!(c.merge.label_size, 18.0, "default");
+        assert_eq!(c.merge.label_color, ShotColor::from_hex("#ffc400").unwrap(), "amber, not the ui colour");
+        assert_eq!(c.merge.border_width, 1.0);
+        assert!(!c.merge.horizontal, "vertical by default");
+        e.insert("merge-direction".to_string(), "horizontal".to_string());
+        assert!(ScreenshotConfig::from_entries(&e).merge.horizontal);
+    }
+
+    #[test]
+    fn merge_labels_keep_their_numbers_when_one_is_deleted() {
+        let mut d = ShotDocument::new(10);
+        d.objects = (1..=3)
+            .map(|n| {
+                let mut o = ShotObject::new(ShotTool::Counter, vec![Point::new(0.0, n as f64 * 50.0)], ShotColor::WHITE, 3);
+                o.number = n;
+                o.fixed_number = true;
+                o
+            })
+            .collect();
+        d.remove(1); // delete "2"
+        let nums: Vec<i64> = d.objects.iter().map(|o| o.number).collect();
+        assert_eq!(nums, vec![1, 3], "3 stays 3");
+        // A counter the user adds numbers on its own, from 1.
+        d.add(ShotObject::new(ShotTool::Counter, vec![Point::new(9.0, 9.0)], ShotColor::WHITE, 3));
+        assert_eq!(d.objects.last().map(|o| o.number), Some(1));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn esc_in_the_merge_editor_returns_to_the_original_capture() {
+        let mut c = ScreenshotController::new();
+        let mut parent = session();
+        parent.test_select(Rect::new(5.0, 5.0, 50.0, 50.0), Some(0));
+        let mut merged = session();
+        merged.finish(ShotOutcome::Abort);
+        c.session = Some(merged);
+        c.merge_parent = Some((parent, vec!["a.png".to_string()], false));
+        c.complete_finished_session();
+        let s = c.session.as_ref().expect("the original capture is back");
+        assert!(!s.finished);
+        assert_eq!(s.selection.map(|r| r.w), Some(50.0));
+        assert!(c.merge_parent.is_none());
+        // A real abort from there closes for good.
+        c.abort_session();
+        assert!(c.session.is_none());
+    }
+
+    #[test]
+    fn finish_waits_for_an_in_flight_capture() {
+        let mut c = ScreenshotController::new();
+        let mut s = session();
+        s.test_select(Rect::new(10.0, 10.0, 100.0, 100.0), Some(0));
+        s.finish(ShotOutcome::Text);
+        c.session = Some(s);
+        c.capture_pending = true;
+        c.complete_finished_session();
+        assert!(c.session.is_some(), "Return before the image lands waits");
+        c.capture_pending = false;
+        c.complete_finished_session();
+        assert!(c.session.is_none(), "completes once the capture is in");
+        // Esc never waits.
+        let mut s = session();
+        s.finish(ShotOutcome::Abort);
+        c.session = Some(s);
+        c.capture_pending = true;
+        c.complete_finished_session();
+        assert!(c.session.is_none());
+    }
+
+    #[test]
+    fn switching_copy_text_and_screenshot_starts_clean() {
+        let mut s = session();
+        s.goto_stop(1);
+        assert!(!s.text_mode);
+        s.test_select(Rect::new(100.0, 100.0, 200.0, 200.0), Some(0));
+        s.doc.add(ShotObject::new(
+            ShotTool::Rectangle,
+            vec![Point::new(110.0, 110.0), Point::new(150.0, 150.0)],
+            ShotColor::BLACK,
+            3,
+        ));
+        // Shift+Tab back to Copy Text: no leftover region or annotations.
+        s.cycle_stop(true);
+        assert!(s.text_mode);
+        assert!(s.selection.is_none(), "selection cleared on mode switch");
+        assert!(s.doc.objects.is_empty(), "annotations cleared on mode switch");
+        // Re-picking the current stop keeps the selection.
+        s.test_select(Rect::new(10.0, 10.0, 50.0, 50.0), Some(0));
+        s.goto_stop(0);
+        assert!(s.selection.is_some());
     }
 
     #[test]

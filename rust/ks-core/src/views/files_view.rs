@@ -285,8 +285,12 @@ mod appkit {
                     }
                     return;
                 }
-                let plain = !mods.contains(NSEventModifierFlags::Command)
-                    && !mods.contains(NSEventModifierFlags::Shift);
+                // Ctrl-click toggles one row like Cmd-click (the Windows habit:
+                // pick 1, 5 and 10 without the rows between). Right-click /
+                // two-finger click still opens the row menu.
+                let toggle = mods.contains(NSEventModifierFlags::Command)
+                    || mods.contains(NSEventModifierFlags::Control);
+                let plain = !toggle && !mods.contains(NSEventModifierFlags::Shift);
                 let path = self.ivars().rows.borrow().get(row).map(|r| r.path.clone()).unwrap_or_default();
                 *self.ivars().drag_origin.borrow_mut() = Some((e.locationInWindow(), row, path));
                 let in_multi = {
@@ -299,7 +303,7 @@ mod appkit {
                 }
                 self.emit(FilesEvent::Click {
                     row,
-                    cmd: mods.contains(NSEventModifierFlags::Command),
+                    cmd: toggle,
                     shift: mods.contains(NSEventModifierFlags::Shift),
                     double,
                 });

@@ -426,8 +426,10 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   workspaces via AeroSpace IPC; everything else (views, "Bansho"/`window`,
   jira-config, health) is forwarded to `ws-notes.sock`
   (`quick::forward_to_main`; `jira-config` → `jira-dashboard`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
-  nothing answers. Screenshot / paths "reveal in Files" send `reveal\tPATH…` to
-  the main socket (`hooks::set_reveal_hook`; lost if the main app is down).
+  nothing answers. Screenshot / paths "reveal in Files" open the agent's own
+  Find Recent Files panel at that
+  folder with the files selected (`hooks::set_reveal_hook` → `show_files_at`),
+  never the main app (AeroSpace pins its window to workspace 2).
 - **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
   `PathShelf` via Python `shelf.save`, agent via `path_shelf::pure_add`); both
   write tmp + rename, and the main shelf reloads when the file's mtime moved

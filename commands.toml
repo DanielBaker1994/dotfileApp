@@ -128,7 +128,7 @@ width = 640
 
 [screenshot]
 
-history = 20
+history = 30
 enabled = true
 in-palette = false
 label = "Screenshot"
@@ -160,6 +160,7 @@ return = "copy"
 start-mode = "text"
 text-languages = ""
 text-correction = true
+text-accuracy = "fast"
 text-column-gap = 1.0
 text-toast = "Copied {} to clipboard"
 no-text-toast = "No text found"
@@ -173,6 +174,19 @@ copy-path-after-save = false
 preview = true
 save-last-region = false
 undo-limit = 100
+merge-gap = 16
+merge-gutter = 44
+merge-label-size = 18
+merge-background = "#1e1e1e"
+merge-label-color = "#ffc400"
+merge-border-width = 1
+merge-border-color = "#8c8c8c"
+merge-max-scale = 3
+merge-direction = "vertical"
+merge-vertical-label = "↓ Vertical"
+merge-horizontal-label = "→ Horizontal"
+merge-hint = "Shift-click to merge"
+merge-picked-hint = "{} picked · release Shift to merge"
 arrow-style = 0
 reverse-arrow = false
 counter-outline = true

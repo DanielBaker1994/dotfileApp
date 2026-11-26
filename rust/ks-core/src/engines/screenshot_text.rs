@@ -28,6 +28,12 @@ use objc2_vision::{
 pub struct ShotOCRConfig {
     pub languages: Vec<String>,
     pub correction: bool,
+    /// Vision's `.accurate` level instead of `.fast` (`[screenshot]
+    /// text-accuracy`). On macOS 27 (26A428) `.accurate` is broken: its
+    /// precompiled model fails to load (E5RT code 13) on ANE, GPU and CPU
+    /// alike, ~43 s per process and then an error. `.fast` reads screen text
+    /// in ~100–200 ms.
+    pub accurate: bool,
 }
 
 impl Default for ShotOCRConfig {
@@ -35,6 +41,7 @@ impl Default for ShotOCRConfig {
         ShotOCRConfig {
             languages: Vec::new(),
             correction: true,
+            accurate: false,
         }
     }
 }
@@ -98,7 +105,11 @@ impl ShotOCR {
         let input: &CGImage = upscaled_owner.as_deref().unwrap_or(img);
 
         let req = VNRecognizeTextRequest::new();
-        req.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        req.setRecognitionLevel(if cfg.accurate {
+            VNRequestTextRecognitionLevel::Accurate
+        } else {
+            VNRequestTextRecognitionLevel::Fast
+        });
         req.setUsesLanguageCorrection(cfg.correction);
         if cfg.languages.is_empty() {
             req.setAutomaticallyDetectsLanguage(true);
@@ -240,8 +251,20 @@ impl ShotOCR {
 
     /// `ShotOCR.warmUp`: draw a small "Warm up text" bitmap with CoreText and
     /// run a recognition pass over it, returning the elapsed milliseconds.
-    /// `0` when the bitmap context cannot be created. Main-thread callers only
-    /// (see [`crate::views::screenshot::ScreenshotController::prewarm`]).
+    /// `0` when the bitmap context cannot be created. CoreGraphics, CoreText
+    /// and Vision only, so any thread; launch prewarms use
+    /// [`Self::warm_up_in_background`].
+    #[cfg(target_os = "macos")]
+    pub fn warm_up_in_background(cfg: ShotOCRConfig) {
+        // Never on the main thread: a cold Vision load compiles the text model
+        // for the Neural Engine and can take many seconds — on main it froze
+        // the freshly launched window (2026-11-25 stall sample).
+        let _ = std::thread::Builder::new().name("ks-ocr-warmup".into()).spawn(move || {
+            let ms = ShotOCR::warm_up(&cfg);
+            crate::app::logging::ws_log(&format!("screenshot: OCR warm-up {ms} ms (background)"));
+        });
+    }
+
     #[cfg(target_os = "macos")]
     pub fn warm_up(cfg: &ShotOCRConfig) -> i64 {
         use objc2::runtime::AnyObject;

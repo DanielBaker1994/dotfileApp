@@ -553,6 +553,10 @@ pub struct ShotObject {
     pub reversed: bool,
     pub outline: bool,
     pub secure: bool,
+    /// A counter whose `number` is set once and never renumbered (the merge
+    /// labels: deleting "2" must not turn "3" into "2"). Other counters
+    /// number around it as if it were not there.
+    pub fixed_number: bool,
 }
 
 impl ShotObject {
@@ -570,6 +574,7 @@ impl ShotObject {
             reversed: false,
             outline: true,
             secure: true,
+            fixed_number: false,
         }
     }
 
@@ -829,7 +834,7 @@ impl ShotDocument {
             .objects
             .iter()
             .rev()
-            .find(|o| o.tool == ShotTool::Counter)
+            .find(|o| o.tool == ShotTool::Counter && !o.fixed_number)
             .map(|o| o.number)
             .unwrap_or(0);
         999.min(1.max(last + 1 + offset))
@@ -838,7 +843,7 @@ impl ShotDocument {
     pub fn renumber(objs: &mut [ShotObject]) {
         let mut n = 0i64;
         for o in objs.iter_mut() {
-            if o.tool == ShotTool::Counter {
+            if o.tool == ShotTool::Counter && !o.fixed_number {
                 n = 999.min(1.max(n + 1 + o.number_offset));
                 o.number = n;
             }

@@ -914,6 +914,45 @@ mod appkit {
             self.publish_state();
         }
 
+        /// Find Recent Files opened on `paths`: a directory becomes the
+        /// folder shown; files open their folder with every one of them
+        /// marked and the first selected (the main Files view's reveal).
+        fn show_files_at(&self, paths: &[String]) {
+            let wanted: Vec<String> = paths.iter().map(|p| crate::views::files::standardize(p)).collect();
+            let Some(first) = wanted.first() else { return };
+            let dir = if std::path::Path::new(first).is_dir() {
+                first.clone()
+            } else {
+                std::path::Path::new(first)
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| first.clone())
+            };
+            self.show_files();
+            self.files_surface(|b| {
+                b.cd(&dir);
+                b.list.marked.clear();
+                for (i, e) in b.list.rows.iter().enumerate() {
+                    if wanted.iter().any(|w| w == &e.path) {
+                        b.list.marked.insert(i);
+                    }
+                }
+                if let Some(i) = b.list.rows.iter().position(|e| wanted.iter().any(|w| w == &e.path)) {
+                    b.list.selection = i;
+                }
+            });
+            // The list, not the filter field, has the keyboard: the
+            // selection is what you act on (Return / Space / Cmd+C).
+            if let (Some(w), Some(v)) = (
+                self.files_window(),
+                self.files_win.try_borrow().ok().and_then(|g| g.as_ref().and_then(|w| w.browser.view.clone())),
+            ) {
+                let list = v.list_view();
+                let r: &objc2_app_kit::NSResponder = &list;
+                w.makeFirstResponder(Some(r));
+            }
+        }
+
         fn hide_files(&self) {
             if let Ok(g) = self.files_win.try_borrow() {
                 if let Some(p) = g.as_ref().and_then(|w| w.panel.as_ref()) {
@@ -2403,14 +2442,14 @@ mod appkit {
         // callbacks need; a bare `Arc::new` gives an overlay that ignores input.
         let shot = ScreenshotController::shared(QuickUi::shot_config(&text));
 
-        // "Reveal in Files" has no Files view here: ask the main app.
-        {
-            let (sock, script) = (paths.notes_socket_path(), format!("{}/bin/kitchen_sink.sh", paths.asset_dir()));
-            crate::app::hooks::set_reveal_hook(move |p: &[String]| {
-                let msg = std::iter::once("reveal".to_string()).chain(p.iter().cloned()).collect::<Vec<_>>().join("\t");
-                forward_to_main(&sock, &script, &msg);
-            });
-        }
+        // "Reveal in Files" (screenshot Recents ▸ Open Folder / Reveal, the
+        // paths shelf) opens the agent's own Find Recent Files panel on the
+        // screen in use — never the main app's window (AeroSpace pins that
+        // to workspace 2, and a cold start of it is slow).
+        crate::app::hooks::set_reveal_hook(move |p: &[String]| {
+            let p = p.to_vec();
+            defer(move |ui| ui.show_files_at(&p));
+        });
 
         let shared = QuickShared::new();
         let ui = Rc::new(QuickUi {
@@ -2457,13 +2496,14 @@ mod appkit {
         *ui.monitor.borrow_mut() = Some(monitor);
 
         // Palette prewarm (hidden), then SCK + OCR warm-up off the critical path.
+        crate::views::screenshot::prewarm_capture();
         let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::NOW.time(300_000_000), || {
             with_ui(|ui| ui.prewarm_palette());
         });
         let _ = dispatch2::DispatchQueue::main().after(dispatch2::DispatchTime::NOW.time(1_500_000_000), move || {
             let plan = shot.lock().unwrap().prewarm_plan();
             if let Some(cfg) = plan {
-                let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
+                crate::engines::screenshot_text::ShotOCR::warm_up_in_background(cfg);
             }
         });
 

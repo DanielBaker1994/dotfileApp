@@ -3643,6 +3643,32 @@ mod tests {
     }
 
     #[test]
+    fn shift_click_selects_a_range_like_finder() {
+        use crate::views::files_view::FilesEvent;
+        let mut b = FileBrowser::new("/tmp");
+        b.set_all((0..8).map(|i| Entry::new(&format!("f{i}.png"), &format!("/tmp/f{i}.png"), false, i)).collect());
+        let marked = |b: &FileBrowser| b.snapshot().marked.iter().copied().collect::<Vec<_>>();
+        let click = |b: &mut FileBrowser, row, cmd, shift| b.handle(FilesEvent::Click { row, cmd, shift, double: false });
+        click(&mut b, 2, false, false);
+        click(&mut b, 5, false, true);
+        assert_eq!(marked(&b), vec![2, 3, 4, 5], "click 2, Shift-click 5");
+        click(&mut b, 0, false, true);
+        assert_eq!(marked(&b), vec![0, 1, 2], "Shift-click again re-ranges from the anchor");
+        click(&mut b, 7, true, false);
+        assert_eq!(marked(&b), vec![0, 1, 2, 7], "Cmd-click adds one");
+        click(&mut b, 6, false, true);
+        assert_eq!(marked(&b), vec![6, 7], "Shift-click ranges from the last Cmd-click");
+        click(&mut b, 4, false, false);
+        click(&mut b, 1, false, true);
+        assert_eq!(marked(&b), vec![1, 2, 3, 4], "a plain click resets the anchor");
+        // Ctrl/Cmd-click (both arrive as `cmd`): 1, 5 and 7 only.
+        click(&mut b, 1, false, false);
+        click(&mut b, 5, true, false);
+        click(&mut b, 7, true, false);
+        assert_eq!(marked(&b), vec![1, 5, 7], "single items, not the rows between");
+    }
+
+    #[test]
     fn files_handle_contract() {
         use crate::views::files_view::FilesEvent;
         let mut b = FileBrowser::new("/tmp");
