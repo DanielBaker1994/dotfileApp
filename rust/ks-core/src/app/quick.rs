@@ -1781,9 +1781,15 @@ mod appkit {
                 };
                 clipboard.push(MenuEntry::item(&title, call(QuickUi::files_compress)));
             }
+            // Pictures only (checked by their bytes): open / merge them in
+            // the screenshot editor.
+            let editor = crate::views::screenshot::editor_menu_entry(&self.shot, &paths);
             let mut entries: Vec<MenuEntry> = Vec::new();
             if many {
                 if let Some(e) = quick_look {
+                    entries.push(e);
+                }
+                if let Some(e) = editor {
                     entries.push(e);
                 }
                 entries.push(MenuEntry::Separator);
@@ -1828,7 +1834,7 @@ mod appkit {
                     })),
                 };
                 entries = crate::views::files::file_context_menu(&first, actions);
-                if let Some(e) = quick_look {
+                for e in [quick_look, editor].into_iter().flatten() {
                     let at = entries
                         .iter()
                         .position(|e| matches!(e, MenuEntry::Item { title, .. } if title == "Reveal in Files"))

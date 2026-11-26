@@ -430,6 +430,14 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   Find Recent Files panel at that
   folder with the files selected (`hooks::set_reveal_hook` → `show_files_at`),
   never the main app (AeroSpace pins its window to workspace 2).
+- **Pictures → screenshot editor**: in Find Recent Files and the main Files
+  view, right-click a selection whose files are *all* pictures (judged by
+  magic bytes, `engines::image_files`, never the extension) offers "Open in
+  Screenshot Editor" (1) / "Merge N Photos…" (2+)
+  (`screenshot::editor_menu_entry` → `open_images_in_editor`, the Recents
+  merge path; ImageIO decode applies EXIF orientation). Each process opens
+  its own editor. Titles: `[screenshot] editor-menu-title`,
+  `editor-merge-menu-title`.
 - **Shared state**: `~/.cache/kitchen-sink/paths.json` has two writers (main
   `PathShelf` via Python `shelf.save`, agent via `path_shelf::pure_add`); both
   write tmp + rename, and the main shelf reloads when the file's mtime moved

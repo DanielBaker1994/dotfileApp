@@ -1,5 +1,6 @@
 pub mod config_text;
 pub mod file_ops;
+pub mod image_files;
 pub mod list_filter;
 pub mod pane_shot;
 pub mod path_shelf;

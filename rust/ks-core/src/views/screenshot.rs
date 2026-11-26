@@ -134,6 +134,10 @@ pub struct MergeConfig {
     /// The Recents pill's two labels.
     pub vertical_label: String,
     pub horizontal_label: String,
+    /// File lists ▸ right-click on one picture (`editor-menu-title`) and on
+    /// 2+ pictures (`editor-merge-menu-title`, `{}` = how many).
+    pub editor_menu_title: String,
+    pub editor_merge_menu_title: String,
 }
 
 impl Default for MergeConfig {
@@ -152,6 +156,8 @@ impl Default for MergeConfig {
             horizontal: false,
             vertical_label: "\u{2193} Vertical".to_string(),
             horizontal_label: "\u{2192} Horizontal".to_string(),
+            editor_menu_title: "Open in Screenshot Editor".to_string(),
+            editor_merge_menu_title: "Merge {} Photos in Screenshot Editor".to_string(),
         }
     }
 }
@@ -661,6 +667,8 @@ impl ScreenshotConfig {
             horizontal: s("merge-direction", "vertical").to_lowercase().starts_with('h'),
             vertical_label: s("merge-vertical-label", &md.vertical_label),
             horizontal_label: s("merge-horizontal-label", &md.horizontal_label),
+            editor_menu_title: s("editor-menu-title", &md.editor_menu_title),
+            editor_merge_menu_title: s("editor-merge-menu-title", &md.editor_merge_menu_title),
         };
         c.arrow_style = i("arrow-style", 0, 0, 1);
         c.reverse_arrow = b("reverse-arrow", false);
@@ -1495,6 +1503,48 @@ fn now_stamp() -> String {
 // ---------------------------------------------------------------------------
 
 pub const PIN_MARGIN: f64 = 6.0;
+
+/// Longest side (pixels) a picture opened in the editor is decoded at; a
+/// 48 MP photo (8064 px) still comes in at native size.
+pub const EDITOR_MAX_IMAGE_PX: i64 = 8192;
+
+/// The file-list title for sending `count` pictures to the editor.
+pub fn editor_menu_title(m: &MergeConfig, count: usize) -> String {
+    if count <= 1 {
+        m.editor_menu_title.clone()
+    } else {
+        m.editor_merge_menu_title.replace("{}", &count.to_string())
+    }
+}
+
+/// File lists (Find Recent Files, the Files view) ▸ right-click: the
+/// "Open in Screenshot Editor" / "Merge N Photos in Screenshot Editor" row,
+/// or `None` unless `[screenshot]` is on and **every** selected path is a
+/// real picture (judged by its bytes, `image_files::all_images`).
+#[cfg(target_os = "macos")]
+pub fn editor_menu_entry(
+    shot: &Arc<Mutex<ScreenshotController>>,
+    paths: &[String],
+) -> Option<crate::ui::menu_kit::MenuEntry> {
+    if !crate::engines::image_files::all_images(paths) {
+        return None;
+    }
+    let cfg = ScreenshotConfig::load();
+    if !cfg.enabled {
+        return None;
+    }
+    let title = editor_menu_title(&cfg.merge, paths.len());
+    let (shot, paths) = (shot.clone(), paths.to_vec());
+    Some(crate::ui::menu_kit::MenuEntry::item(&title, move || {
+        // After the menu has closed, so the overlay takes the keyboard.
+        let (shot, paths) = (shot.clone(), paths.clone());
+        crate::platform::run_on_main(move || {
+            if let Ok(mut c) = shot.lock() {
+                c.open_images_in_editor(&paths);
+            }
+        });
+    }))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PinPanel {
@@ -4796,6 +4846,42 @@ mod shot_cg {
             }
         }
         CGBitmapContextCreateImage(Some(ctx)).map(|i| i.into())
+    }
+
+    /// Decode a picture file (PNG / JPEG / HEIC / TIFF / GIF / BMP / WebP)
+    /// for the editor, upright: ImageIO applies the EXIF orientation, so an
+    /// iPhone photo shot in portrait is not drawn on its side. `None` when
+    /// the bytes are not a picture (`image_files::sniff_image`) or ImageIO
+    /// cannot decode them. Huge images come back at most `max_px` on the
+    /// long side (the editor canvas could not hold more anyway).
+    pub fn decode_image_file(path: &str, max_px: i64) -> Option<Retained<CGImage>> {
+        use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFNumber, CFString, CFType};
+        use objc2_image_io::{
+            kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform,
+            kCGImageSourceShouldCacheImmediately, kCGImageSourceThumbnailMaxPixelSize, CGImageSource,
+        };
+        let bytes = std::fs::read(path).ok()?;
+        crate::engines::image_files::sniff_image(&bytes)?;
+        let data = CFData::from_bytes(&bytes);
+        // SAFETY: ImageIO calls with valid CF objects; the source owns its copy.
+        unsafe {
+            let src = CGImageSource::with_data(&data, None)?;
+            if src.count() == 0 {
+                return None;
+            }
+            let index = src.primary_image_index();
+            let max = CFNumber::new_i64(max_px.max(1));
+            let yes = CFBoolean::new(true);
+            let keys: [&CFString; 4] = [
+                kCGImageSourceCreateThumbnailFromImageAlways,
+                kCGImageSourceCreateThumbnailWithTransform,
+                kCGImageSourceShouldCacheImmediately,
+                kCGImageSourceThumbnailMaxPixelSize,
+            ];
+            let values: [&CFType; 4] = [yes.as_ref(), yes.as_ref(), yes.as_ref(), max.as_ref()];
+            let opts = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+            src.thumbnail_at_index(index, Some(opts.as_opaque())).map(|i| i.into())
+        }
     }
 
     /// `(string as NSString).size(withAttributes:).width` for the overlay chrome
@@ -8659,15 +8745,25 @@ impl ScreenshotController {
     /// resolution; a stack too tall for that is shrunk to fit the screen.
     #[cfg(target_os = "macos")]
     pub fn open_merged_in_editor(&mut self, paths: &[String], horizontal: bool) {
+        // Any picture format, upright (EXIF orientation applied); a file
+        // that is not really an image is skipped, never drawn as garbage.
         let images: Vec<objc2::rc::Retained<objc2_core_graphics::CGImage>> = paths
             .iter()
-            .filter_map(|p| std::fs::read(p).ok())
-            .filter_map(|png| pin_window::decode_png(&png))
+            .filter_map(|p| shot_cg::decode_image_file(p, EDITOR_MAX_IMAGE_PX))
             .collect();
-        if images.len() < 2 {
-            self.note("screenshot: merge needs 2+ readable screenshots");
+        if images.is_empty() {
+            self.note("screenshot: no readable picture to open");
+            crate::ui::toast::show("Not a readable picture", "exclamationmark.triangle");
             return;
         }
+        if images.len() < paths.len() {
+            crate::ui::toast::show(
+                &format!("{} of {} could not be read as pictures", paths.len() - images.len(), paths.len()),
+                "exclamationmark.triangle",
+            );
+        }
+        // One picture: just that picture to edit (no number gutter, no frame).
+        let single = images.len() == 1;
         let screens = current_screens();
         if !screens.is_empty() {
             self.screens = screens;
@@ -8693,7 +8789,8 @@ impl ScreenshotController {
                 )
             })
             .collect();
-        let layout = merge_layout(&sizes, horizontal, m.gutter * px, m.gap * px, m.gap * px);
+        let gutter = if single { 0.0 } else { m.gutter * px };
+        let layout = merge_layout(&sizes, horizontal, gutter, m.gap * px, m.gap * px);
         let stage = merge_stage(
             layout.width,
             layout.height,
@@ -8716,7 +8813,7 @@ impl ScreenshotController {
             &layout,
             m.background,
             m.border_color,
-            m.border_width * px,
+            if single { 0.0 } else { m.border_width * px },
         ) else {
             self.note("screenshot: merge canvas failed");
             return;
@@ -8733,7 +8830,9 @@ impl ScreenshotController {
         s.mouse = Some((0, Point::new(ms.x - scr.frame.x, scr.frame.y + scr.frame.h - ms.y)));
         s.test_select(stage.rect, Some(0));
         // The numbers: real annotations, so Layers / Delete can remove them.
-        s.doc.objects = merge_labels(&stage, &layout, m, px, cfg.counter_outline);
+        if !single {
+            s.doc.objects = merge_labels(&stage, &layout, m, px, cfg.counter_outline);
+        }
         self.session = Some(s);
         self.merge_parent = parent.map(|p| (p, paths.to_vec(), horizontal));
         self.capture_pending = false;
@@ -8741,7 +8840,7 @@ impl ScreenshotController {
         self.present_overlay();
         self.redraw_overlays();
         let line = format!(
-            "screenshot: merged {} screenshots ({}x{} px, {:.0}% of native)",
+            "screenshot: opened {} picture(s) in the editor ({}x{} px, {:.0}% of native)",
             images.len(),
             (layout.width * stage.fit).round(),
             (layout.height * stage.fit).round(),
@@ -8749,6 +8848,19 @@ impl ScreenshotController {
         );
         crate::app::logging::ws_log(&line);
         self.note(line);
+    }
+
+    /// Files / Find Recent Files ▸ right-click ▸ "Open in Screenshot Editor"
+    /// (one picture) or "Merge N Pictures in Screenshot Editor": drop any
+    /// live capture, then open the pictures in the editor, stacked like a
+    /// Recents merge (`[screenshot] merge-*`). Esc just closes the editor.
+    #[cfg(target_os = "macos")]
+    pub fn open_images_in_editor(&mut self, paths: &[String]) {
+        if !self.is_idle() {
+            self.abort_session();
+        }
+        let horizontal = ScreenshotConfig::load().merge.horizontal;
+        self.open_merged_in_editor(paths, horizontal);
     }
 
     /// The grid's `onOpen`: abort the overlay, then pin that file centred on
@@ -10335,6 +10447,41 @@ mod tests {
         // A counter the user adds numbers on its own, from 1.
         d.add(ShotObject::new(ShotTool::Counter, vec![Point::new(9.0, 9.0)], ShotColor::WHITE, 3));
         assert_eq!(d.objects.last().map(|o| o.number), Some(1));
+    }
+
+    #[test]
+    fn editor_menu_titles_come_from_config() {
+        let mut e = HashMap::new();
+        let c = ScreenshotConfig::from_entries(&e);
+        assert_eq!(editor_menu_title(&c.merge, 1), "Open in Screenshot Editor");
+        assert_eq!(editor_menu_title(&c.merge, 3), "Merge 3 Photos in Screenshot Editor");
+        e.insert("editor-merge-menu-title".to_string(), "Stack {}".to_string());
+        assert_eq!(editor_menu_title(&ScreenshotConfig::from_entries(&e).merge, 2), "Stack 2");
+    }
+
+    /// Real decode: a PNG round-trips at native size; a text file named
+    /// `.png` is refused. `KS_DECODE_PROBE=a.heic:b.jpg` also decodes those
+    /// and prints their upright size (manual EXIF-orientation check).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn decode_image_file_reads_pictures_and_refuses_fakes() {
+        let dir = std::env::temp_dir().join(format!("ks-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = shot_cg::merge_canvas(&[], 30, 10, &MergeStage { scale: 1.0, fit: 1.0, rect: Rect::new(0.0, 0.0, 30.0, 10.0) },
+            &merge_layout(&[], false, 0.0, 0.0, 0.0), ShotColor::WHITE, ShotColor::WHITE, 0.0).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, shot_cg::encode_png(&img).unwrap()).unwrap();
+        let got = shot_cg::decode_image_file(&png.to_string_lossy(), EDITOR_MAX_IMAGE_PX).expect("png decodes");
+        let size = |i: &objc2_core_graphics::CGImage| (objc2_core_graphics::CGImage::width(Some(i)), objc2_core_graphics::CGImage::height(Some(i)));
+        assert_eq!(size(&got), (30, 10), "native size, not resampled");
+        let fake = dir.join("fake.png");
+        std::fs::write(&fake, b"not a picture at all").unwrap();
+        assert!(shot_cg::decode_image_file(&fake.to_string_lossy(), EDITOR_MAX_IMAGE_PX).is_none());
+        for p in std::env::var("KS_DECODE_PROBE").unwrap_or_default().split(':').filter(|p| !p.is_empty()) {
+            let i = shot_cg::decode_image_file(p, EDITOR_MAX_IMAGE_PX);
+            eprintln!("probe {p}: {:?}", i.as_deref().map(size));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "macos")]

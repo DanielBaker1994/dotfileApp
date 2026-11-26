@@ -9946,9 +9946,19 @@ return Some(true)
                 };
                 clipboard.push(MenuEntry::item(&title, call(Self::files_compress)));
             }
+            // Pictures only (checked by their bytes): open / merge them in
+            // the screenshot editor.
+            let editor = self
+                .ivars()
+                .controller
+                .screenshot_controller()
+                .and_then(|shot| crate::views::screenshot::editor_menu_entry(&shot, &paths));
             let mut entries: Vec<MenuEntry> = Vec::new();
             if many {
                 if let Some(e) = quick_look {
+                    entries.push(e);
+                }
+                if let Some(e) = editor {
                     entries.push(e);
                 }
                 entries.push(MenuEntry::Separator);
@@ -9999,8 +10009,8 @@ return Some(true)
                     })),
                 };
                 entries = crate::views::files::file_context_menu(&first, actions);
-                if let Some(e) = quick_look {
-                    // Quick Look joins the open block, right before Reveal.
+                // Quick Look and the editor join the open block, before Reveal.
+                for e in [quick_look, editor].into_iter().flatten() {
                     let at = entries
                         .iter()
                         .position(|e| matches!(e, MenuEntry::Item { title, .. } if title == "Reveal in Files"))
