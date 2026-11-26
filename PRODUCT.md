@@ -6,19 +6,19 @@
 
 macos
 
-Native macOS app: Swift / AppKit, an accessory (menu-bar) app with no Dock
-icon and no Edit menu. Minimum macOS from `install.conf` `MACOS_MIN`, Apple
-silicon only for the app install. None of the `web` / `ios` / `android`
-values fit; treat platform guidance as macOS desktop (AppKit, Human
-Interface Guidelines for macOS), never web or mobile.
+Native macOS app: Rust + AppKit (objc2), Apple silicon, minimum macOS from
+`install.conf` `MACOS_MIN`. A menu-bar app (status item, no Dock icon unless
+`[app] dock-icon = true`). Linux and Windows were dropped in Nov 2026. None of
+the `web` / `ios` / `android` values fit; treat platform guidance as macOS
+desktop (AppKit, Human Interface Guidelines for macOS), never web or mobile.
 
 ## Users
 
 - **Primary: the owner.** A developer who works all day in a tiling-window
-  setup (AeroSpace, borders, Ghostty, herdr, nvim) and wants
-  notes, files, Jira, Confluence, an AI writing helper, diffing and
-  screenshots a hotkey away. They choose what gets built, based on what they
-  use every day.
+  setup (AeroSpace, borders, Ghostty, herdr, nvim) and wants a command
+  palette, screenshots, recent files and small text tools a hotkey away, with
+  files, Jira, Confluence and an AI writing helper one step further. They
+  choose what gets built, based on what they use every day.
 - **Later: other people on other Macs.** Colleagues or anyone who installs
   the DMG. The notarized DMG, `commands.default.toml` (personal settings
   stripped, Jira off) and the Setup & Health Check window exist for them.
@@ -26,81 +26,102 @@ Interface Guidelines for macOS), never web or mobile.
 
 ## Product Purpose
 
-kitchen-sink puts the tools a keyboard-driven developer reaches for
-all day into one hotkey-summoned window. It sits beside a tiling window
-manager and does not fight it. Success: the owner reaches for it before any
-separate app (browser Jira or Confluence, Beyond Compare, Flameshot,
-Raycast-style launchers, a notes app) because it is faster, never loses
-focus or context, and always does what the keyboard expects.
+kitchen-sink puts the tools a keyboard-driven developer reaches for all day
+behind two hotkeys. Hyper+S opens a palette (tools and AeroSpace workspaces in
+one list); Hyper+X takes a screenshot. Both must feel instant and never move
+the user's focus. Success: the owner reaches for it before any separate app
+(Raycast-style launchers, Flameshot, Finder's Recents, a JSON formatter,
+browser Jira or Confluence) because it is faster, never loses focus or
+context, and always does what the keyboard expects.
 
 ## Positioning
 
-All three of these together; no single one leads:
+In priority order:
 
-1. **One window replaces many.** Files, Jira, Confluence and AI are views
-   of ONE shared window, switched
-   with Ctrl+Tab and header icons. /screenshot, /paths, /filefast and
-   /pane-shot are tool panels next to it.
-2. **Keyboard speed and reliability.** Hyper+N shows or hides it in tens of
-   milliseconds. Esc, edit shortcuts and focus hand-back behave the same way
-   in every view.
-3. **Native to a tiling workflow.** Built around AeroSpace's model (focus
-   files, closed-windows cache, workspace placement), with workspace
-   awareness and unread counts in the Hyper+S switcher.
+1. **Hyper+S and Hyper+X are the product.** They belong to the quick agent, a
+   small resident process (`kitchen-sink quick`) that works with the main app
+   not running and starts at login. A warm press is one socket write; speed
+   and focus behaviour here come before anything else.
+2. **Keyboard speed and reliability.** Esc, edit shortcuts and focus hand-back
+   behave the same way in every panel and view.
+3. **Native to a tiling workflow.** Built around AeroSpace (workspace list
+   with app icons in the palette, workspace placement), never fighting its
+   layout.
+4. **One shared window for the bigger tools.** Files, Jira, Confluence and AI
+   are views of one window (Ctrl+Tab and header icons switch them; Ctrl+B W
+   is the view switcher). It has no hotkey of its own: it is reached from the
+   menu-bar item, AeroSpace workspace 2, or a "reveal" from another tool.
 
 ## Operating Context
 
 - Summoned by global Hyper hotkeys (caps lock via Karabiner) bound in
-  `aerospace.toml` (in `~/.dotfiles/aerospace/`): Hyper+N window, Hyper+S palette, Hyper+X screenshot,
-  Hyper+/ ws-settings. It is used in short bursts between other work, and
-  hidden again on Esc (when enabled), the hotkey, or focus loss.
+  `~/.dotfiles/aerospace/aerospace.toml`: Hyper+S palette, Hyper+X
+  screenshot, Hyper+/ ws-settings. It is used in short bursts between other
+  work and dismissed with Esc or the hotkey.
 - Lives alongside Ghostty plus herdr panes, nvim, Webex, Outlook, and a
   corporate Jira and Confluence (Server/DC or Cloud).
-- Configured through `commands.toml` (hand-edited or through the ws-settings
+- Configured through `commands.toml` plus a personal override in
+  `~/.config/kitchen-sink-local/` (hand-edited or through the ws-settings
   TUI). Themes, presets and header styles switch live.
-- Installed two ways: from the repo checkout (`./ws build`) or
-  from the DMG (everyone else).
+- Installed two ways: from the repo checkout (`./ws build`) or from the DMG
+  (everyone else).
 
 ## Capabilities and Constraints
 
-- Views of the shared window: notes, files (Recent / Arrived), AI, Jira
-  (lists, detail, releases, Jira Config), Confluence search.
-  Tool panels: /screenshot (Flameshot-style, OCR Copy Text), /paths,
-  /filefast, /prettyprint, /health-checks, /pane-shot.
-- Tool panels must never activate the app or bring the shared window with
-  them. AeroSpace decides float or tile; the app never changes the layout.
-- Every text input honors Cmd+C/V/X/A/Z and Ctrl+C/V (`rule.md` rule 1).
-  Right-click menus offer the obvious actions (rule 2).
-- The AI view depends on Apple's on-device model (`fm`). Without it the
-  view is off and everything else still works.
+- **Quick agent (Hyper+S / Hyper+X):** the palette (`[app] palette`: Find
+  Recent Files, Create File, Text to Table, Pretty Print, Find Window PID,
+  then the AeroSpace workspaces); the screenshot overlay and editor (OCR Copy
+  Text, merge several pictures); Find Recent Files (a file browser with the
+  same actions as the main Files view).
+- **Main app:** the shared window's views (Files with Recent / Arrived, Jira
+  lists / detail / releases / config, Confluence search, AI), health checks,
+  setup, pane-shot.
+- Palette panels and tool panels never activate the app or bring the shared
+  window with them. AeroSpace decides float or tile; the app never changes
+  the layout.
+- One feature, every surface: a feature reaches both the quick agent and the
+  main app (and every entry into a tool) through one implementation in
+  `ks-core`, never a copy (`rule.md` rule 7).
+- Every text input honors Cmd+C/V/X/A/Z and Ctrl+C/V (rule 1). Right-click
+  menus in file lists offer the obvious actions (rule 2).
+- The AI view depends on Apple's on-device model (`[ai] fm-bin`). Without it
+  the view is off and everything else still works.
 - Jira and Confluence never query outside the user-typed project or space
   scope.
-- Tests must drive the app or unit-test code (socket `state` / `do:` hooks).
-  Source-grep "tests" don't count.
+- Tests drive the app or unit-test code (socket `state` / `do:` hooks, the
+  headless MCP sandbox, GUI flows in a macOS VM). Source-grep "tests" don't
+  count.
 
 ## Evidence on Hand
 
 - Specs (history): `git show 64bbd4a^:PRD-screenshot.md`, `PRD-settings-hub.md`.
-  Agent and system docs: `AGENTS.md`.
-- Test suites under `Tests/` and `bin/run-tests.sh`, plus UI drivers
-  `bin/ui-test.sh` and `bin/ui-test-focus.py`.
+  Agent and system docs: `AGENTS.md`; test strategy: `TESTING.md`; open
+  items: `BACKLOG.md`.
+- Tests: `cd rust && cargo test` (~700), Python suites under `Tests/` via
+  `bin/run-tests.sh`, GUI flows `Tests/run_flows.py` in the VM (`bin/ks-vm`).
+- Hotkey latency is logged per press (`hotkey: … recv->shown`, `screenshot:
+  overlay shown in … capture landed …` in `logs/YYYY_MM_DD/daemon.log`).
 - App icons and view icons (`[app] *-icon`, `confluence_icon.png`).
 - Missing (do not invent any of these): user counts, testimonials, external
   users, pricing, license terms, public marketing site.
 
 ## Product Principles
 
-1. **Keyboard-first.** Every action has a key, and the mouse is optional.
-   Each view lists its keys (Cmd+/, `[shortcuts]`), and Esc follows one
-   predictable chain: close the innermost thing first.
-2. **Never steal focus.** Showing, hiding and tool panels leave the user
-   where they were: no surprise activation, no workspace jumps, no focus
-   left behind on a workspace the user has left.
-3. **Config over code.** User-facing strings, sizes, paths and switches
-   live in `commands.toml` and are reachable from ws-settings. Validation is
-   the app's own (`config-check`).
-4. **One of everything.** One window, one opener, one codec, one theme path.
-   A new feature joins the shared system instead of growing a parallel one.
-5. **Owner's daily use decides; others get sane defaults.** Build for the
+1. **Instant, or it isn't used.** Hyper+S and Hyper+X are judged in
+   milliseconds from the key press, cold starts included. Prewarm, cache and
+   keep the agent resident; never add work to the press path.
+2. **Keyboard-first.** Every action has a key, and the mouse is optional.
+   Esc follows one predictable chain: close the innermost thing first.
+3. **Never steal focus.** Showing, hiding and tool panels leave the user
+   where they were: no surprise activation, no workspace jumps, no typed keys
+   landing in the wrong app.
+4. **Config over code.** User-facing strings, sizes, paths and switches live
+   in `commands.toml` and are reachable from ws-settings. Validation is the
+   app's own (`config-check`).
+5. **One of everything, less of it.** One implementation per feature shared
+   by every surface, one opener, one codec, one theme path. Delete before
+   adding; a new feature joins the shared system instead of growing a
+   parallel one.
+6. **Owner's daily use decides; others get sane defaults.** Build for the
    owner's real workflow, and keep the DMG defaults and first run working
    for someone who has none of the owner's setup.
