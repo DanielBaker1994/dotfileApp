@@ -146,6 +146,10 @@ bundle_resources() {
     find "$res" -name '.DS_Store' -delete
 }
 
+# The swap stops the quick agent too; remember it so it comes back (below)
+# and the next Hyper+S / Hyper+X is not a cold start.
+QUICK_WAS_UP=0
+pgrep -f "$APP/Contents/MacOS/$APP_NAME quick" >/dev/null 2>&1 && QUICK_WAS_UP=1
 [ "$DIST" = 1 ] || pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 mv "$BUILD_TMP" "$BIN"
 chmod 755 "$BIN"
@@ -175,6 +179,10 @@ clear_cstemp
 [ "$DIST" = 1 ] && exit 0
 
 "$DIR/grant-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true
+
+# Restart the quick agent the swap stopped (LaunchServices, for TCC; no start
+# action, so nothing appears on screen).
+[ "$QUICK_WAS_UP" = 1 ] && open -n -g "$APP" --args quick >/dev/null 2>&1
 
 announce_logs
 

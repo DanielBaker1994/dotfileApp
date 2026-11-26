@@ -18,16 +18,54 @@ if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"
 fi
 
+# WS_DEBUG=1 logs the launch steps to logs/YYYY_MM_DD/launch.log
+LOG(){
+  if [ "${WS_DEBUG:-}" = "1" ]; then
+    _log_date=$(date '+%Y_%m_%d')
+    _log_dir="$ROOT/logs/$_log_date"
+    mkdir -p "$_log_dir" 2>/dev/null || true
+    echo "$(date '+%H:%M:%S') $*" >>"$_log_dir/launch.log"
+  fi
+}
+
+# Build-if-stale — ONE build script (bin/build-app.sh) shared with
+# INSTALL.sh. Only when the binary is missing, in build-only mode, or when
+# no daemon answers: a hotkey press on a running daemon never pays for it
+# (`./ws build` rebuilds + relaunches during development). The daemon ships
+# as a real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID,
+# stable across rebuilds; build-app.sh re-signs + re-grants after every
+# build. A failed build keeps running the previous binary (a hotkey press
+# must not go dead), except in build-only mode where the failure is the
+# answer.
+build() {
+    [ -n "${WS_BIN:-}" ] && return 0
+    [ "$BUNDLED" = 1 ] && return 0
+    if ! "$DIR/build-app.sh"; then
+        [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
+    fi
+}
+
 # Hyper+S (palette) and Hyper+X (screenshot) belong to the QUICK AGENT
 # (`kitchen-sink quick`, its own socket $TMPDIR/ks-quick.sock): a small
 # resident process of the same signed bundle that works with the main app not
-# running. On a running agent a press is one socket write — no lock, no
-# aerospace query. A cold start falls through to the launch paths below.
+# running. On a running agent a press is one socket write. With no agent
+# answering, start it through LaunchServices (TCC) with the press as its first
+# action — no lock (the agent's own lock makes a second `open -n` hand its
+# action over and exit), no aerospace query. The main app is not involved.
 if [ "${WS_BUILD_ONLY:-}" != "1" ]; then
-    if [ -z "$MODE" ] && "$BIN" quick-toggle >/dev/null 2>&1; then
-        exit 0
-    fi
-    if [ "$MODE" = "screenshot" ] && "$BIN" quick-screenshot "${@:2}" >/dev/null 2>&1; then
+    case "$MODE" in
+    "")
+        "$BIN" quick-toggle >/dev/null 2>&1 && exit 0
+        start=show ;;
+    screenshot)
+        "$BIN" quick-screenshot "${@:2}" >/dev/null 2>&1 && exit 0
+        start=screenshot ;;
+    *) start="" ;;
+    esac
+    if [ -n "$start" ]; then
+        [ -x "$BIN" ] || build
+        LOG "quick agent not answering -> starting it ($start)"
+        open -n -g "$APP" --args quick "$start" >/dev/null 2>&1 || LOG "LaunchServices launch FAILED — TCC grants will be broken"
         exit 0
     fi
 fi
@@ -63,22 +101,6 @@ if [ -n "$WID" ]; then
     echo "$WID $APID" >"$FOCUS_FILE"
 fi
 
-# Build-if-stale — ONE build script (bin/build-app.sh) shared with
-# INSTALL.sh. Only when the binary is missing, in build-only mode, or when
-# no daemon answers: a hotkey press on a running daemon never pays for it
-# (`./ws build` rebuilds + relaunches during development). The daemon ships
-# as a real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID,
-# stable across rebuilds; build-app.sh re-signs + re-grants after every
-# build. A failed build keeps running the previous binary (a hotkey press
-# must not go dead), except in build-only mode where the failure is the
-# answer.
-build() {
-    [ -n "${WS_BIN:-}" ] && return 0
-    [ "$BUNDLED" = 1 ] && return 0
-    if ! "$DIR/build-app.sh"; then
-        [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
-    fi
-}
 if [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ]; then
     build
 fi
@@ -88,26 +110,6 @@ fi
 if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
     exit 0
 fi
-
-# WS_DEBUG=1 logs the launch steps to logs/YYYY_MM_DD/launch.log
-LOG(){
-  if [ "${WS_DEBUG:-}" = "1" ]; then
-    _log_date=$(date '+%Y_%m_%d')
-    _log_dir="$ROOT/logs/$_log_date"
-    mkdir -p "$_log_dir" 2>/dev/null || true
-    echo "$(date '+%H:%M:%S') $*" >>"$_log_dir/launch.log"
-  fi
-}
-
-case "$MODE" in screenshot)
-    # /screenshot (Hyper+X) with no quick agent answering (the fast path at
-    # the top already tried it): start the agent through LaunchServices with
-    # the capture as its first action. The main app is not involved.
-    build
-    LOG "quick agent not answering -> starting it (screenshot)"
-    open -n -g "$APP" --args quick screenshot >/dev/null 2>&1 || LOG "LaunchServices launch FAILED"
-    exit 0
-esac
 
 # `kitchen_sink.sh quick [show|screenshot]`: just (re)start the quick agent.
 case "$MODE" in quick)
@@ -156,14 +158,6 @@ case "$MODE" in window|jira|files|confluence|ai)
     exit 0
 esac
 
-# Hyper+S with no quick agent answering (the fast path at the top already
-# tried it): start the agent with "show" so the palette appears immediately
-# (no retry loop needed). Same LaunchServices rule as above, so a cold start
-# from Hyper+S gets the bundle's TCC grants. The main app is not involved.
-if ! "$BIN" quick-toggle >/dev/null 2>&1; then
-    build
-    LOG "quick agent not answering -> starting it (show)"
-    if ! open -n -g "$APP" --args quick show >/dev/null 2>&1; then
-        LOG "LaunchServices launch FAILED — TCC grants will be broken"
-    fi
-fi
+echo "kitchen_sink.sh: unknown mode '$MODE'" >&2
+LOG "unknown mode '$MODE'"
+exit 2

@@ -14,9 +14,11 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
-/// (day bucket, open file). Opening lazily and only on a day change keeps the
-/// hot path free of `date` subprocesses while still rolling at midnight.
-static SINK: OnceLock<Mutex<Option<(u64, File)>>> = OnceLock::new();
+/// (day bucket, open file — `None` when it could not be opened). Opening
+/// lazily and only on a day change keeps the hot path free of `date`
+/// subprocesses while still rolling at midnight; a failed open is not retried
+/// until the next day, so it never costs a fork per line.
+static SINK: OnceLock<Mutex<Option<(u64, Option<File>)>>> = OnceLock::new();
 
 fn day_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -36,10 +38,15 @@ fn append_to_file(line: &str) {
     let bucket = day_bucket();
     if guard.as_ref().map(|(b, _)| *b) != Some(bucket) {
         let path = crate::app::paths::Paths::from_env().log_path("daemon");
+        // Nothing else is guaranteed to have made today's folder (the quick
+        // agent can be the first writer of the day).
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let file = OpenOptions::new().create(true).append(true).open(&path).ok();
-        *guard = file.map(|f| (bucket, f));
+        *guard = Some((bucket, file));
     }
-    if let Some((_, file)) = guard.as_mut() {
+    if let Some((_, Some(file))) = guard.as_mut() {
         let _ = writeln!(file, "{line}");
     }
 }

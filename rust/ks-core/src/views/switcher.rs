@@ -1223,6 +1223,47 @@ pub fn gather_workspaces() -> Vec<WorkspaceRow> {
     gather_workspaces_with(&|args| crate::app::hotkey::AeroCall::call(&ipc, args))
 }
 
+/// Last `gather_workspaces()` result, shared by every palette host so a press
+/// paints at once (the `aerospace` CLI can stall for seconds).
+static WORKSPACE_CACHE: std::sync::Mutex<Vec<WorkspaceRow>> = std::sync::Mutex::new(Vec::new());
+static WORKSPACE_GATHERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The cached workspace rows (empty before the first refresh).
+pub fn cached_workspaces() -> Vec<WorkspaceRow> {
+    WORKSPACE_CACHE.lock().map(|w| w.clone()).unwrap_or_default()
+}
+
+/// Store `fresh` as the cache; `Some(fresh)` only when it differs from what
+/// was cached (the open palette needs no redraw otherwise).
+fn store_workspaces(fresh: Vec<WorkspaceRow>) -> Option<Vec<WorkspaceRow>> {
+    let mut c = WORKSPACE_CACHE.lock().ok()?;
+    if *c == fresh {
+        return None;
+    }
+    *c = fresh.clone();
+    Some(fresh)
+}
+
+/// Refresh the cache off-main and call `changed` (on that thread) with the
+/// new rows, only when they differ from the cache. One refresh at a time: a
+/// press while one runs adds nothing — the running one updates the palette.
+pub fn refresh_workspaces_in_background(changed: impl FnOnce(Vec<WorkspaceRow>) + Send + 'static) {
+    use std::sync::atomic::Ordering;
+    if WORKSPACE_GATHERING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("ks-workspaces".into()).spawn(move || {
+        let fresh = gather_workspaces();
+        WORKSPACE_GATHERING.store(false, Ordering::Release);
+        if let Some(rows) = store_workspaces(fresh) {
+            changed(rows);
+        }
+    });
+    if spawned.is_err() {
+        WORKSPACE_GATHERING.store(false, Ordering::Release);
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
@@ -1565,10 +1606,9 @@ mod macos {
                 // A fresh model means a fresh query — empty the field too, or
                 // the stale text from the last open lingers over the
                 // unfiltered rows until the next keystroke (the view switcher
-                // clears on every show; parity).
+                // clears on every show; parity). `present` hands the model to
+                // the drawn list and sizes the panel once.
                 h.ivars().search.setStringValue(&NSString::from_str(""));
-                *h.model_mut() = self.model.clone();
-                h.rebuild();
             }
         }
 
@@ -1683,8 +1723,10 @@ mod macos {
                 self.build_macos(mtm);
             }
             if let Some(h) = &self.handler {
+                // Rows only: the frame is set once below (a `rebuild` here
+                // resized + force-redrew the still-hidden panel).
                 *h.model_mut() = self.model.clone();
-                h.rebuild();
+                h.ivars().rows_view.set_count(self.model.rows().len(), self.model.selection);
             }
             if let Some(panel) = &self.window {
                 let count = self.model.rows().len();

@@ -336,7 +336,9 @@ mod appkit {
     use crate::views::files_view::FilesEvent;
     use crate::views::paths::{PathsEvent, PathsWindow, ReturnAction as PathsReturn};
     use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
-    use crate::views::switcher::{gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, WorkspaceRow};
+    use crate::views::switcher::{
+        cached_workspaces, refresh_workspaces_in_background, PaletteAction, PalettePanel, SwitchFrame, WorkspaceRow,
+    };
     use crate::views::tools::{ToolKind, ToolPanel};
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent};
@@ -348,9 +350,6 @@ mod appkit {
     fn log(msg: &str) {
         crate::app::logging::ws_log(&format!("quick: {msg}"));
     }
-
-    /// Last `gather_workspaces()` result so the palette opens instantly.
-    static WORKSPACE_CACHE: Mutex<Vec<WorkspaceRow>> = Mutex::new(Vec::new());
 
     thread_local! {
         static QUICK: RefCell<Option<Rc<QuickUi>>> = const { RefCell::new(None) };
@@ -559,15 +558,8 @@ mod appkit {
             let mut panel = self.palette.borrow_mut().take().unwrap_or_else(PalettePanel::new);
             // `aerospace` can stall for seconds: paint the cached rows and
             // refresh off-main.
-            let workspaces = WORKSPACE_CACHE.lock().map(|w| w.clone()).unwrap_or_default();
-            panel.set_rows(palette_rows(&text), workspaces);
-            std::thread::spawn(|| {
-                let fresh = gather_workspaces();
-                if let Ok(mut c) = WORKSPACE_CACHE.lock() {
-                    *c = fresh.clone();
-                }
-                defer(move |ui| ui.refresh_palette_workspaces(fresh));
-            });
+            panel.set_rows(palette_rows(&text), cached_workspaces());
+            refresh_workspaces_in_background(|fresh| defer(move |ui| ui.refresh_palette_workspaces(fresh)));
             panel.set_callbacks(
                 Box::new(|action: PaletteAction| {
                     // Runs before the click path orders the palette out.

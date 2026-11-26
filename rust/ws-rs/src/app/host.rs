@@ -3267,9 +3267,6 @@ mod daemon_ui {
         static FILES_LAST_CLICK: std::cell::RefCell<Option<(String, usize)>> = const { std::cell::RefCell::new(None) };
     }
 
-    /// Last `gather_workspaces()` result, so the palette opens instantly.
-    static WORKSPACE_CACHE: std::sync::Mutex<Vec<crate::views::switcher::WorkspaceRow>> =
-        std::sync::Mutex::new(Vec::new());
 
     thread_local! {
         /// The daemon UI, for main-thread hops from worker threads.
@@ -4314,12 +4311,9 @@ mod daemon_ui {
                 .unwrap_or_else(PalettePanel::new);
             // The `aerospace` CLI can stall for seconds, so never wait on it
             // here: paint with the last known rows and refresh off-main.
-            let workspaces = WORKSPACE_CACHE.lock().unwrap().clone();
-            panel.set_rows(controller.hyper_palette_commands(), workspaces);
-            std::thread::spawn(|| {
-                let fresh = gather_workspaces();
-                *WORKSPACE_CACHE.lock().unwrap() = fresh.clone();
-                on_ui(move |ui| ui.refresh_palette_workspaces(fresh));
+            panel.set_rows(controller.hyper_palette_commands(), crate::views::switcher::cached_workspaces());
+            crate::views::switcher::refresh_workspaces_in_background(|fresh| {
+                on_ui(move |ui| ui.refresh_palette_workspaces(fresh))
             });
             panel.set_callbacks(
                 Box::new({
