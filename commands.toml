@@ -129,6 +129,8 @@ width = 640
 [screenshot]
 
 history = 30
+# Every Hyper+X capture is kept here (Recents); pinned as "Screenshots" in Files.
+history-dir = "~/.cache/kitchen-sink/screenshots"
 enabled = true
 in-palette = false
 label = "Screenshot"
@@ -242,6 +244,9 @@ font = "SF Mono"
 resize = true
 
 favorites = "~/notes, ~/Desktop, /tmp"
+# The Screenshots pin ([screenshot] history-dir) at the top of Pinned.
+pin-screenshots = true
+screenshots-pin-label = "Screenshots"
 
 start = "recent"
 

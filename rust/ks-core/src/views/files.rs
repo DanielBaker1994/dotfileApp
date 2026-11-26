@@ -1699,6 +1699,10 @@ pub struct FileBrowser {
     /// `[files] favorites` (static) + the pinned list (`files-favorites.json`).
     pub static_favorites: Vec<String>,
     pub pinned_favorites: Vec<String>,
+    /// The built-in "Screenshots" pin: (folder, label). `[files]
+    /// pin-screenshots` (default on) + `screenshots-pin-label`; the folder is
+    /// `[screenshot] history-dir`, where every Hyper+X capture lands.
+    pub screenshots_pin: Option<(String, String)>,
     pub favorites_file: String,
     /// `[files] recent-scope` != home (`recentEverywhere`).
     pub recent_everywhere: bool,
@@ -1734,6 +1738,7 @@ impl FileBrowser {
             view: None,
             static_favorites: Vec::new(),
             pinned_favorites: Vec::new(),
+            screenshots_pin: None,
             favorites_file: favorites_file_path(),
             recent_everywhere: true,
             status_note: None,
@@ -1755,6 +1760,20 @@ impl FileBrowser {
             .get("favorites")
             .map(|f| f.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
             .unwrap_or_default();
+        self.screenshots_pin = section
+            .get("pin-screenshots")
+            .map_or(true, |v| !matches!(v.trim().to_lowercase().as_str(), "false" | "off" | "no" | "0"))
+            .then(|| {
+                let label = section
+                    .get("screenshots-pin-label")
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or_else(|| "Screenshots".to_string());
+                let dir = standardize(&crate::views::screenshot::screenshots_dir());
+                // Made now so the pin is there before the first capture.
+                let _ = std::fs::create_dir_all(&dir);
+                (dir, label)
+            });
         self.recent_everywhere = section
             .get("recent-scope")
             .map_or(true, |s| s.to_lowercase() != "home");
@@ -2004,9 +2023,22 @@ impl FileBrowser {
             Some(v) => Some(v),
             None => places.iter().position(|p| p.path == self.cwd).map(|k| 2 + k),
         };
-        let pinned = self
+        // The "Screenshots" pin first (camera icon, its own label), then the
+        // favorites (a favorite on the same folder is not listed twice).
+        let shots = self.screenshots_pin.clone().filter(|(d, _)| Path::new(d).is_dir());
+        let shots_row = shots.as_ref().map(|(d, label)| SidebarPin {
+            label: label.clone(),
+            tip: format!("Open {} (Hyper+X captures)", display_path(d)),
+            key: d.clone(),
+            icon: "camera".into(),
+            section: "Pinned".into(),
+            meta: String::new(),
+            ..Default::default()
+        });
+        let favorites = self
             .merged_favorites()
             .into_iter()
+            .filter(|p| shots.as_ref().map_or(true, |(d, _)| d != p))
             .map(|p| SidebarPin {
                 label: display_path(&p),
                 tip: format!("Open {} in the file browser", display_path(&p)),
@@ -2015,8 +2047,8 @@ impl FileBrowser {
                 section: "Pinned".into(),
                 meta: String::new(),
                 ..Default::default()
-            })
-            .collect();
+            });
+        let pinned = shots_row.into_iter().chain(favorites).collect();
         SidebarModel {
             section_title: "Places".into(),
             rows,
@@ -3640,6 +3672,29 @@ mod tests {
         assert!(row.is_some(), "the renamed row stays on the Recent page");
         assert_eq!(row.unwrap().name, "b.txt");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn screenshots_pin_leads_the_pinned_section() {
+        let dir = std::env::temp_dir().join(format!("ks-shots-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let mut b = FileBrowser::new("/tmp");
+        b.static_favorites = vec![d.clone(), "/tmp".to_string()];
+        b.screenshots_pin = Some((d.clone(), "Screenshots".to_string()));
+        let m = b.sidebar_model();
+        let first = &m.pinned[0];
+        assert_eq!((first.label.as_str(), first.icon.as_str(), first.key.as_str()), ("Screenshots", "camera", d.as_str()));
+        assert_eq!(m.pinned.iter().filter(|p| p.key == d).count(), 1, "a favorite on the same folder is not repeated");
+        let mut e = std::collections::HashMap::new();
+        e.insert("pin-screenshots".to_string(), "false".to_string());
+        b.configure(&e);
+        assert!(b.screenshots_pin.is_none(), "pin-screenshots = false turns it off");
+        e.insert("pin-screenshots".to_string(), "true".to_string());
+        e.insert("screenshots-pin-label".to_string(), "Captures".to_string());
+        b.configure(&e);
+        assert_eq!(b.screenshots_pin.as_ref().map(|p| p.1.as_str()), Some("Captures"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

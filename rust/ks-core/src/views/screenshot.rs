@@ -453,6 +453,9 @@ pub struct ScreenshotConfig {
     pub jpeg_quality: i64,
     pub save_after_copy: bool,
     pub history: i64,
+    /// Where every capture is kept for Recents (`history-dir`, `~` allowed);
+    /// the Files / Find Recent Files sidebar pins it as "Screenshots".
+    pub history_dir: String,
     pub copy_path_after_save: bool,
     pub preview: bool,
     pub save_last_region: bool,
@@ -506,6 +509,7 @@ impl Default for ScreenshotConfig {
             jpeg_quality: 75,
             save_after_copy: false,
             history: 20,
+            history_dir: DEFAULT_HISTORY_DIR.to_string(),
             copy_path_after_save: false,
             preview: true,
             save_last_region: false,
@@ -637,6 +641,7 @@ impl ScreenshotConfig {
             "copy".to_string()
         };
         c.history = i("history", 20, 0, 500);
+        c.history_dir = s("history-dir", DEFAULT_HISTORY_DIR);
         c.save_path = s("save-path", "~/Desktop");
         c.save_path_fixed = b("save-path-fixed", false);
         c.filename_pattern = s("filename-pattern", "%F_%H-%M");
@@ -1503,6 +1508,16 @@ fn now_stamp() -> String {
 // ---------------------------------------------------------------------------
 
 pub const PIN_MARGIN: f64 = 6.0;
+
+/// `[screenshot] history-dir` default: the Recents folder.
+pub const DEFAULT_HISTORY_DIR: &str = "~/.cache/kitchen-sink/screenshots";
+
+/// The folder Hyper+X captures are kept in (`[screenshot] history-dir`),
+/// absolute. What the Files sidebar's "Screenshots" pin opens.
+pub fn screenshots_dir() -> String {
+    let d = ScreenshotConfig::load().history_dir;
+    expand_tilde(if d.trim().is_empty() { DEFAULT_HISTORY_DIR } else { d.trim() })
+}
 
 /// Longest side (pixels) a picture opened in the editor is decoded at; a
 /// 48 MP photo (8064 px) still comes in at native size.
@@ -7880,6 +7895,11 @@ impl ScreenshotController {
     }
 
     pub fn set_config(&mut self, cfg: ScreenshotConfig) {
+        // Unit tests keep their temp history dir (see `new`).
+        #[cfg(not(test))]
+        if !cfg.history_dir.trim().is_empty() {
+            self.history = ShotHistory::new(expand_tilde(cfg.history_dir.trim()));
+        }
         self.config = cfg;
     }
 
