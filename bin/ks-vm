@@ -42,6 +42,9 @@ say() { printf 'ks-vm: %s\n' "$*"; }
 [ -x "$TART" ] || die "tart not found (expected $HOME/.local/bin/tart)"
 command -v sshpass >/dev/null || die "sshpass not found (brew install sshpass)"
 
+# The system ssh: macOS Local Network privacy blocks a Homebrew openssh from the
+# VM's bridge100 subnet ("No route to host") while /usr/bin/ssh is allowed.
+SSH=${KS_VM_SSH:-/usr/bin/ssh}
 KEY=$STATE/id_ed25519   # a key just for the VM: password logins get rate-limited by sshd
 BASE_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
 PASS_OPTS=("${BASE_OPTS[@]}" -o PubkeyAuthentication=no -o PreferredAuthentications=password)
@@ -53,15 +56,15 @@ vm_ip()      { "$TART" ip "$VM" --wait "${1:-5}" 2>/dev/null; }
 
 gssh() {
     local ip; ip=$(vm_ip) || die "VM not running (bin/ks-vm up)"
-    ssh "${SSH_OPTS[@]}" "$GUSER@$ip" "$@"
+    "$SSH" "${SSH_OPTS[@]}" "$GUSER@$ip" "$@"
 }
 
 # Install $KEY in the guest (password login, once per VM).
 ensure_key() {
     local ip=$1
     [ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C ks-vm -f "$KEY"
-    ssh "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null && return 0
-    sshpass -p "$GPASS" ssh "${PASS_OPTS[@]}" "$GUSER@$ip" \
+    "$SSH" "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null && return 0
+    sshpass -p "$GPASS" "$SSH" "${PASS_OPTS[@]}" "$GUSER@$ip" \
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < "$KEY.pub"
 }
 
@@ -69,7 +72,7 @@ grsync() {   # grsync SRC… DEST   (DEST uses :path for the guest)
     local ip; ip=$(vm_ip) || die "VM not running"
     local args=() a
     for a in "$@"; do args+=("${a/#:/$GUSER@$ip:}"); done
-    rsync -a -e "ssh ${SSH_OPTS[*]}" "${args[@]}"
+    rsync -a -e "$SSH ${SSH_OPTS[*]}" "${args[@]}"
 }
 
 cmd_up() {
@@ -82,7 +85,7 @@ cmd_up() {
     local ip i
     ip=$(vm_ip 180) || die "VM got no IP within 180 s (see $VSTATE/run.log)"
     for i in $(seq 1 60); do
-        if ensure_key "$ip" 2>/dev/null && ssh "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null; then
+        if ensure_key "$ip" 2>/dev/null && "$SSH" "${SSH_OPTS[@]}" "$GUSER@$ip" true 2>/dev/null; then
             say "up at $ip"
             return 0
         fi

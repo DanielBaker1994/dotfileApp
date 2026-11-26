@@ -35,6 +35,13 @@ palette-first = "paths, filefast, text-table, prettyprint"
 # workspaces + their apps — one list. Empty = every in-palette command.
 palette = "paths, filefast, text-table, prettyprint, find-window"
 switcher-width = 760
+# The shared window (Files / Jira / Confluence / AI). It opens at this share of
+# the screen's visible area; set shared-width / shared-height (points) for a
+# fixed size instead. It never goes under the minimum (drag, resize keys, a
+# re-show): below 900x560 the views clip and overlap.
+shared-screen-fraction = 0.85
+shared-min-width = 900
+shared-min-height = 560
 detail-name = "jira-detail"
 
 # Log paths: all logs now live in logs/YYYY_MM_DD/*.log (see pylib/log_hub.py)

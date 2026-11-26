@@ -148,6 +148,21 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
+/// The shared window's (minimum, default) content sizes for a screen whose
+/// visible area is `screen` (w, h). The minimum never exceeds the screen; the
+/// default is `shared-width`/`shared-height` when set, else
+/// `shared_screen_fraction` of the screen, never below the minimum and never
+/// past the screen.
+pub fn shared_window_sizes(s: &AppSettings, screen: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+    let (sw, sh) = screen;
+    let min = (s.shared_min_width.min(sw), s.shared_min_height.min(sh));
+    let pick = |set: f64, side: f64, lo: f64| {
+        let want = if set > 0.0 { set } else { (side * s.shared_screen_fraction).round() };
+        want.max(lo).min(side)
+    };
+    (min, (pick(s.shared_width, sw, min.0), pick(s.shared_height, sh, min.1)))
+}
+
 // ---------------------------------------------------------------------------
 // AppSettings
 // ---------------------------------------------------------------------------
@@ -155,8 +170,19 @@ fn home_dir() -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub shared_window: bool,
+    /// `[app] shared-width` / `shared-height`: the shared window's default
+    /// content size in points. 0 (unset) = `shared_screen_fraction` of the
+    /// screen's visible area.
     pub shared_width: f64,
     pub shared_height: f64,
+    /// `[app] shared-min-width` / `shared-min-height`: the smallest the
+    /// shared window may be (drag, resize keys, a re-show); the views lay out
+    /// for this much room and are clipped below it.
+    pub shared_min_width: f64,
+    pub shared_min_height: f64,
+    /// `[app] shared-screen-fraction`: the default size as a share of the
+    /// screen's visible area when no `shared-width`/`shared-height` is set.
+    pub shared_screen_fraction: f64,
     pub palette_first: Vec<String>,
     /// `[app] palette`: the Hyper+S palette lists exactly these command ids,
     /// in this order. Empty = every `in-palette` command.
@@ -191,8 +217,11 @@ impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
             shared_window: true,
-            shared_width: 1100.0,
-            shared_height: 640.0,
+            shared_width: 0.0,
+            shared_height: 0.0,
+            shared_min_width: 900.0,
+            shared_min_height: 560.0,
+            shared_screen_fraction: 0.85,
             palette_first: vec![
                 "paths".to_string(),
                 "filefast".to_string(),
@@ -317,6 +346,15 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
         if v >= 300.0 {
             settings.shared_height = v;
         }
+    }
+    if let Some(v) = strv("shared-min-width").and_then(|v| v.parse::<f64>().ok()) {
+        settings.shared_min_width = v.clamp(400.0, 4000.0);
+    }
+    if let Some(v) = strv("shared-min-height").and_then(|v| v.parse::<f64>().ok()) {
+        settings.shared_min_height = v.clamp(300.0, 4000.0);
+    }
+    if let Some(v) = strv("shared-screen-fraction").and_then(|v| v.parse::<f64>().ok()) {
+        settings.shared_screen_fraction = v.clamp(0.3, 1.0);
     }
     // A repeated id would list its command twice: keep the first.
     let id_list = |v: &str| -> Vec<String> {
@@ -698,6 +736,9 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("height", 60.0, 8000.0),
     ("shared-width", 400.0, 8000.0),
     ("shared-height", 300.0, 8000.0),
+    ("shared-min-width", 400.0, 4000.0),
+    ("shared-min-height", 300.0, 4000.0),
+    ("shared-screen-fraction", 0.3, 1.0),
     ("margin-top", 0.0, 400.0),
     ("margin-top-builtin", 0.0, 400.0),
     ("margin-bottom", 0.0, 400.0),
@@ -1571,11 +1612,45 @@ mod tests {
     }
 
     #[test]
+    fn shared_window_sizes_screen_default_and_min() {
+        let mut s = AppSettings::default();
+        // Unset width/height: 85% of a laptop screen, min 900x560.
+        assert_eq!(
+            shared_window_sizes(&s, (1512.0, 944.0)),
+            ((900.0, 560.0), (1285.0, 802.0))
+        );
+        // A small screen: the min fits the screen, the default never goes under it.
+        assert_eq!(
+            shared_window_sizes(&s, (1024.0, 743.0)),
+            ((900.0, 560.0), (900.0, 632.0))
+        );
+        // Tiny screen: the min shrinks to the screen.
+        assert_eq!(shared_window_sizes(&s, (800.0, 500.0)), ((800.0, 500.0), (800.0, 500.0)));
+        // An explicit size wins, floored at the min and capped at the screen.
+        s.shared_width = 700.0;
+        s.shared_height = 5000.0;
+        assert_eq!(
+            shared_window_sizes(&s, (1512.0, 944.0)),
+            ((900.0, 560.0), (900.0, 944.0))
+        );
+        let v = vars(&[
+            ("shared-min-width", "100"),
+            ("shared-min-height", "700"),
+            ("shared-screen-fraction", "2"),
+        ]);
+        parse_app_config(&mut s, &v);
+        assert_eq!((s.shared_min_width, s.shared_min_height), (400.0, 700.0));
+        assert_eq!(s.shared_screen_fraction, 1.0);
+    }
+
+    #[test]
     fn defaults_match_swift() {
         let s = AppSettings::default();
         assert!(s.shared_window);
-        assert_eq!(s.shared_width, 1100.0);
-        assert_eq!(s.shared_height, 640.0);
+        assert_eq!(s.shared_width, 0.0);
+        assert_eq!(s.shared_height, 0.0);
+        assert_eq!((s.shared_min_width, s.shared_min_height), (900.0, 560.0));
+        assert_eq!(s.shared_screen_fraction, 0.85);
         assert_eq!(s.shell, "/opt/homebrew/bin/bash");
         assert_eq!(s.terminal_font, "Hack Nerd Font");
         assert_eq!(s.jira_icon_name, "jira_icon.png");
@@ -1621,7 +1696,7 @@ mod tests {
         assert_eq!(s.shell, "/bin/zsh");
         assert_eq!(s.terminal_font, "Fira Code");
         assert_eq!(s.ai_icon_name, "ai.png");
-        assert_eq!(s.shared_width, 1100.0);
+        assert_eq!(s.shared_width, 0.0);
         assert_eq!(s.palette_first, vec!["paths", "filefast"]);
         assert_eq!(s.palette, vec!["text-table", "paths"]);
         assert_eq!(s.esc_close, 2);

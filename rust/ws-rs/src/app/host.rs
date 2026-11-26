@@ -112,6 +112,9 @@ pub enum UiCommand {
     ToolClose(String),
     /// `do:reset-size` — restore the shared window's default size.
     ResetSize,
+    /// `do:window-size:W:H` — set the shared window's content size as a
+    /// user drag would (same minimum, same screen clamp, top edge kept).
+    SetSize(f64, f64),
     /// Show a toast pill (text, SF Symbol) — socket verbs run off the main
     /// thread, so they queue it here.
     Toast(String, &'static str),
@@ -660,6 +663,7 @@ fn needs_window(action: &str) -> bool {
         || action == "switcher"
         || action == "jira-jump"
         || action == "reset-size"
+        || action.starts_with("window-size:")
         || action.starts_with("tool:")
         || action.starts_with("board:")
         || action.starts_with("input:")
@@ -2180,6 +2184,16 @@ return Some(None)
                 let inner = self.inner.lock().unwrap();
                 inner.ui_push(UiCommand::ResetSize);
                 None
+            }
+            a if a.starts_with("window-size:") => {
+                let mut it = a["window-size:".len()..].split(':').map(|p| p.trim().parse::<f64>());
+                match (it.next(), it.next(), it.next()) {
+                    (Some(Ok(w)), Some(Ok(h)), None) if w > 0.0 && h > 0.0 => {
+                        self.inner.lock().unwrap().ui_push(UiCommand::SetSize(w, h));
+                        None
+                    }
+                    _ => Some(json!({ "error": "window-size:W:H (points, > 0)" })),
+                }
             }
             a if a.starts_with("board:") => {
                 match parse_board(a) {
@@ -3871,6 +3885,9 @@ mod daemon_ui {
                         UiCommand::ToolClose(name) => self.close_tool(&name),
                         UiCommand::ResetSize => {
                             self.route_reset_size();
+                        }
+                        UiCommand::SetSize(w, h) => {
+                            self.route_set_size(w, h);
                         }
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
                         UiCommand::JiraJump => self.show_sidebar_jump(),
@@ -10670,11 +10687,19 @@ return Some(true)
                 return false;
             };
             let mut f = st.window.frame();
+            let min = st.window.frameRectForContentRect(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                st.window.contentMinSize(),
+            ));
             match dir {
-                popup::Direction::Left => f.size.width = (f.size.width - 20.0).max(120.0),
+                popup::Direction::Left => {
+                    f.size.width = (f.size.width - 20.0).max(min.size.width)
+                }
                 popup::Direction::Right => f.size.width += 20.0,
                 popup::Direction::Up => f.size.height += 20.0,
-                popup::Direction::Down => f.size.height = (f.size.height - 20.0).max(140.0),
+                popup::Direction::Down => {
+                    f.size.height = (f.size.height - 20.0).max(min.size.height)
+                }
             }
             clamp_to_screen(&mut f);
             st.window.setFrame_display(f, true);
@@ -10693,9 +10718,15 @@ return Some(true)
                 return false;
             };
             let mut f = st.window.frame();
+            let min = st.window.frameRectForContentRect(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                st.window.contentMinSize(),
+            ));
             let delta = 80.0 * sign as f64;
-            f.size.width = (f.size.width + delta).max(120.0);
-            f.size.height = (f.size.height + delta).max(140.0);
+            let top = f.origin.y + f.size.height;
+            f.size.width = (f.size.width + delta).max(min.size.width);
+            f.size.height = (f.size.height + delta).max(min.size.height);
+            f.origin.y = top - f.size.height;
             clamp_to_screen(&mut f);
             st.window.setFrame_display(f, true);
             drop(state);
@@ -10713,11 +10744,40 @@ return Some(true)
             let Some(st) = state.as_mut() else {
                 return false;
             };
-            st.window.setContentSize(NSSize::new(
-                settings.shared_width.max(420.0),
-                settings.shared_height.max(260.0),
-            ));
+            let (min, size) = shared_sizes(&settings);
+            st.window.setContentMinSize(min);
+            let old = st.window.frame();
+            st.window.setContentSize(size);
             let mut f = st.window.frame();
+            // Keep the top edge where it was (setContentSize keeps the bottom).
+            f.origin.y = old.origin.y + old.size.height - f.size.height;
+            clamp_to_screen(&mut f);
+            st.window.setFrame_display(f, true);
+            drop(state);
+            self.sync_window_frame();
+            true
+        }
+
+        /// `do:window-size:W:H` — what a user drag to W x H (content) ends
+        /// as: never below the window's content minimum, kept on screen,
+        /// top edge fixed.
+        fn route_set_size(&self, w: f64, h: f64) -> bool {
+            let Some(_mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else {
+                return false;
+            };
+            let min = st.window.contentMinSize();
+            let old = st.window.frame();
+            let content = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(w.max(min.width), h.max(min.height)),
+            );
+            let mut f = st.window.frameRectForContentRect(content);
+            f.origin.x = old.origin.x;
+            f.origin.y = old.origin.y + old.size.height - f.size.height;
             clamp_to_screen(&mut f);
             st.window.setFrame_display(f, true);
             drop(state);
@@ -10984,6 +11044,9 @@ return Some(true)
             let (rect, title, wid, front_pid) = {
                 let mut state = self.ivars().state.borrow_mut();
                 let st = state.get_or_insert_with(|| self.build_window(mtm));
+                // A reload may have raised the minimum, or the window was
+                // built on a bigger screen: never show it under the minimum.
+                apply_min_size(&st.window, &controller.settings());
                 if st.current != Some(v) {
                     if let Some(prev) = st.current {
                         if let Some(view) = st.views.get(&prev) {
@@ -11123,12 +11186,13 @@ return Some(true)
             set_current_header_style(
                 ThemeHeaderStyle::from_raw(settings.header_style.raw()).unwrap_or_default(),
             );
-            let width = settings.shared_width.max(420.0);
-            let height = settings.shared_height.max(260.0);
+            let (min, size) = shared_sizes(&settings);
+            let (width, height) = (size.width, size.height);
             let colors = crate::ui::theme::PopupThemeDefaults::colors();
 
             let window = SlotHostWindow::create(mtm);
-            window.setContentSize(NSSize::new(width, height));
+            window.setContentMinSize(min);
+            window.setContentSize(size);
             window.center();
             window.setMovableByWindowBackground(true);
             window.setCollectionBehavior(
@@ -11568,6 +11632,37 @@ return Some(true)
     /// lightweight preview window (Esc closes); anything else goes to its default app.
     fn open_path(path: &str) {
         crate::views::file_popup::show(path, None);
+    }
+
+    /// The shared window's (minimum, default) content sizes on the main
+    /// screen (`config::shared_window_sizes`).
+    fn shared_sizes(settings: &crate::app::config::AppSettings) -> (NSSize, NSSize) {
+        let screen = crate::platform::main_screen()
+            .map(|s| (s.visible.w, s.visible.h))
+            .unwrap_or((1440.0, 900.0));
+        let ((mw, mh), (dw, dh)) = crate::app::config::shared_window_sizes(settings, screen);
+        (NSSize::new(mw, mh), NSSize::new(dw, dh))
+    }
+
+    /// Set the window's content minimum from the settings and grow a frame
+    /// that is under it (top edge kept, then clamped to the screen). The views
+    /// lay out for the minimum; below it they clip and overlap.
+    fn apply_min_size(window: &objc2_app_kit::NSWindow, settings: &crate::app::config::AppSettings) {
+        let (min, _) = shared_sizes(settings);
+        window.setContentMinSize(min);
+        let old = window.frame();
+        let cur = window.contentRectForFrameRect(old);
+        if cur.size.width >= min.width && cur.size.height >= min.height {
+            return;
+        }
+        let content = NSRect::new(
+            cur.origin,
+            NSSize::new(cur.size.width.max(min.width), cur.size.height.max(min.height)),
+        );
+        let mut f = window.frameRectForContentRect(content);
+        f.origin.y = old.origin.y + old.size.height - f.size.height;
+        clamp_to_screen(&mut f);
+        window.setFrame_display(f, true);
     }
 
     /// `clampToScreen`: keep the frame inside the window's screen's visible

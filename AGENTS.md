@@ -338,7 +338,10 @@ cycle/toggle/hotkey`; `toggle`/`hotkey` hide only when the user is in the
 window (key + active + frontmost), else bring it forward (`hideOrFocus`).
 `present` pushes `UiCommand::Present(v)`; the daemon UI swaps the view's
 content (built lazily by `content_for`) into the host window, activates and
-makes it key. Views are hard-coded in `SlotView`; `commands.toml` declares
+makes it key. Size: born at `[app] shared-screen-fraction` of the screen (or
+`shared-width`/`shared-height`), never under `shared-min-width`/`-height`
+(`config::shared_window_sizes`, host `apply_min_size`; the views clip below
+900x560). Views are hard-coded in `SlotView`; `commands.toml` declares
 commands/windows (`[files]`, `[jira]`, … with `enabled = true`).
 
 ### Socket contract (the daemon API)
@@ -357,7 +360,7 @@ JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `paneShot`, `paths`, `tools.<name>`, `palette`, `paletteCommands`,
 `viewSwitcher`, `activations`, `pid`. Useful `do:` actions:
 `cycle`, `cycle-back`, `hide`, `back`, `home`, `toggle`, `open:<view>`,
-`switcher`, `reset-size`, `pane:h|j|k|l`,
+`switcher`, `reset-size`, `window-size:W:H` (a drag to W x H: same min clamp), `pane:h|j|k|l`,
 `pane:focus:<id>`, `key:<spec>`, `header-style:<style>`,
 `esc-hides:<view>:on|off`, `tool:<name>` / `tool-close:<name>`, `screenshot:*`,
 `paths:*`, `sidebar-width:<view>[:px]`,
