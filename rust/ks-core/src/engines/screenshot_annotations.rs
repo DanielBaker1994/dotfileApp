@@ -812,6 +812,13 @@ impl ShotDocument {
         }
     }
 
+    /// Drop undo / redo (the canvas under the objects changed).
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_coalesce = None;
+    }
+
     pub fn reset(&mut self) {
         self.objects = Vec::new();
         self.undo_stack = Vec::new();

@@ -189,6 +189,8 @@ merge-vertical-label = "↓ Vertical"
 merge-horizontal-label = "→ Horizontal"
 merge-hint = "Shift-click to merge"
 merge-picked-hint = "{} picked · release Shift to merge"
+# The merge editor's numbered strip (left edge): drag a photo to reorder.
+merge-order-hint = "Drag to reorder"
 # File lists (Find Recent Files, Files) ▸ right-click on pictures only
 # (checked by their bytes, not the extension): one → edit it, 2+ → merge them.
 editor-menu-title = "Open in Screenshot Editor"

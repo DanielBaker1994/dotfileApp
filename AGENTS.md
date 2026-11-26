@@ -52,6 +52,13 @@ in Nov 2026 by owner decision.
    open and Esc closes only them, never the window under them.
 6. **Python stays stable.** Keep the helper protocol and `pylib/` behavior
    byte-compatible; change Python only with a reason (the app depends on it).
+7. **One feature, every surface.** The quick agent (Hyper+S / Hyper+X / Find
+   Recent Files) and the main app (Files view, Recents, tool panels) must get
+   the same feature, as must every entry into one tool (e.g. the screenshot
+   editor from the Recents merge *and* right-click ▸ Merge N Photos). Build
+   it once in `ks-core` where all entry paths meet (a `hooks.rs` slot if only
+   the host can do part), grep every caller, and name in the summary which
+   surfaces got it — and why any could not. Owner rule; don't wait to be reminded.
 
 ## Build / run / test
 
