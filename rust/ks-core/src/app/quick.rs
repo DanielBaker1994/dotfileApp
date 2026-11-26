@@ -2365,10 +2365,14 @@ mod appkit {
                 Out::Consumed => true,
                 Out::Pick(action) => {
                     // Accepted from the key monitor: decide focus while the
-                    // palette is still up, then close it like a click does.
+                    // palette is still up, open the pick, and only then close
+                    // the palette (like a click does). Hiding first handed the
+                    // keyboard back to the app underneath while a tool panel
+                    // was still being built (its first open), and the first
+                    // keystrokes typed after Return landed in that app.
                     self.pick_focus(&action);
-                    self.hide_palette_panel();
                     self.run_pick(action);
+                    self.hide_palette_panel();
                     true
                 }
                 Out::Close => {
