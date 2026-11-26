@@ -260,15 +260,23 @@ pub struct QuickHandler {
     pub shared: Arc<QuickShared>,
     /// Whether a capture session is up (read from the socket thread).
     pub screenshot_busy: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Read from the main thread for `state.live` (key window, frontmost app,
+    /// palette query, Find Recent Files): `None` when main did not answer in
+    /// time (a hang) or there is no UI.
+    pub live: Option<Box<dyn Fn() -> Option<Value> + Send + Sync>>,
 }
 
 impl CommandHandler for QuickHandler {
     fn state_json(&self) -> Value {
         let mut v = self.shared.state.lock().map(|g| g.clone()).unwrap_or_else(|_| json!({}));
+        let live = self.live.as_ref().map(|f| f());
         if let Some(o) = v.as_object_mut() {
             o.insert("agent".into(), json!("quick"));
             o.insert("pid".into(), json!(std::process::id()));
             o.insert("screenshotBusy".into(), json!((self.screenshot_busy)()));
+            if let Some(live) = live {
+                o.insert("live".into(), live.unwrap_or(Value::Null));
+            }
         }
         v
     }
@@ -466,6 +474,49 @@ mod appkit {
                     "mainSocket": self.paths.notes_socket_path(),
                 });
             }
+        }
+
+        /// `state.live`: what only the main thread can read right now. Every
+        /// borrow is a `try_borrow` (a socket read never panics mid-callback).
+        fn live_state(&self, mtm: MainThreadMarker) -> Value {
+            let app = NSApplication::sharedApplication(mtm);
+            let key = app.keyWindow().map(|w| w.title().to_string());
+            let front = crate::platform::frontmost_app();
+            let palette = self
+                .palette
+                .try_borrow()
+                .ok()
+                .and_then(|p| p.as_ref().map(|x| x.live_state()))
+                .unwrap_or(Value::Null);
+            let tools: serde_json::Map<String, Value> = self
+                .tools
+                .try_borrow()
+                .map(|t| t.iter().map(|(n, p)| (n.clone(), p.test_state())).collect())
+                .unwrap_or_default();
+            let files = self.files_window().map(|w| {
+                let mut f = self
+                    .files_surface(|b| {
+                        let mut s = b.test_state();
+                        // Rows: names only, capped (a socket line, not a dump).
+                        s["rows"] = json!(b.visible_rows().iter().take(40).map(|e| e.name.clone()).collect::<Vec<_>>());
+                        s
+                    })
+                    .unwrap_or(Value::Null);
+                f["shown"] = json!(w.isVisible());
+                f["key"] = json!(w.isKeyWindow());
+                f["sheet"] = json!(w.attachedSheet().is_some());
+                f["pane"] = json!(self.files_pane_id());
+                f
+            });
+            json!({
+                "active": app.isActive(),
+                "keyWindow": key,
+                "frontmostPid": front.as_ref().map(|a| a.pid),
+                "frontmostBundle": front.and_then(|a| a.bundle_id),
+                "palette": palette,
+                "tools": tools,
+                "files": files,
+            })
         }
 
         fn palette_visible(&self) -> bool {
@@ -1625,6 +1676,14 @@ mod appkit {
             }),
             shared: shared.clone(),
             screenshot_busy: Box::new(move || busy_shot.try_lock().map(|c| !c.is_idle()).unwrap_or(true)),
+            live: Some(Box::new(|| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                crate::platform::run_on_main(move || {
+                    let v = MainThreadMarker::new().and_then(|mtm| with_ui_ret(|ui| ui.live_state(mtm)));
+                    let _ = tx.send(v);
+                });
+                rx.recv_timeout(Duration::from_millis(1500)).ok().flatten()
+            })),
         });
         match CommandServer::start(&sock, handler) {
             Ok(s) => *ui.server.borrow_mut() = Some(s),
@@ -1806,6 +1865,7 @@ label = "AI"
             }),
             shared,
             screenshot_busy: Box::new(|| true),
+            live: None,
         };
         h.launch("toggle");
         h.launch("files");
@@ -1853,6 +1913,7 @@ label = "AI"
             }),
             shared,
             screenshot_busy: Box::new(|| false),
+            live: None,
         });
         let mut server = CommandServer::start(&sock, handler).expect("bind");
         let wait = std::time::Duration::from_secs(5);

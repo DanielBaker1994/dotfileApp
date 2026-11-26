@@ -1705,6 +1705,25 @@ mod macos {
             self.window.as_ref().map(|w| w.isVisible()).unwrap_or(self.shown)
         }
 
+        /// The live palette for a socket `state`: shown / key, the typed query
+        /// and the selected row's id (a command id or a workspace id).
+        pub fn live_state(&self) -> Value {
+            let mut v = json!({ "shown": self.is_visible(), "key": self.has_key() });
+            if let Some(h) = &self.handler {
+                v["query"] = json!(h.query());
+                if let Ok(m) = h.ivars().model.try_borrow() {
+                    let rows = m.rows();
+                    v["selection"] = json!(m.selection);
+                    v["rows"] = json!(rows.len());
+                    v["selected"] = json!(rows.get(m.selection).map(|r| match r {
+                        PaletteRow::Command(id, _) => id.clone(),
+                        PaletteRow::Workspace(w) => w.id.clone(),
+                    }));
+                }
+            }
+            v
+        }
+
         /// Whether the palette window currently has the keyboard.
         pub fn has_key(&self) -> bool {
             self.window.as_ref().map(|w| w.isKeyWindow()).unwrap_or(self.shown)
