@@ -1644,24 +1644,36 @@ impl ToolPanel {
                 );
                 scroll.setHasVerticalScroller(false);
                 scroll.setDrawsBackground(false);
+                // No automatic top inset (room for a title bar the panel does
+                // not have): it pushed the line ~22 pt down, out of the box.
+                scroll.setAutomaticallyAdjustsContentInsets(false);
+                scroll.setContentInsets(objc2_foundation::NSEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 });
                 cell.addSubview(&scroll);
                 let text = NSTextView::new(mtm);
                 text.setRichText(false);
                 text.setDrawsBackground(false);
                 text.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-                // The pasted text stays invisible; the hint reports it.
-                text.setTextColor(Some(&objc2_app_kit::NSColor::clearColor()));
-                text.setInsertionPointColor(Some(&colors.dim.to_nscolor()));
+                // The real text, like any text box (it was drawn invisible
+                // under a row of `*`, and Cmd+A showed it through the selection).
+                text.setTextColor(Some(&colors.text.to_nscolor()));
+                text.setInsertionPointColor(Some(&colors.text.to_nscolor()));
                 // Caret x = inset + line padding (5): 3 puts it exactly where the hint's text starts.
                 text.setTextContainerInset(NSSize::new(3.0, 6.0));
                 text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(pw, 28.0)));
                 // An empty text view otherwise shrinks to zero height and
                 // a click on the cell hits nothing (never focusing it).
-                text.setMinSize(NSSize::new(0.0, 28.0));
-                text.setMaxSize(NSSize::new(f64::MAX, f64::MAX));
-                text.setVerticallyResizable(true);
-                text.setHorizontallyResizable(false);
-                text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                // Exactly the box's height: nothing to scroll vertically, so
+                // the line never slides down out of the box.
+                text.setMinSize(NSSize::new(pw, 28.0));
+                text.setMaxSize(NSSize::new(f64::MAX, 28.0));
+                text.setVerticallyResizable(false);
+                // One line that scrolls sideways with the caret (no wrapping
+                // into a 28 pt box); a multi-line paste scrolls the same way.
+                text.setHorizontallyResizable(true);
+                if let Some(tc) = unsafe { text.textContainer() } {
+                    tc.setWidthTracksTextView(false);
+                    tc.setContainerSize(NSSize::new(f64::MAX, f64::MAX));
+                }
                 scroll.setDocumentView(Some(&text));
                 content.addSubview(&cell);
                 self.ff_cell = Some(cell.clone());
@@ -2158,31 +2170,15 @@ impl ToolPanel {
             ToolKind::TextTable => {}
             ToolKind::Filefast => {
                 // `FileFastPasteView.refreshIndicator`.
-                if let (Some(paste), Some(hint), Some(count), Some(c)) =
-                    (&self.paste, &self.ff_hint, &self.ff_count, self.colors)
-                {
+                if let (Some(paste), Some(hint), Some(count)) = (&self.paste, &self.ff_hint, &self.ff_count) {
                     let s = paste.string().to_string();
-                    // The pasted text is invisible, so the caret trails it (off
-                    // the bottom / out of the box on a big paste): park the
-                    // view at the top and show the caret only while empty.
-                    if let Some(sv) = paste.enclosingScrollView() {
-                        let o = sv.contentView().bounds().origin;
-                        if o.x != 0.0 || o.y != 0.0 {
-                            sv.contentView().scrollToPoint(objc2_foundation::NSPoint::new(0.0, 0.0));
-                            sv.reflectScrolledClipView(&sv.contentView());
-                        }
+                    // "paste output" is a placeholder: shown only while empty.
+                    if hint.isHidden() != !s.is_empty() {
+                        hint.setHidden(!s.is_empty());
                     }
-                    paste.setInsertionPointColor(Some(&(if s.is_empty() { c.dim } else { crate::ui::theme::Rgba::new(0.0, 0.0, 0.0, 0.0) }).to_nscolor()));
-                    let want = if s.is_empty() { "paste output".to_string() } else { "************************".to_string() };
                     let counted = pasted_count(&s);
                     if count.stringValue().to_string() != counted {
                         count.setStringValue(&objc2_foundation::NSString::from_str(&counted));
-                    }
-                    if hint.stringValue().to_string() != want {
-                        hint.setStringValue(&objc2_foundation::NSString::from_str(&want));
-                        hint.setTextColor(Some(
-                            &(if s.is_empty() { c.dim } else { c.tone(crate::ui::theme::PopupTone::Success) }).to_nscolor(),
-                        ));
                     }
                 }
                 let done = self.ff_out.lock().unwrap().take();
