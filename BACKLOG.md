@@ -82,22 +82,25 @@ Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
   `hotkey hyper+x registered`.
 - Owner's Mac checks (2026-11-27): `ks-input key` posts are dropped there (exit 0, nothing
   arrives, no Secure Input); keys go through System Events (`osascript … key code`), and
-  `ks_mouse` works only outside the command sandbox. Verified there: OCR card + tab stops,
-  Text to Table button, Copy Text from Picture (Files menu, Recents verb), QR/hex, real
-  herdr pane-shot from the CLI and the main socket, preview fit, main-app Recents verbs.
-  **Not checked: a second display** (the Mac has only the built-in screen).
+  `ks_mouse` works only outside the command sandbox. Verified there: Copy Text from Picture
+  (Files menu, Recents verb), QR/hex, real herdr pane-shot from the CLI and the main
+  socket, preview fit, main-app Recents verbs. **Not checked: a second display** (the Mac
+  has only the built-in screen). Iterate in the VM, not on the Mac (owner rule).
 - `.fast` OCR still drops a lone short cell ("4") and splits some words ("f iles") at
-  every scale; a dropped cell shifts that row's columns (Text to Table pads it). It also
-  mangles JSON quotes/braces from small screen text, so the card's Pretty Print button
-  rarely appears for OCR'd JSON (it needs valid JSON). The card shows the result so it
-  can be fixed before pasting. `.accurate` is broken on macOS 27 (see
-  `ShotOCRConfig::accurate`). Scale is by size (`ShotOCR::scale_for`): a whole MacBook
-  screen stays 1× for speed, so it reads worse than a drag.
+  every scale; a dropped cell shifts that row's columns (Text to Table pads it), and it
+  mangles JSON quotes/braces from small screen text. `.accurate` reads all of it, but on
+  macOS 27 (the owner's Mac): loading takes ~45-60 s per process, every OCR call in the
+  process waits meanwhile (a Copy Text froze ~20 s in a probe — the "screen freezes" the
+  owner saw with `auto`), and after loading it still fails *inside the app* with
+  "CRImageReaderError error 1" (a standalone probe with the same image pipeline, threads
+  and a barcode pass reads fine; macOS 26.6 in the VM loads in 0.2 s and works). Open:
+  what in the app process differs. Default stays `fast`; a failed accurate pass falls
+  back to fast. Scale is by size (`ShotOCR::scale_for`): a whole MacBook screen stays 1×.
 - Non-goals and the full Flameshot comparison: `git show 64bbd4a^:PRD-screenshot-gaps.md`.
-- Done 2026-11-27: the card's next-step buttons (Text to Table / Pretty Print / Save as
-  File) and Copy Text from an existing picture (Files + Find Recent Files menu, Recents
-  menu, `do:screenshot:recents:copy-text:N`). Still an idea: Annotate / Reveal buttons on
-  the card.
+- Done 2026-11-27: Copy Text from an existing picture (Files + Find Recent Files menu,
+  Recents menu, `do:screenshot:recents:copy-text:N`). The Copy Text result card (with
+  next-step buttons and Undo copy) was built, then removed by the owner the same day
+  ("i can view clipboard history in other ways"): Copy Text shows only the toast.
 
 ## Settings hub (`ws-settings`)
 

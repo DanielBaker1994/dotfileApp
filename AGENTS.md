@@ -476,7 +476,7 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   every other `do:` verb (the quick socket answers `{"error"}`), `reload`,
   `window-shot`. `state live` (not plain `state`, which stays cheap to poll) adds `live` (key window, frontmost app, palette
   query/selection, tool panels, Find Recent Files cwd/selection/filter/pane,
-  `screenshot` = the controller's `test_state` incl. `recents`, `textCard` = the Copy Text card),
+  `screenshot` = the controller's `test_state` incl. `recents`),
   read on the main thread with a 1.5 s cap (`null` = main did not answer).
 - **Naming**: user-facing name is Bansho, technical name kitchen-sink (see
   `PRODUCT.md` "Name"); don't rename paths, bundle id or binaries.

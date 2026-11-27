@@ -82,7 +82,7 @@ In priority order:
 - **Quick agent (Hyper+S / Hyper+X):** the palette (`[app] palette`: Find
   Recent Files, Create File, Text to Table, Pretty Print, Pane Shot (shown only
   with herdr installed), Find Window PID); the screenshot overlay and editor
-  (Copy Text with a review card, QR codes, merge several pictures, record,
+  (Copy Text with QR codes, merge several pictures, record,
   retake, recents); pane-shot (a terminal pane with its scrollback as a
   picture); Find Recent Files (a file browser with the same actions as the
   main Files view).

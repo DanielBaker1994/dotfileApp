@@ -667,56 +667,8 @@ pub struct ScreenshotConfig {
     /// Cmd+T: hide the overlay, wait this long, capture the same area again
     /// (`[screenshot] retake-delay`, seconds; for menus and hover states).
     pub retake_delay_ms: i64,
-    /// After Copy Text: the card showing what was copied (`[screenshot]
-    /// text-card`, `text-card-*`). `None` = off (toast only).
-    pub text_card: Option<crate::ui::text_card::TextCardSpec>,
-    /// The card's next-step button labels (`text-card-table`,
-    /// `text-card-pretty`, `text-card-file`; empty = no such button).
-    pub next_labels: NextStepLabels,
     /// Files ▸ right-click on pictures (`text-menu-title`; empty = no row).
     pub text_menu_title: String,
-    /// The card's button when a QR code won (`text-card-use-text`) and its
-    /// toast (`text-card-use-text-toast`).
-    pub use_text_label: String,
-    pub use_text_toast: String,
-}
-
-/// Labels for [`next_steps`] (config `text-card-table|pretty|file`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct NextStepLabels {
-    pub table: String,
-    pub pretty: String,
-    pub file: String,
-}
-
-impl Default for NextStepLabels {
-    fn default() -> Self {
-        NextStepLabels {
-            table: "Text to Table".to_string(),
-            pretty: "Pretty Print".to_string(),
-            file: "Save as File".to_string(),
-        }
-    }
-}
-
-/// The Copy Text card's next steps for `text`, as `(tool id, label)`: Text to
-/// Table when two or more lines hold tab-separated columns, Pretty Print when
-/// the text is JSON, and always Save as File (Create File).
-pub fn next_steps(text: &str, l: &NextStepLabels) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let tabbed = text.lines().filter(|ln| ln.contains('\t')).count();
-    if tabbed >= 2 && !l.table.is_empty() {
-        out.push(("text-table".to_string(), l.table.clone()));
-    }
-    let t = text.trim();
-    let jsonish = (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']'));
-    if jsonish && serde_json::from_str::<Value>(t).is_ok() && !l.pretty.is_empty() {
-        out.push(("prettyprint".to_string(), l.pretty.clone()));
-    }
-    if !l.file.is_empty() {
-        out.push(("filefast".to_string(), l.file.clone()));
-    }
-    out
 }
 
 impl Default for ScreenshotConfig {
@@ -777,11 +729,7 @@ impl Default for ScreenshotConfig {
                 .collect(),
             shortcuts: shortcut_rows(false, |_, d| d.to_string()),
             retake_delay_ms: 3000,
-            text_card: Some(crate::ui::text_card::TextCardSpec::default()),
-            next_labels: NextStepLabels::default(),
             text_menu_title: "Copy Text from Picture".to_string(),
-            use_text_label: "Use the text instead".to_string(),
-            use_text_toast: "Copied the text instead".to_string(),
         }
     }
 }
@@ -924,28 +872,7 @@ impl ScreenshotConfig {
         c.insecure_pixelate = b("insecure-pixelate", false);
         c.delay_ms = i("delay", 0, 0, 60_000);
         c.retake_delay_ms = i("retake-delay", 3, 1, 30) * 1000;
-        c.text_card = b("text-card", true).then(|| {
-            let td = crate::ui::text_card::TextCardSpec::default();
-            crate::ui::text_card::TextCardSpec {
-                title: td.title.clone(),
-                hint: s("text-card-hint", &td.hint),
-                undo_label: s("text-card-undo", &td.undo_label),
-                undone_toast: s("text-card-undone-toast", &td.undone_toast),
-                edited_toast: s("text-card-edited-toast", &td.edited_toast),
-                hold_secs: i("text-card-seconds", 6, 2, 60) as f64,
-                max_lines: td.max_lines,
-                actions: Vec::new(),
-            }
-        });
         c.text_menu_title = s("text-menu-title", &d.text_menu_title);
-        c.use_text_label = s("text-card-use-text", &d.use_text_label);
-        c.use_text_toast = s("text-card-use-text-toast", &d.use_text_toast);
-        let nd = NextStepLabels::default();
-        c.next_labels = NextStepLabels {
-            table: s("text-card-table", &nd.table),
-            pretty: s("text-card-pretty", &nd.pretty),
-            file: s("text-card-file", &nd.file),
-        };
         c.font = e.get("font").cloned().unwrap_or_default();
         if let Some(v) = e.get("copy-toast") {
             c.copy_toast = v.clone();
@@ -9030,9 +8957,6 @@ impl ScreenshotController {
     }
 
     pub fn trigger(&mut self, args: &ShotArgs) -> Result<(), String> {
-        // A new capture replaces the last Copy Text card.
-        #[cfg(target_os = "macos")]
-        crate::ui::text_card::close();
         // Hyper+X while recording stops the recording instead of capturing.
         if self.recording.is_some() {
             self.stop_recording();
@@ -9961,59 +9885,13 @@ impl ScreenshotController {
         self.copy_text_titled(text, cfg, None);
     }
 
-    /// [`Self::copy_text`] with the card / toast title given (`None` = the
+    /// [`Self::copy_text`] with the toast's title given (`None` = the
     /// `text-toast` line count).
     pub fn copy_text_titled(&mut self, text: &str, cfg: &ScreenshotConfig, title: Option<String>) {
-        self.copy_text_with(text, cfg, title, None);
-    }
-
-    /// [`Self::copy_text_titled`]; `alt` (the area's text when `text` is a QR
-    /// code's contents) adds a "Use the text instead" button to the card.
-    pub fn copy_text_with(&mut self, text: &str, cfg: &ScreenshotConfig, title: Option<String>, alt: Option<String>) {
-        // What the clipboard held, so the card's "Undo copy" can put it back.
-        #[cfg(target_os = "macos")]
-        let before = cfg
-            .text_card
-            .as_ref()
-            .filter(|_| objc2::MainThreadMarker::new().is_some())
-            .map(|_| crate::platform::clipboard::snapshot());
         let _ = crate::platform::set_text(text);
         self.last_output["copied"] = json!(true);
         let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
         let title = title.unwrap_or_else(|| cfg.text_toast.replace("{}", &summary));
-        #[cfg(target_os = "macos")]
-        if let (Some(spec), Some(mut before)) = (cfg.text_card.clone(), before) {
-            before.change_count = crate::platform::clipboard::change_count();
-            let title = if title.is_empty() { spec.title.clone() } else { title };
-            // The model slot keeps what the toast would have said (tests, state).
-            self.toast = Some(ScreenToast::with_symbol(title.clone(), "text.viewfinder"));
-            let mut actions = next_steps(text, &cfg.next_labels);
-            if alt.is_some() && !cfg.use_text_label.is_empty() {
-                actions.insert(0, ("use-text".to_string(), cfg.use_text_label.clone()));
-            }
-            // A next step opens that tool with the text already in it;
-            // "use-text" copies the area's text instead of the QR contents.
-            let alt_text = alt.clone().unwrap_or_default();
-            let used_toast = cfg.use_text_toast.clone();
-            let on_action: Box<dyn Fn(&str, &str)> = Box::new(move |id: &str, text: &str| {
-                if id == "use-text" {
-                    crate::platform::set_text(&alt_text);
-                    crate::ui::toast::show(&used_toast, "text.viewfinder");
-                    return;
-                }
-                if let Some(kind) = crate::views::tools::ToolKind::from_name(id) {
-                    crate::views::tools::prefill_next(kind, text);
-                    crate::app::hooks::open_tool(id);
-                }
-            });
-            crate::ui::text_card::show(
-                text,
-                before,
-                crate::ui::text_card::TextCardSpec { title, actions, ..spec },
-                Some(on_action),
-            );
-            return;
-        }
         if !title.is_empty() {
             ScreenToast::show(&mut self.toast, title, "text.viewfinder");
         }
@@ -10045,8 +9923,7 @@ impl ScreenshotController {
             );
         } else if read.codes > 0 {
             let what = if read.codes == 1 { "a QR code".to_string() } else { format!("{} codes", read.codes) };
-            let alt = (!read.alt_text.trim().is_empty()).then(|| read.alt_text.clone());
-            self.copy_text_with(&text, cfg, Some(cfg.code_toast.replace("{}", &what)), alt);
+            self.copy_text_titled(&text, cfg, Some(cfg.code_toast.replace("{}", &what)));
         } else {
             self.copy_text(&text, cfg);
         }
@@ -10721,9 +10598,6 @@ pub struct ReadText {
     pub text: String,
     /// How many barcodes the text came from (0 = OCR).
     pub codes: usize,
-    /// When `text` is barcode payloads: the OCR text of the same area, for
-    /// the card's "Use the text instead".
-    pub alt_text: String,
 }
 
 fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
@@ -10738,11 +10612,12 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
         let Some(image) = pin_window::decode_png(png) else {
             return ReadText::default();
         };
-        let codes = if ocr.barcodes {
-            crate::engines::screenshot_text::ShotOCR::barcodes(&image)
-        } else {
-            Vec::new()
-        };
+        if ocr.barcodes {
+            let codes = crate::engines::screenshot_text::ShotOCR::barcodes(&image);
+            if !codes.is_empty() {
+                return ReadText { text: codes.join("\n"), codes: codes.len() };
+            }
+        }
         let cfg = crate::engines::screenshot_text::ShotOCRConfig {
             languages: ocr.languages.clone(),
             correction: ocr.correction,
@@ -10753,10 +10628,7 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
         let text = crate::engines::screenshot_text::ShotOCR::tidy_paths(
             &crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap),
         );
-        if !codes.is_empty() {
-            return ReadText { text: codes.join("\n"), codes: codes.len(), alt_text: text };
-        }
-        ReadText { text, codes: 0, alt_text: String::new() }
+        ReadText { text, codes: 0 }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -11765,19 +11637,6 @@ mod tests {
     }
 
     #[test]
-    fn next_steps_match_the_text() {
-        let l = NextStepLabels::default();
-        let ids = |t: &str| next_steps(t, &l).into_iter().map(|(i, _)| i).collect::<Vec<_>>();
-        assert_eq!(ids("a\tb\nc\td"), ["text-table", "filefast"], "columns");
-        assert_eq!(ids("one\ttab line only"), ["filefast"], "one tabbed line is not a table");
-        assert_eq!(ids("{\"a\": [1, 2]}"), ["prettyprint", "filefast"], "JSON");
-        assert_eq!(ids("{not json}"), ["filefast"]);
-        assert_eq!(ids("plain prose"), ["filefast"]);
-        let none = NextStepLabels { table: String::new(), pretty: String::new(), file: String::new() };
-        assert!(next_steps("a\tb\nc\td", &none).is_empty(), "empty label = no button");
-    }
-
-    #[test]
     fn barcode_and_hex_config_keys() {
         let mut e = HashMap::new();
         let c = ScreenshotConfig::from_entries(&e);
@@ -11791,16 +11650,8 @@ mod tests {
     }
 
     #[test]
-    fn text_card_config_keys() {
+    fn retake_delay_config_key() {
         let mut e = HashMap::new();
-        assert!(ScreenshotConfig::from_entries(&e).text_card.is_some(), "on by default");
-        e.insert("text-card-seconds".to_string(), "9".to_string());
-        e.insert("text-card-undo".to_string(), "Put back".to_string());
-        let c = ScreenshotConfig::from_entries(&e);
-        let t = c.text_card.unwrap();
-        assert_eq!((t.hold_secs, t.undo_label.as_str()), (9.0, "Put back"));
-        e.insert("text-card".to_string(), "false".to_string());
-        assert!(ScreenshotConfig::from_entries(&e).text_card.is_none(), "off = toast only");
         e.insert("retake-delay".to_string(), "5".to_string());
         assert_eq!(ScreenshotConfig::from_entries(&e).retake_delay_ms, 5000);
     }

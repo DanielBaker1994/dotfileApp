@@ -25,7 +25,6 @@ pub mod shortcuts;
 pub mod sidebar;
 pub mod style;
 pub mod syntax_text;
-pub mod text_card;
 pub mod theme;
 pub mod toast;
 #[cfg(target_os = "macos")]

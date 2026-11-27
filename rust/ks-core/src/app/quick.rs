@@ -535,10 +535,9 @@ mod appkit {
                 "palette": palette,
                 "tools": tools,
                 "files": files,
-                // Hyper+X: the overlay / pins / recents model and the Copy
-                // Text card (`null` while the controller is busy).
+                // Hyper+X: the overlay / pins / recents model (`null` while
+                // the controller is busy).
                 "screenshot": self.shot.try_lock().map(|c| c.test_state()).unwrap_or(Value::Null),
-                "textCard": crate::ui::text_card::state(),
             })
         }
 
@@ -1675,12 +1674,7 @@ mod appkit {
             let p = p.to_vec();
             defer(move |ui| ui.show_files_at(&p));
         });
-        // Copy Text card ▸ Text to Table / Pretty Print / Create File.
-        crate::app::hooks::set_open_tool_hook(|name: &str| {
-            if let Some(kind) = ToolKind::from_name(name) {
-                defer(move |ui| ui.open_tool(kind));
-            }
-        });
+
 
         let shared = QuickShared::new();
         let ui = Rc::new(QuickUi {

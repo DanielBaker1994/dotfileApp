@@ -43,25 +43,6 @@ pub enum ToolKind {
     TextTable,
 }
 
-/// Text the next `show` of a tool starts with (Copy Text card ▸ Text to
-/// Table / Pretty Print / Create File). One shot: the first show of that
-/// kind takes it.
-static PREFILL: std::sync::Mutex<Option<(ToolKind, String)>> = std::sync::Mutex::new(None);
-
-/// Have the next opening of `kind` start with `text` in its input box.
-pub fn prefill_next(kind: ToolKind, text: &str) {
-    *PREFILL.lock().unwrap() = Some((kind, text.to_string()));
-}
-
-fn take_prefill(kind: ToolKind) -> Option<String> {
-    let mut g = PREFILL.lock().unwrap();
-    if g.as_ref().is_some_and(|(k, _)| *k == kind) {
-        g.take().map(|(_, t)| t)
-    } else {
-        None
-    }
-}
-
 impl ToolKind {
     /// The `config.name` the panel registers under (the `tools` map key).
     pub fn name(self) -> &'static str {
@@ -2068,30 +2049,17 @@ impl ToolPanel {
                 if let Some(label) = &self.ff_status_label {
                     label.setStringValue(&NSString::from_str(""));
                 }
-                if let (Some(text), Some(paste)) = (take_prefill(ToolKind::Filefast), &self.paste) {
-                    paste.setString(&NSString::from_str(&text));
-                }
                 if let Some(field) = &self.name_field {
                     let responder: &objc2_app_kit::NSResponder = &**field;
                     panel.makeFirstResponder(Some(responder));
                 }
             }
-            if self.kind == ToolKind::PrettyPrint {
-                if let (Some(text), Some(editor)) = (take_prefill(ToolKind::PrettyPrint), &self.editor) {
-                    // The debounce formats it like a paste.
-                    editor.setString(&NSString::from_str(&text));
-                }
-            }
             if self.kind == ToolKind::TextTable {
                 if let Some(editor) = &self.editor {
-                    if let Some(text) = take_prefill(ToolKind::TextTable) {
-                        editor.setString(&NSString::from_str(&text));
-                        self.tt_clip_loaded = text;
-                    }
                     // Fresh clipboard text (e.g. Hyper+X Copy Text since the
                     // last open) replaces the input; an unchanged clipboard
                     // keeps the user's edits.
-                    else if let Some(clip) = crate::platform::get_text() {
+                    if let Some(clip) = crate::platform::get_text() {
                         if !clip.trim().is_empty() && clip != self.tt_clip_loaded {
                             editor.setString(&NSString::from_str(&clip));
                             self.tt_clip_loaded = clip;
@@ -2247,14 +2215,6 @@ impl ToolPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prefill_is_one_shot_and_per_kind() {
-        prefill_next(ToolKind::TextTable, "a\tb");
-        assert_eq!(take_prefill(ToolKind::PrettyPrint), None, "another tool leaves it");
-        assert_eq!(take_prefill(ToolKind::TextTable).as_deref(), Some("a\tb"));
-        assert_eq!(take_prefill(ToolKind::TextTable), None, "one shot");
-    }
 
     #[test]
     fn filefast_never_overwrites_a_different_file() {

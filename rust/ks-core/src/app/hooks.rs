@@ -29,28 +29,6 @@ pub fn reveal_in_files(paths: &[String]) {
     }
 }
 
-type OpenToolFn = Box<dyn Fn(&str) + Send + Sync>;
-static OPEN_TOOL_HOOK: OnceLock<OpenToolFn> = OnceLock::new();
-
-/// Install how this process opens a tool panel by name (`text-table`,
-/// `prettyprint`, `filefast`): the quick agent's own panels, the main
-/// daemon's `tool:<name>`.
-pub fn set_open_tool_hook(f: impl Fn(&str) + Send + Sync + 'static) {
-    let _ = OPEN_TOOL_HOOK.set(Box::new(f));
-}
-
-/// Open the tool panel `name` (the Copy Text card's next-step buttons);
-/// `false` when no host installed a hook.
-pub fn open_tool(name: &str) -> bool {
-    match OPEN_TOOL_HOOK.get() {
-        Some(h) => {
-            h(name);
-            true
-        }
-        None => false,
-    }
-}
-
 type ShelfAddFn = Box<dyn Fn(&[String], crate::engines::path_shelf::Why) -> bool + Send + Sync>;
 static SHELF_ADD_HOOK: OnceLock<ShelfAddFn> = OnceLock::new();
 
