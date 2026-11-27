@@ -822,7 +822,7 @@ impl SwitcherController {
         text: &str,
         sections: &HashMap<String, HashMap<String, String>>,
     ) -> Vec<PaletteCommand> {
-        const SKIP: [&str; 10] = COMMAND_SECTION_SKIPS;
+        const SKIP: [&str; 9] = COMMAND_SECTION_SKIPS;
         let settings = self.inner.lock().unwrap().settings.clone();
         let jira = section_flag(sections, "jira", false);
         let label_of = label_of(sections);
@@ -1595,6 +1595,8 @@ impl SwitcherController {
             "health" | "health-checks" | "prettyprint" | "filefast" | "text-table" => {
                 self.toggle_tool(name);
             }
+            // Palette ▸ Pane Shot (the quick agent runs the same code).
+            "pane-shot" => self.pane_shot_message("", None),
             _ => {
                 self.inner
                     .lock()
@@ -2217,60 +2219,29 @@ return Some(None)
     /// `pane-shot[\tWORDS]` (`ScreenshotController.paneShot`): render the pane
     /// off-main, deliver (save / copy) on main, reply with the path,
     /// `copied`, or `error: …`.
-    fn pane_shot_message(&self, rest: &str, reply: Reply) {
-        use crate::engines::pane_shot::{PaneShotArgs, PaneShotConfig};
+    fn pane_shot_message(&self, rest: &str, reply: Option<Reply>) {
         let words: Vec<String> =
             rest.split('\t').filter(|w| !w.is_empty()).map(str::to_string).collect();
-        let args = match PaneShotArgs::parse(&words) {
-            Ok(a) => a,
-            Err(p) => {
-                reply.send(&format!("error: {}", p.message));
-                return;
-            }
-        };
         let Some(controller) = self.screenshot_controller.clone() else {
-            reply.send("error: [screenshot] is not enabled");
+            if let Some(r) = reply {
+                r.send("error: [screenshot] is not enabled");
+            }
             return;
         };
-        let entries: HashMap<String, String> = config::read_config_text()
-            .map(|t| {
-                let lines = crate::engines::config_text::config_lines(&t);
-                crate::engines::config_text::config_section_entries(&lines, "pane-shot")
-                    .into_iter()
-                    .map(|(_, k, v)| (k, v))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cfg = PaneShotConfig::from_entries(&entries);
+        let cfg = crate::views::screenshot::pane_shot_config(&config::read_config_text().unwrap_or_default());
         #[cfg(target_os = "macos")]
         {
-            let scale = self
-                .run_on_main(
-                    crate::views::screenshot::mouse_screen_scale,
-                    std::time::Duration::from_secs(1),
-                )
-                .unwrap_or(2.0);
+            // The shared body (ks-core) also serves the quick agent; deliveries
+            // go through this daemon's main queue (inline when headless).
             let queue = self.inner.lock().unwrap().main_queue.clone();
-            std::thread::spawn(move || {
-                let started = crate::views::screenshot::epoch_millis();
-                let result = crate::views::screenshot::pane_shot_image(&args, &cfg, scale);
-                let deliver = move || {
-                    let mut c = controller.lock().unwrap();
-                    let line = match result {
-                        Ok(shot) => c.deliver_pane_shot(&shot, &args, &cfg, started),
-                        Err(f) => {
-                            c.pane_shot_failed(&f.message);
-                            format!("error: {}", f.message)
-                        }
-                    };
-                    drop(c);
-                    reply.send(&line);
-                };
-                match queue {
-                    Some(q) => q.lock().unwrap().push(Box::new(deliver)),
-                    None => deliver(),
-                }
+            let on_main: Box<dyn FnOnce(Box<dyn FnOnce() + Send>) + Send> = Box::new(move |job| match queue {
+                Some(q) => q.lock().unwrap().push(job),
+                None => job(),
             });
+            self.run_on_main(
+                move || crate::views::screenshot::run_pane_shot_message(controller, words, cfg, reply, on_main),
+                std::time::Duration::from_secs(1),
+            );
         }
     }
 
@@ -2784,7 +2755,7 @@ impl CommandHandler for SwitcherController {
                 reply.send(if ok { "granted" } else { "denied" });
             }
             "screenshot" => self.screenshot_message(rest, reply),
-            "pane-shot" => self.pane_shot_message(rest, reply),
+            "pane-shot" => self.pane_shot_message(rest, Some(reply)),
             "window-shot" => self.window_shot_message(rest, reply),
             _ => return Some(reply),
         }

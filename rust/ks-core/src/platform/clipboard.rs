@@ -86,6 +86,79 @@ pub fn set_file_and_text(path: &str, text: &str) -> bool {
     ok && pb.writeObjects(&NSArray::from_retained_slice(&objects))
 }
 
+/// Everything on the general pasteboard: per item, every type with its
+/// bytes. Lets a copy be taken back ("Undo copy" on the OCR card).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub items: Vec<Vec<(String, Vec<u8>)>>,
+    /// `changeCount` right after the snapshot's own copy landed (see
+    /// [`restore_if_unchanged`]); 0 = not set.
+    pub change_count: isize,
+}
+
+/// Read the whole general pasteboard (every item, every type).
+#[cfg(target_os = "macos")]
+pub fn snapshot() -> Snapshot {
+    use objc2_app_kit::NSPasteboard;
+    let pb = NSPasteboard::generalPasteboard();
+    let mut items = Vec::new();
+    if let Some(list) = pb.pasteboardItems() {
+        for item in list.iter() {
+            let mut kinds = Vec::new();
+            for t in item.types().iter() {
+                if let Some(d) = item.dataForType(&t) {
+                    kinds.push((t.to_string(), d.to_vec()));
+                }
+            }
+            if !kinds.is_empty() {
+                items.push(kinds);
+            }
+        }
+    }
+    Snapshot { items, change_count: 0 }
+}
+
+/// The general pasteboard's change counter (bumps on every write).
+#[cfg(target_os = "macos")]
+pub fn change_count() -> isize {
+    objc2_app_kit::NSPasteboard::generalPasteboard().changeCount()
+}
+
+/// Put `snap` back on the general pasteboard. An empty snapshot clears it.
+#[cfg(target_os = "macos")]
+pub fn restore(snap: &Snapshot) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSData, NSString};
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    if snap.items.is_empty() {
+        return true;
+    }
+    let objects: Vec<objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>>> = snap
+        .items
+        .iter()
+        .map(|kinds| {
+            let item = NSPasteboardItem::new();
+            for (t, bytes) in kinds {
+                let _ = item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(t));
+            }
+            ProtocolObject::from_retained(item)
+        })
+        .collect();
+    pb.writeObjects(&NSArray::from_retained_slice(&objects))
+}
+
+/// [`restore`], but only while nothing else was copied since our own copy
+/// (`snap.change_count`): an undo must never clobber a newer copy.
+#[cfg(target_os = "macos")]
+pub fn restore_if_unchanged(snap: &Snapshot) -> bool {
+    if snap.change_count != 0 && change_count() != snap.change_count {
+        return false;
+    }
+    restore(snap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -760,6 +760,7 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("button-size", 0.0, 80.0),
     ("arrow-style", 0.0, 1.0),
     ("delay", 0.0, 60_000.0),
+    ("retake-delay", 1.0, 30.0),
     ("context-lines", 0.0, 1000.0),
     ("tab-width", 1.0, 16.0),
     ("time-tolerance", 0.0, 86_400.0),

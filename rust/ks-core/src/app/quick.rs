@@ -81,6 +81,9 @@ pub fn screenshot_words(rest: &str) -> (Vec<String>, bool) {
 pub enum QuickCmd {
     Verb(LaunchVerb),
     Screenshot { words: Vec<String>, reply: Option<Reply> },
+    /// `pane-shot[\tWORDS]`: a terminal pane as a picture (same code as the
+    /// main daemon's verb).
+    PaneShot { words: Vec<String>, reply: Option<Reply> },
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +99,8 @@ pub enum PickRoute {
     Tool(&'static str),
     FindWindow,
     Screenshot,
+    /// Palette ▸ Pane Shot: the focused terminal pane as a picture.
+    PaneShot,
     /// Forward this launch message to the main daemon.
     Forward(String),
 }
@@ -111,6 +116,7 @@ pub fn route_command(id: &str) -> PickRoute {
         "text-table" => PickRoute::Tool("text-table"),
         "find-window" => PickRoute::FindWindow,
         "screenshot" => PickRoute::Screenshot,
+        "pane-shot" => PickRoute::PaneShot,
         other => PickRoute::Forward(forward_message(other)),
     }
 }
@@ -306,7 +312,12 @@ impl CommandHandler for QuickHandler {
                 reply.send(if ok { "granted" } else { "denied" });
                 None
             }
-            // reload / restart / pane-shot / window-shot: main daemon verbs.
+            "pane-shot" => {
+                let words = rest.split('\t').filter(|w| !w.is_empty()).map(str::to_string).collect();
+                (self.sink)(QuickCmd::PaneShot { words, reply: Some(reply) });
+                None
+            }
+            // reload / restart / window-shot: main daemon verbs.
             _ => Some(reply),
         }
     }
@@ -521,6 +532,10 @@ mod appkit {
                 "palette": palette,
                 "tools": tools,
                 "files": files,
+                // Hyper+X: the overlay / pins / recents model and the Copy
+                // Text card (`null` while the controller is busy).
+                "screenshot": self.shot.try_lock().map(|c| c.test_state()).unwrap_or(Value::Null),
+                "textCard": crate::ui::text_card::state(),
             })
         }
 
@@ -555,6 +570,7 @@ mod appkit {
                 QuickCmd::Verb(LaunchVerb::Hide) => self.cancel_palette(),
                 QuickCmd::Verb(LaunchVerb::Quit) => self.quit(),
                 QuickCmd::Screenshot { words, reply } => self.screenshot(words, reply),
+                QuickCmd::PaneShot { words, reply } => self.pane_shot(words, reply),
             }
         }
 
@@ -580,6 +596,18 @@ mod appkit {
                 }
             }
             crate::views::screenshot::run_screenshot_message(self.shot.clone(), words, reply);
+        }
+
+        fn pane_shot(&self, words: Vec<String>, reply: Option<Reply>) {
+            let text = self.refresh_config();
+            let cfg = crate::views::screenshot::pane_shot_config(&text);
+            crate::views::screenshot::run_pane_shot_message(
+                self.shot.clone(),
+                words,
+                cfg,
+                reply,
+                Box::new(crate::views::screenshot::gcd_main),
+            );
         }
 
         // -- palette --------------------------------------------------------
@@ -704,6 +732,7 @@ mod appkit {
                         );
                     }
                     PickRoute::Screenshot => self.screenshot(Vec::new(), None),
+                    PickRoute::PaneShot => self.pane_shot(Vec::new(), None),
                     PickRoute::Forward(msg) => self.forward(&msg),
                 },
             }
@@ -1810,6 +1839,7 @@ mod tests {
         assert_eq!(route_command("prettyprint"), PickRoute::Tool("prettyprint"));
         assert_eq!(route_command("find-window"), PickRoute::FindWindow);
         assert_eq!(route_command("screenshot"), PickRoute::Screenshot);
+        assert_eq!(route_command("pane-shot"), PickRoute::PaneShot, "runs in the agent");
         // Everything else is the main app's.
         assert_eq!(route_command("window"), PickRoute::Forward("window".into()));
         assert_eq!(route_command("files"), PickRoute::Forward("files".into()));
@@ -1945,6 +1975,12 @@ label = "AI"
                         r.send_bytes(b"PNGDATA");
                     }
                 }
+                QuickCmd::PaneShot { words, reply } => {
+                    s2.lock().unwrap().push(format!("pane {words:?}"));
+                    if let Some(r) = reply {
+                        r.send("/tmp/pane.png");
+                    }
+                }
             }),
             shared,
             screenshot_busy: Box::new(|| false),
@@ -1963,8 +1999,11 @@ label = "AI"
         // A plain screenshot gets no reply bytes; --raw blocks for them.
         assert_eq!(send_request(&sock, "screenshot", wait).unwrap(), b"");
         assert_eq!(send_request(&sock, "screenshot\t--raw", wait).unwrap(), b"PNGDATA");
+        // pane-shot is served here too (no main app needed) and answers.
+        let r = send_request(&sock, "pane-shot\t--copy", wait).unwrap();
+        assert_eq!(String::from_utf8_lossy(&r).trim(), "/tmp/pane.png");
         // Main-daemon verbs are refused, not silently dropped.
-        let r = send_request(&sock, "pane-shot\tx", wait).unwrap();
+        let r = send_request(&sock, "window-shot", wait).unwrap();
         assert!(String::from_utf8_lossy(&r).starts_with("error:") || r.is_empty());
         let log = seen.lock().unwrap().clone();
         assert_eq!(log[0], "Toggle");

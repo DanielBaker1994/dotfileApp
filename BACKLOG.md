@@ -71,13 +71,25 @@ Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
 
 - Side panel exists (size, colour, grab, wheel, hex, display grid). Still missing: **text
   options** (Flameshot G3) and the **layers list** (G5).
-- The overlay's **recent button** (`ShotRecentButton`) is not drawn; `Cmd+R` works.
-- **Recents grid has no state field or verb**: `state.screenshot` carries `modePill`
-  only. Add a `screenshot:recents*` verb plus a state field if an agent should drive it.
+- Recents: the ring has a Recent button and `state live` → `screenshot.recents`
+  (`shown`, `count`, `highlighted`); there is still no `screenshot:recents*` verb.
+- Not verified in the VM (ks-input cannot move the mouse without a button): the
+  ring's hover tooltip and Cmd-drag out of a pin (AppKit-only, no unit test).
+- `.fast` OCR still drops a lone short cell ("4") and splits some words ("f iles");
+  the Copy Text card shows the result so it can be fixed before pasting.
+  `.accurate` is broken on macOS 27 (see `ShotOCRConfig::accurate`).
 - A unit test writes 1–7 byte junk `shot-*.png` files into the real
   `~/.cache/kitchen-sink/screenshots` (blank cells in the grid). Find the `record_png`
   caller in tests and point it at a temp dir.
 - Non-goals and the full Flameshot comparison: `git show 64bbd4a^:PRD-screenshot-gaps.md`.
+- **Feature ideas (owner agreed, 2026-11-27 usability review; not started):**
+  - Next-step actions on the result card: Annotate, Copy Text, Save, Reveal, plus the
+    Hyper+S tools (Text to Table when columns were found, Pretty Print for JSON,
+    Create File for the text).
+  - Copy Text from an existing picture: a recent shot, or a picture in Files / Find
+    Recent Files.
+  - QR / barcode reading during OCR (Vision's barcode request). Owner: interesting.
+  - Copy hex from the colour picker (`G`). Owner: interesting.
 
 ## Settings hub (`ws-settings`)
 

@@ -486,22 +486,51 @@ fn encode_shot_image(image: &objc2_core_graphics::CGImage) -> Option<ShotImage> 
 pub const DEFAULT_USER_COLORS: &str =
     "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080";
 
-pub const HELP_KEYS: [(&str, &str, &str); 8] = [
-    ("help-mouse", "Mouse", "Select screenshot area"),
-    ("help-save", "\u{2318}S", "Save screenshot to a file"),
-    ("help-copy", "\u{2318}C", "Copy selection to clipboard"),
-    ("help-wheel", "Mouse Wheel", "Change tool size"),
-    ("help-right-click", "Right Click", "Show color picker"),
-    ("help-space", "Space", "Open side panel"),
-    ("help-copy-text", "Tab", "Copy text mode"),
+/// Every overlay shortcut, in one table: `(config key, key label, default
+/// text, on the help card)`. The help card (shown until a selection exists)
+/// takes the `true` rows; Cmd+/ shows them all. Each text is overridable with
+/// its `[screenshot] help-*` key (rule 3).
+pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 22] = [
+    ("help-mouse", "Mouse", "Select an area \u{b7} W snaps to a window", true),
+    ("help-copy", "\u{2318}C / Return", "Copy to clipboard", true),
+    ("help-save", "\u{2318}S", "Save to a file", true),
+    ("help-pin", "\u{2318}P", "Pin on screen", true),
+    ("help-copy-text", "Tab", "Copy text mode", true),
+    ("help-record", "V", "Record the selection (Hyper+X stops)", true),
+    ("help-last-region", "L", "Select the last area again", true),
+    ("help-recent", "\u{2318}R", "Recent screenshots", true),
+    ("help-space", "Space", "Tool settings", true),
+    ("help-shortcuts", "\u{2318}/", "All shortcuts", true),
+    ("help-esc", "Esc", "Exit", true),
+    ("help-tools", "P D A R F C M T B I", "Pencil, line, arrow, rectangle, filled, circle, marker, text, pixelate, invert", false),
+    ("help-retake", "\u{2318}T", "Retake after the delay (menus, hovers)", false),
+    ("help-copy-text-now", "\u{21e7}\u{2318}C", "Copy the text in the selection", false),
+    ("help-wheel", "Mouse Wheel", "Change tool size", false),
+    ("help-right-click", "Right Click", "Colour wheel", false),
+    ("help-grab", "G", "Pick a colour from the screen", false),
+    ("help-arrows", "Arrows", "Move the selection (\u{21e7} resizes)", false),
+    ("help-move", "\u{2318}M", "Move mode", false),
+    ("help-undo", "\u{2318}Z / \u{21e7}\u{2318}Z", "Undo / redo", false),
+    ("help-select-all", "\u{2318}A", "Select the whole screen", false),
+    ("help-delete", "Delete", "Delete the selected drawing", false),
+];
+
+pub const HELP_TEXT_KEYS: [(&str, &str, &str); 4] = [
+    ("help-text", "Mouse", "Drag over text to copy it"),
+    ("help-text-mode", "Tab", "Back to screenshot mode"),
+    ("help-recent", "\u{2318}R", "Recent screenshots"),
     ("help-esc", "Esc", "Exit"),
 ];
 
-pub const HELP_TEXT_KEYS: [(&str, &str, &str); 3] = [
-    ("help-text", "Mouse", "Drag over text to copy it"),
-    ("help-text-mode", "Tab", "Back to screenshot mode"),
-    ("help-esc", "Esc", "Exit"),
-];
+/// `(label, text)` rows from [`SHORTCUT_KEYS`]: the help card's (`card_only`)
+/// or all of them, each text through `text(config key, default)`.
+pub fn shortcut_rows(card_only: bool, text: impl Fn(&str, &str) -> String) -> Vec<(String, String)> {
+    SHORTCUT_KEYS
+        .iter()
+        .filter(|(_, _, _, card)| *card || !card_only)
+        .map(|(key, label, def, _)| (label.to_string(), text(key, def)))
+        .collect()
+}
 
 fn hex(s: &str) -> ShotColor {
     ShotColor::from_hex(s).unwrap_or(ShotColor::BLACK)
@@ -602,6 +631,8 @@ pub struct ScreenshotConfig {
     pub history_dir: String,
     pub copy_path_after_save: bool,
     pub preview: bool,
+    /// Unused since every kept capture saves its area (for L); still parsed
+    /// so old configs load.
     pub save_last_region: bool,
     pub undo_limit: i64,
     /// Recents ▸ Shift-click merge (`[screenshot] merge-*`).
@@ -623,6 +654,12 @@ pub struct ScreenshotConfig {
     pub no_text_toast: String,
     pub help_text_rows: Vec<(String, String)>,
     pub shortcuts: Vec<(String, String)>,
+    /// Cmd+T: hide the overlay, wait this long, capture the same area again
+    /// (`[screenshot] retake-delay`, seconds; for menus and hover states).
+    pub retake_delay_ms: i64,
+    /// After Copy Text: the card showing what was copied (`[screenshot]
+    /// text-card`, `text-card-*`). `None` = off (toast only).
+    pub text_card: Option<crate::ui::text_card::TextCardSpec>,
 }
 
 impl Default for ScreenshotConfig {
@@ -670,10 +707,7 @@ impl Default for ScreenshotConfig {
             permission_toast: "Screen Recording permission needed \u{2014} opening Settings\u{2026}"
                 .to_string(),
             fail_toast: "Screen capture failed".to_string(),
-            help_rows: HELP_KEYS
-                .iter()
-                .map(|(_, label, text)| (label.to_string(), text.to_string()))
-                .collect(),
+            help_rows: shortcut_rows(true, |_, d| d.to_string()),
             start_text: false,
             ocr: ShotOCRConfigModel::default(),
             text_toast: "Copied {} to clipboard".to_string(),
@@ -682,7 +716,9 @@ impl Default for ScreenshotConfig {
                 .iter()
                 .map(|(_, label, text)| (label.to_string(), text.to_string()))
                 .collect(),
-            shortcuts: Vec::new(),
+            shortcuts: shortcut_rows(false, |_, d| d.to_string()),
+            retake_delay_ms: 3000,
+            text_card: Some(crate::ui::text_card::TextCardSpec::default()),
         }
     }
 }
@@ -825,6 +861,19 @@ impl ScreenshotConfig {
         c.counter_outline = b("counter-outline", true);
         c.insecure_pixelate = b("insecure-pixelate", false);
         c.delay_ms = i("delay", 0, 0, 60_000);
+        c.retake_delay_ms = i("retake-delay", 3, 1, 30) * 1000;
+        c.text_card = b("text-card", true).then(|| {
+            let td = crate::ui::text_card::TextCardSpec::default();
+            crate::ui::text_card::TextCardSpec {
+                title: td.title.clone(),
+                hint: s("text-card-hint", &td.hint),
+                undo_label: s("text-card-undo", &td.undo_label),
+                undone_toast: s("text-card-undone-toast", &td.undone_toast),
+                edited_toast: s("text-card-edited-toast", &td.edited_toast),
+                hold_secs: i("text-card-seconds", 6, 2, 60) as f64,
+                max_lines: td.max_lines,
+            }
+        });
         c.font = e.get("font").cloned().unwrap_or_default();
         if let Some(v) = e.get("copy-toast") {
             c.copy_toast = v.clone();
@@ -834,10 +883,8 @@ impl ScreenshotConfig {
         }
         c.permission_toast = s("permission-toast", &d.permission_toast);
         c.fail_toast = s("fail-toast", &d.fail_toast);
-        c.help_rows = HELP_KEYS
-            .iter()
-            .map(|(key, label, text)| (label.to_string(), s(key, text)))
-            .collect();
+        c.help_rows = shortcut_rows(true, |k, d| s(k, d));
+        c.shortcuts = shortcut_rows(false, |k, d| s(k, d));
         c.help_text_rows = HELP_TEXT_KEYS
             .iter()
             .map(|(key, label, text)| (label.to_string(), s(key, text)))
@@ -2205,6 +2252,8 @@ pub struct ShotSession {
     pub recent_requested: bool,
     /// V: record the selection as a video once the overlay closes.
     pub record_requested: bool,
+    /// Cmd+T: the controller re-runs the capture of this area after the delay.
+    pub retake_requested: bool,
     /// The recents grid is open (the pill's third stop). Kept in sync by the
     /// controller's `toggle_recent` / `close_recent`.
     pub recent_open: bool,
@@ -2237,7 +2286,12 @@ impl ShotSession {
             doc: ShotDocument::new(cfg.undo_limit.max(1) as usize),
             color,
             text_mode: args.mode == ShotMode::Text
-                || (args.mode == ShotMode::Gui && cfg.start_text),
+                // A preset area (`--region`, `--last-region`, a Cmd+T retake)
+                // means editing a screenshot, not copying text.
+                || (args.mode == ShotMode::Gui
+                    && cfg.start_text
+                    && args.region.is_none()
+                    && !args.last_region),
             cfg,
             args,
             state,
@@ -2263,6 +2317,7 @@ impl ShotSession {
             outcome: None,
             recent_requested: false,
             record_requested: false,
+            retake_requested: false,
             recent_open: false,
             chrome_rects: std::cell::Cell::new(None),
             chrome_press: None,
@@ -2534,6 +2589,16 @@ impl ShotSession {
             let bounds = self.displays[d].bounds();
             self.select(Some(bounds), Some(d), true);
         }
+    }
+
+    /// L: select the area the last capture used (saved for every capture
+    /// that was not cancelled). `false` when there is none or its display is
+    /// gone.
+    pub fn select_last_region(&mut self) -> bool {
+        let Some(l) = self.state.last_region.clone() else { return false };
+        let Some(i) = self.displays.iter().position(|d| d.id == l.display) else { return false };
+        self.select(Some(Rect::new(l.x, l.y, l.w, l.h)), Some(i), true);
+        self.selection.is_some()
     }
 
     /// W: select the window under the pointer (macOS's Cmd+Shift+4 then
@@ -3424,6 +3489,15 @@ impl ShotSession {
             self.toggle_move_mode();
             return true;
         }
+        // Cmd+T: close, wait `retake-delay`, capture the same area again
+        // (open a menu or hover something meanwhile).
+        if k.cmd && !k.shift && ch == Some('t') {
+            if self.selection.is_some() {
+                self.retake_requested = true;
+                self.finish(ShotOutcome::Abort);
+            }
+            return true;
+        }
         // Cmd+P: pin the shot on the desktop (CleanShot / Shottr).
         if k.cmd && !k.shift && ch == Some('p') {
             if self.selection.is_some() {
@@ -3486,6 +3560,10 @@ impl ShotSession {
                 Some('w') => {
                     let wins = on_screen_windows();
                     self.select_window_under_mouse(&wins);
+                    return true;
+                }
+                Some('l') => {
+                    self.select_last_region();
                     return true;
                 }
                 // V: record the selection as a video (Hyper+X stops it).
@@ -4670,7 +4748,7 @@ pub fn layer_title(i: usize, o: &ShotObject) -> String {
     let title = match o.tool {
         ShotTool::Text => format!("Text: {}", o.text.replace('\n', " ")),
         ShotTool::Counter => format!("Counter {}", o.number),
-        t => format!("{t:?}"),
+        t => t.display_name().to_string(),
     };
     let title: String = if title.chars().count() > 26 {
         title.chars().take(25).chain(['\u{2026}']).collect()
@@ -6181,8 +6259,11 @@ mod overlay {
                 None
             };
 
-            // Help card: centred while nothing is selected.
-            if cfg.show_help && session.selection.is_none() {
+            // Cmd+/ : every shortcut (any time); else the help card, centred
+            // while nothing is selected.
+            if session.shortcuts_shown {
+                draw_rows_card(ctx, &cfg.shortcuts, cfg.ui_color, full);
+            } else if cfg.show_help && session.selection.is_none() {
                 draw_help_card(ctx, session, full);
             }
 
@@ -6391,14 +6472,19 @@ mod overlay {
         } else {
             &cfg.help_rows
         };
-        if rows.is_empty() {
-            return;
-        }
         let ui = if session.text_mode {
             SHOT_TEXT_BLUE
         } else {
             cfg.ui_color
         };
+        draw_rows_card(ctx, rows, ui, full);
+    }
+
+    /// A centred card of `key  action` rows (the help card, the Cmd+/ list).
+    fn draw_rows_card(ctx: &CGContext, rows: &[(String, String)], ui: ShotColor, full: Rect) {
+        if rows.is_empty() {
+            return;
+        }
         let (point, bold) = (14.0, 14.0);
         let key_w = rows
             .iter()
@@ -6447,8 +6533,13 @@ mod overlay {
             let r = (f.w / 2.0 - 0.5).max(1.0);
             let active = session.tool == Some(*t) || (*t == ShotTool::Move && session.move_mode);
             let hover = session.mouse.is_some_and(|(md, mp)| md == d && f.contains_point(mp));
+            // Copy is the main action (Return does the same): drawn
+            // inverted so it stands out from the other discs.
+            let primary = *t == ShotTool::Copy;
             let fill = if active {
                 cfg.ui_color.mixed(&ShotColor::BLACK, 0.25)
+            } else if primary {
+                ShotColor::WHITE.mixed(&cfg.ui_color, if hover { 0.18 } else { 0.0 })
             } else if hover {
                 cfg.ui_color.mixed(&ShotColor::WHITE, 0.18)
             } else {
@@ -6469,8 +6560,23 @@ mod overlay {
                 );
             }
             if *t != ShotTool::Size {
-                let fg = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
+                let on_ui = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
+                let fg = if primary && !active { cfg.ui_color } else { on_ui };
                 draw_symbol(t.symbol(), *f, f.h * 0.42, false, fg);
+            }
+            // The tool's key, on a small badge at the disc's lower right.
+            if let Some(letter) = t.letter() {
+                let br = (f.w * 0.2).clamp(6.0, 9.0);
+                let bc = Point::new(f.max_x() - br * 0.6, f.max_y() - br * 0.6);
+                set_fill(ctx, cfg.contrast_color);
+                CGContext::fill_ellipse_in_rect(
+                    Some(ctx),
+                    cg_rect(Rect::new(bc.x - br, bc.y - br, 2.0 * br, 2.0 * br)),
+                );
+                let label = letter.to_ascii_uppercase().to_string();
+                let pt = (br * 1.25).round();
+                let lw = shot_cg::measure_text_width(&label, pt, true);
+                draw_text_at(ctx, &label, bc.x - lw / 2.0, bc.y - pt * 0.62, pt, ShotColor::WHITE, true);
             }
             if *t == ShotTool::Size {
                 let badge = format!("{}\n{}", sel.w.round() as i64, sel.h.round() as i64);
@@ -6493,6 +6599,41 @@ mod overlay {
                 }
             }
         }
+        // The hovered button's name + key, beside it (the ring is icon-only).
+        let hovered = session.mouse.and_then(|(md, mp)| {
+            (md == d)
+                .then(|| cfg.buttons.iter().zip(layout.frames.iter()).find(|(_, f)| f.contains_point(mp)))
+                .flatten()
+        });
+        if let Some((t, f)) = hovered {
+            draw_button_tip(ctx, t.tooltip(), *f, sel, display.bounds(), cfg.contrast_color);
+        }
+    }
+
+    /// One tooltip pill next to a ring button, on the side away from the
+    /// selection, kept on screen.
+    fn draw_button_tip(ctx: &CGContext, text: &str, f: Rect, sel: Rect, bounds: Rect, bg: ShotColor) {
+        if text.is_empty() {
+            return;
+        }
+        let pt = 12.0;
+        let w = shot_cg::measure_text_width(text, pt, false) + 16.0;
+        let h = 22.0;
+        let mut x = f.mid_x() - w / 2.0;
+        let mut y = if f.min_y() >= sel.max_y() { f.max_y() + 6.0 } else { f.min_y() - h - 6.0 };
+        if y < bounds.min_y() {
+            y = f.max_y() + 6.0;
+        }
+        if y + h > bounds.max_y() {
+            y = f.min_y() - h - 6.0;
+        }
+        x = x.clamp(bounds.min_x() + 4.0, (bounds.max_x() - w - 4.0).max(bounds.min_x() + 4.0));
+        set_fill(ctx, bg.with_alpha(0.95));
+        // SAFETY: a null transform is allowed (identity).
+        let path = unsafe { CGPath::with_rounded_rect(cg_rect(Rect::new(x, y, w, h)), 6.0, 6.0, std::ptr::null()) };
+        CGContext::add_path(Some(ctx), Some(&*path));
+        CGContext::fill_path(Some(ctx));
+        draw_text_at(ctx, text, x + 8.0, y + 3.0, pt, ShotColor::WHITE, false);
     }
 
     /// `ShotWheelView`: the colour swatches around the current colour hub.
@@ -7087,8 +7228,9 @@ mod pin_window {
     use objc2::rc::Retained;
     use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBackingStoreType, NSBitmapImageRep, NSColor, NSFloatingWindowLevel, NSGraphicsContext,
-        NSPanel, NSView, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSBackingStoreType, NSBitmapImageRep, NSColor, NSDragOperation, NSDraggingContext,
+        NSDraggingSession, NSDraggingSource, NSFloatingWindowLevel, NSGraphicsContext, NSPanel,
+        NSView, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_core_graphics::{CGContext, CGImage};
     use objc2_foundation::{NSData, NSObjectProtocol, NSPoint, NSRect, NSSize};
@@ -7150,10 +7292,15 @@ mod pin_window {
                 }
             }
 
-            /// `PinView.mouseDown`: double-click closes, otherwise drag the
-            /// window (`performDrag(with:)`).
+            /// `PinView.mouseDown`: double-click closes, Cmd-drag drops the
+            /// picture into another app, otherwise drag the window
+            /// (`performDrag(with:)`).
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                if e.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Command) {
+                    self.drag_out(e);
+                    return;
+                }
                 if e.clickCount() == 2 {
                     let cb = self.ivars().on_close.borrow().clone();
                     if let Some(cb) = cb {
@@ -7195,9 +7342,54 @@ mod pin_window {
         }
 
         unsafe impl NSObjectProtocol for WSPinView {}
+
+        unsafe impl NSDraggingSource for WSPinView {
+            #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+            fn drag_mask(&self, _s: &NSDraggingSession, _ctx: NSDraggingContext) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+        }
     );
 
     impl WSPinView {
+        /// Cmd-drag: the picture as a PNG file (Slack, Mail, Finder, a
+        /// browser upload take it), with its thumbnail under the pointer.
+        fn drag_out(&self, e: &objc2_app_kit::NSEvent) {
+            use objc2::runtime::ProtocolObject;
+            use objc2_app_kit::{NSDraggingItem, NSImage, NSPasteboardWriting};
+            use objc2_foundation::{NSArray, NSString, NSURL};
+            let png = self
+                .window()
+                .and_then(|w| crate::ui::view_base::as_any(&*w).downcast_ref::<WSPinPanel>().map(|p| p.png()))
+                .unwrap_or_default();
+            if png.is_empty() {
+                return;
+            }
+            let dir = std::env::temp_dir().join("kitchen-sink-drag");
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("Screenshot {}.png", super::ShotFiles::expand("%F at %H.%M.%S"));
+            let path = dir.join(name);
+            if std::fs::write(&path, &png).is_err() {
+                return;
+            }
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+            let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> = ProtocolObject::from_retained(url);
+            let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &writer);
+            let b = self.bounds();
+            let thumb = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&png));
+            let k = (160.0 / b.size.width.max(1.0)).min(1.0);
+            let (tw, th) = (b.size.width * k, b.size.height * k);
+            let at = crate::ui::view_base::mouse_point(self, e);
+            let frame = NSRect::new(NSPoint::new(at.x - tw / 2.0, at.y - th / 2.0), NSSize::new(tw, th));
+            if let Some(t) = thumb {
+                unsafe { item.setDraggingFrame_contents(frame, Some(crate::ui::view_base::as_any(&*t))) };
+            } else {
+                item.setDraggingFrame(frame);
+            }
+            let arr = NSArray::from_retained_slice(&[item]);
+            self.beginDraggingSessionWithItems_event_source(&arr, e, ProtocolObject::from_ref(self));
+        }
+
         fn create(
             mtm: MainThreadMarker,
             image: Retained<CGImage>,
@@ -7468,6 +7660,11 @@ pub mod recent_grid {
         horizontal: Cell<bool>,
         /// Release Shift (or Return) with 2+ picked: merge them, in order.
         pub on_merge: RefCell<Option<MergeCb>>,
+        /// Keys on the highlighted shot: Space pins, Cmd+C copies, Delete
+        /// moves it to the Trash (Return opens it: `on_open`).
+        pub on_pin: RefCell<Option<EntryCb>>,
+        pub on_copy: RefCell<Option<EntryCb>>,
+        pub on_trash: RefCell<Option<EntryCb>>,
     }
 
     define_class!(
@@ -7582,6 +7779,9 @@ pub mod recent_grid {
                 tracking: RefCell::new(None),
                 on_open: RefCell::new(None),
                 on_menu: RefCell::new(None),
+                on_pin: RefCell::new(None),
+                on_copy: RefCell::new(None),
+                on_trash: RefCell::new(None),
             });
             unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h))] }
         }
@@ -7662,6 +7862,85 @@ pub mod recent_grid {
                 cb(picks, self.ivars().horizontal.get());
             }
             true
+        }
+
+        /// Arrows move the highlight (the first press lands on the newest
+        /// shot); Return opens it in the editor (or merges 2+ picks);
+        /// Space pins; Cmd+C copies; Delete moves it to the Trash.
+        /// `false` = not a grid key.
+        pub fn key(&self, e: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let n = self.ivars().entries.borrow().len();
+            let flags = e.modifierFlags();
+            let cmd = flags.contains(F::Command);
+            let cur = self.ivars().hover.get();
+            let entry = |i: Option<usize>| i.and_then(|i| self.ivars().entries.borrow().get(i).cloned());
+            let fire = |slot: &RefCell<Option<EntryCb>>, i: Option<usize>| {
+                let cb = slot.borrow().clone();
+                if let (Some(cb), Some(e)) = (cb, entry(i)) {
+                    cb(e);
+                }
+            };
+            match e.keyCode() {
+                123..=126 if !cmd => {
+                    if n == 0 {
+                        return true;
+                    }
+                    let next = match (cur, e.keyCode()) {
+                        (None, _) => 0,
+                        (Some(i), 123) => i.saturating_sub(1),
+                        (Some(i), 124) => (i + 1).min(n - 1),
+                        (Some(i), 125) => (i + COLS).min(n - 1),
+                        (Some(i), _) => i.saturating_sub(COLS),
+                    };
+                    self.ivars().hover.set(Some(next));
+                    self.scroll_to(next);
+                    self.setNeedsDisplay(true);
+                    true
+                }
+                36 | 76 => {
+                    if !self.merge_if_ready() {
+                        fire(&self.ivars().on_open, cur);
+                    }
+                    true
+                }
+                49 if !cmd => {
+                    fire(&self.ivars().on_pin, cur);
+                    true
+                }
+                8 if cmd => {
+                    fire(&self.ivars().on_copy, cur);
+                    true
+                }
+                51 | 117 => {
+                    fire(&self.ivars().on_trash, cur);
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        /// Scroll so cell `i` is fully visible.
+        fn scroll_to(&self, i: usize) {
+            let c = self.cell(i);
+            let top = HEAD_H + 4.0;
+            let bottom = self.bounds().size.height - 4.0;
+            let mut y = self.ivars().scroll.get();
+            if c.y < top {
+                y -= top - c.y;
+            } else if c.y + c.height > bottom {
+                y += c.y + c.height - bottom;
+            }
+            self.ivars().scroll.set(y.max(0.0));
+        }
+
+        /// The highlighted shot (hover or arrow keys), for state / tests.
+        pub fn highlighted(&self) -> Option<usize> {
+            self.ivars().hover.get()
+        }
+
+        pub fn count(&self) -> usize {
+            self.ivars().entries.borrow().len()
         }
 
         /// `ShotRecentView.remove(_:)` (after menu ▸ Delete).
@@ -7797,14 +8076,11 @@ pub mod recent_grid {
 
             #[unsafe(method(keyDown:))]
             fn key_down(&self, e: &NSEvent) {
-                match e.keyCode() {
-                    53 => self.escape(),
-                    // Return / Enter: merge the picks now.
-                    36 | 76 => {
-                        self.ivars().grid.merge_if_ready();
-                    }
-                    _ => {}
+                if e.keyCode() == 53 {
+                    self.escape();
+                    return;
                 }
+                self.ivars().grid.key(e);
             }
 
             /// Letting go of Shift (and Cmd) with 2+ picked merges them.
@@ -8142,6 +8418,14 @@ fn pin_menu(ctrl: &std::sync::Weak<Mutex<ScreenshotController>>, window_number: 
         MenuEntry::item("Increase Opacity", act(|c, i| c.pin_opacity(i, 0.1))),
         MenuEntry::item("Decrease Opacity", act(|c, i| c.pin_opacity(i, -0.1))),
         MenuEntry::Separator,
+        MenuEntry::Item {
+            title: "\u{2318}-drag to drop it into another app".to_string(),
+            checked: false,
+            enabled: false,
+            swatch: None,
+            hover: None,
+            action: Box::new(|| {}),
+        },
         MenuEntry::item("Close", act(|c, i| c.close_pin(i))),
     ];
     popup(entries, None, objc2_app_kit::NSEvent::mouseLocation().x, objc2_app_kit::NSEvent::mouseLocation().y);
@@ -8287,6 +8571,20 @@ impl ScreenshotController {
             Ok(child) => {
                 self.note(format!("screenshot: recording {r} -> {target}"));
                 self.recording = Some((child, target));
+                // A red frame round the area and a pill to stop it, the whole
+                // time (left out of the recording itself).
+                #[cfg(target_os = "macos")]
+                {
+                    let weak = self.self_ref.clone();
+                    rec_badge::show(rect, Box::new(move || {
+                        if let Some(c) = weak.upgrade() {
+                            if let Ok(mut c) = c.lock() {
+                                c.stop_recording();
+                            }
+                        }
+                    }));
+                }
+                #[cfg(not(target_os = "macos"))]
                 ScreenToast::show(&mut self.toast, "Recording \u{2014} press Hyper+X to stop", "record.circle");
             }
             Err(e) => {
@@ -8300,6 +8598,8 @@ impl ScreenshotController {
     /// .mov to be finalised, then copy its path and add it to Recent Files.
     pub fn stop_recording(&mut self) -> Option<String> {
         let (mut child, target) = self.recording.take()?;
+        #[cfg(target_os = "macos")]
+        rec_badge::hide();
         #[cfg(unix)]
         unsafe {
             libc::kill(child.id() as i32, libc::SIGINT);
@@ -8570,6 +8870,9 @@ impl ScreenshotController {
     }
 
     pub fn trigger(&mut self, args: &ShotArgs) -> Result<(), String> {
+        // A new capture replaces the last Copy Text card.
+        #[cfg(target_os = "macos")]
+        crate::ui::text_card::close();
         // Hyper+X while recording stops the recording instead of capturing.
         if self.recording.is_some() {
             self.stop_recording();
@@ -9083,9 +9386,23 @@ impl ScreenshotController {
                 c.redraw_overlays();
             }))
         }));
+        // Click / Return: edit it (Esc in the editor comes back here).
         let w = with.clone();
+        let horizontal = cfg.merge.horizontal;
         *grid.ivars().on_open.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
+            w(Box::new(move |c| c.open_merged_in_editor(std::slice::from_ref(&e.path), horizontal)))
+        }));
+        let w = with.clone();
+        *grid.ivars().on_pin.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             w(Box::new(move |c| c.reopen_recent_as_pin(&e.path)))
+        }));
+        let w = with.clone();
+        *grid.ivars().on_copy.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
+            w(Box::new(move |c| c.copy_recent(&e.path)))
+        }));
+        let weak_for_trash = objc2::rc::Weak::from_retained(&grid);
+        *grid.ivars().on_trash.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
+            trash_recent(&e.path, &weak_for_trash);
         }));
         let w = with.clone();
         *grid.ivars().on_merge.borrow_mut() = Some(Rc::new(move |picks: Vec<ShotRecentEntry>, horizontal: bool| {
@@ -9109,23 +9426,20 @@ impl ScreenshotController {
         let weak_grid = objc2::rc::Weak::from_retained(&grid);
         *grid.ivars().on_menu.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let (w1, w2, w3, w4) = (w.clone(), w.clone(), w.clone(), w.clone());
-            let (p1, p2, p3, p4, p5) = (
-                e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
+            let (w1, w2, w3, w4, w5) = (w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
+            let (p1, p2, p3, p4, p5, p6) = (
+                e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
             );
             let g = weak_grid.clone();
             let parent = popup_parent.clone();
             let Some(view) = weak_grid.load() else { return };
             popup_context(
                 vec![
-                    MenuEntry::item("Reopen as Pin", move || w1(Box::new(move |c| c.reopen_recent_as_pin(&p1)))),
-                    MenuEntry::item("Copy", move || {
-                        w2(Box::new(move |c| {
-                            let Some(img) = recent_image(&p2) else { return };
-                            c.abort_session();
-                            c.copy(&img, &ScreenshotConfig::load(), None);
-                        }))
+                    MenuEntry::item("Edit in Screenshot Editor", move || {
+                        w1(Box::new(move |c| c.open_merged_in_editor(std::slice::from_ref(&p1), horizontal)))
                     }),
+                    MenuEntry::item("Pin on Screen", move || w5(Box::new(move |c| c.reopen_recent_as_pin(&p6)))),
+                    MenuEntry::item("Copy", move || w2(Box::new(move |c| c.copy_recent(&p2)))),
                     MenuEntry::item("Open in Popup", move || {
                         w3(Box::new(move |c| {
                             // The grid goes away; the overlay stays live under
@@ -9141,12 +9455,7 @@ impl ScreenshotController {
                         reveal_in_workspace(&p4);
                     }),
                     MenuEntry::Separator,
-                    MenuEntry::item("Delete", move || {
-                        let _ = std::fs::remove_file(&p5);
-                        if let Some(g) = g.load() {
-                            g.remove(&p5);
-                        }
-                    }),
+                    MenuEntry::item("Move to Trash", move || trash_recent(&p5, &g)),
                 ],
                 &view,
             );
@@ -9358,6 +9667,17 @@ impl ScreenshotController {
         self.open_merged_in_editor(paths, horizontal);
     }
 
+    /// Recents ▸ Copy (menu or Cmd+C): the shot onto the clipboard. The
+    /// capture under the grid stays as it was (annotations and all).
+    #[cfg(target_os = "macos")]
+    pub fn copy_recent(&mut self, path: &str) {
+        let Some(img) = recent_image(path) else { return };
+        self.close_recent();
+        self.redraw_overlays();
+        let cfg = self.session.as_ref().map(|s| s.cfg.clone()).unwrap_or_else(ScreenshotConfig::load);
+        self.copy(&img, &cfg, None);
+    }
+
     /// The grid's `onOpen`: abort the overlay, then pin that file centred on
     /// the screen under the mouse.
     #[cfg(target_os = "macos")]
@@ -9444,12 +9764,28 @@ impl ScreenshotController {
     }
 
     pub fn copy_text(&mut self, text: &str, cfg: &ScreenshotConfig) {
+        // What the clipboard held, so the card's "Undo copy" can put it back.
+        #[cfg(target_os = "macos")]
+        let before = cfg
+            .text_card
+            .as_ref()
+            .filter(|_| objc2::MainThreadMarker::new().is_some())
+            .map(|_| crate::platform::clipboard::snapshot());
         let _ = crate::platform::set_text(text);
         self.last_output["copied"] = json!(true);
-        if !cfg.text_toast.is_empty() {
-            let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
-            let toast = cfg.text_toast.replace("{}", &summary);
-            ScreenToast::show(&mut self.toast, toast, "text.viewfinder");
+        let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
+        let title = cfg.text_toast.replace("{}", &summary);
+        #[cfg(target_os = "macos")]
+        if let (Some(spec), Some(mut before)) = (cfg.text_card.clone(), before) {
+            before.change_count = crate::platform::clipboard::change_count();
+            let title = if title.is_empty() { spec.title.clone() } else { title };
+            // The model slot keeps what the toast would have said (tests, state).
+            self.toast = Some(ScreenToast::with_symbol(title.clone(), "text.viewfinder"));
+            crate::ui::text_card::show(text, before, crate::ui::text_card::TextCardSpec { title, ..spec });
+            return;
+        }
+        if !title.is_empty() {
+            ScreenToast::show(&mut self.toast, title, "text.viewfinder");
         }
     }
 
@@ -9551,7 +9887,12 @@ impl ScreenshotController {
             .as_ref()
             .filter(|s| s.record_requested)
             .and_then(|s| s.global_selection());
-        if cfg.save_last_region && outcome != ShotOutcome::Abort {
+        // Every capture that was not cancelled (and a retake / recording)
+        // remembers its area for L and `--last-region`.
+        let retake = self.session.as_ref().is_some_and(|s| s.retake_requested);
+        let keep_region = outcome != ShotOutcome::Abort
+            || self.session.as_ref().is_some_and(|s| s.retake_requested || s.record_requested);
+        if keep_region {
             if let Some(s) = self.session.as_ref() {
                 if let (Some(a), Some(r)) = (s.active, s.selection) {
                     let d = &s.displays[a];
@@ -9577,6 +9918,20 @@ impl ScreenshotController {
             self.start_recording(r, &cfg);
             return;
         }
+        if retake {
+            self.reply = None;
+            self.last_output = json!({"outcome": "retake", "delayMs": cfg.retake_delay_ms});
+            let secs = (cfg.retake_delay_ms as f64 / 1000.0).round() as i64;
+            ScreenToast::show(&mut self.toast, format!("Retaking in {secs} s\u{2026}"), "timer");
+            let args = ShotArgs {
+                mode: ShotMode::Gui,
+                delay_ms: cfg.retake_delay_ms,
+                last_region: true,
+                ..ShotArgs::default()
+            };
+            let _ = self.trigger(&args);
+            return;
+        }
         if outcome == ShotOutcome::Abort || img.is_none() {
             self.last_output = json!({"outcome": "abort"});
             self.note("screenshot: aborted");
@@ -9585,6 +9940,10 @@ impl ScreenshotController {
         }
         let img = img.unwrap();
         if outcome == ShotOutcome::Text {
+            // Copy Text captures go to Recents too (the picture you read).
+            if let Some(png) = &img.png {
+                self.history.record_png(png, cfg.history.max(0) as usize);
+            }
             self.deliver_text(&img, &cfg, &args);
             return;
         }
@@ -9905,6 +10264,17 @@ impl ScreenshotController {
                 })
                 .collect::<Vec<_>>(),
         });
+        #[cfg(target_os = "macos")]
+        {
+            st["recents"] = match self.recent_panel.0.as_ref() {
+                Some(p) => json!({
+                    "shown": true,
+                    "count": p.grid().count(),
+                    "highlighted": p.grid().highlighted(),
+                }),
+                None => json!({"shown": false}),
+            };
+        }
         let Some(s) = &self.session else {
             return st;
         };
@@ -10069,7 +10439,8 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
             accurate: ocr.accurate,
         };
         let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
-        crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap)
+        let text = crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap);
+        crate::engines::screenshot_text::ShotOCR::tidy_paths(&text)
     }
 }
 
@@ -10204,6 +10575,179 @@ pub fn run_screenshot_message(
     });
 }
 
+/// While `V` records: a red frame round the recorded area and a pill above
+/// it ("Recording — click or Hyper+X to stop"). Both are left out of screen
+/// captures, so they never end up in the video.
+#[cfg(target_os = "macos")]
+mod rec_badge {
+    use super::Rect;
+    use crate::ui::style::{self, Weight};
+    use objc2::rc::Retained;
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSBackingStoreType, NSColor, NSEvent, NSPanel, NSScreen, NSView, NSWindowCollectionBehavior,
+        NSWindowSharingType, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LIVE: RefCell<Vec<Retained<NSPanel>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub struct PillIvars {
+        on_click: RefCell<Option<Box<dyn Fn()>>>,
+        label: String,
+    }
+
+    define_class!(
+        #[unsafe(super(crate::ui::view_base::WSFlippedView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSRecBadgePill"]
+        #[ivars = PillIvars]
+        pub struct Pill;
+
+        unsafe impl NSObjectProtocol for Pill {}
+
+        impl Pill {
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _e: &NSEvent) {}
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, _e: &NSEvent) {
+                let Some(mtm) = MainThreadMarker::new() else { return };
+                if let Some(f) = self.ivars().on_click.borrow_mut().take() {
+                    // Next run-loop turn: the click stops the recording, which
+                    // tears this panel down.
+                    let f = dispatch2::MainThreadBound::new(f, mtm);
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            (f.get(mtm))();
+                        }
+                    });
+                }
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _r: NSRect) {
+                let b = self.bounds();
+                let r = crate::ui::chrome::Rect::new(0.5, 0.5, b.size.width - 1.0, b.size.height - 1.0);
+                style::fill_rounded(r, r.height / 2.0, crate::ui::theme::Rgba::new(0.12, 0.12, 0.12, 0.94));
+                let dot = crate::ui::chrome::Rect::new(12.0, (b.size.height - 10.0) / 2.0, 10.0, 10.0);
+                style::fill_rounded(dot, 5.0, crate::ui::theme::Rgba::new(1.0, 0.23, 0.19, 1.0));
+                let f = style::system_font(12.5, Weight::Medium);
+                style::draw_text_left(
+                    &self.ivars().label,
+                    crate::ui::chrome::Rect::new(30.0, (b.size.height - 16.0) / 2.0, b.size.width - 40.0, 16.0),
+                    &f,
+                    crate::ui::theme::Rgba::new(1.0, 1.0, 1.0, 1.0),
+                );
+            }
+        }
+    );
+
+    fn panel(mtm: MainThreadMarker, frame: NSRect, mouse: bool) -> Retained<NSPanel> {
+        let p = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        p.setLevel(1001);
+        p.setOpaque(false);
+        p.setBackgroundColor(Some(&NSColor::clearColor()));
+        p.setHasShadow(false);
+        p.setHidesOnDeactivate(false);
+        p.setIgnoresMouseEvents(!mouse);
+        p.setSharingType(NSWindowSharingType::None);
+        unsafe { p.setReleasedWhenClosed(false) };
+        p.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        p
+    }
+
+    /// `rect`: the recorded area, global points with a top-left origin (as
+    /// `screencapture -R` takes it).
+    pub fn show(rect: Rect, on_click: Box<dyn Fn()>) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        hide();
+        let screens = NSScreen::screens(mtm);
+        let Some(primary) = screens.iter().next() else { return };
+        let ph = primary.frame().size.height;
+        // AppKit frames grow up from the primary screen's bottom-left.
+        let pad = 3.0;
+        let area = NSRect::new(
+            NSPoint::new(rect.x - pad, ph - rect.y - rect.h - pad),
+            NSSize::new(rect.w + pad * 2.0, rect.h + pad * 2.0),
+        );
+        let frame = panel(mtm, area, false);
+        let fv = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, area.size));
+        fv.setWantsLayer(true);
+        if let Some(l) = fv.layer() {
+            l.setBorderWidth(2.0);
+            l.setBorderColor(Some(&NSColor::systemRedColor().CGColor()));
+            l.setCornerRadius(3.0);
+        }
+        frame.setContentView(Some(&fv));
+        frame.orderFrontRegardless();
+
+        let label = "Recording \u{2014} click or Hyper+X to stop".to_string();
+        let (tw, _) = style::text_size(&label, &style::system_font(12.5, Weight::Medium));
+        let (w, h) = (tw + 44.0, 28.0);
+        // Above the area when there is room, else just inside its top edge.
+        let mut y = area.origin.y + area.size.height + 8.0;
+        if y + h > ph {
+            y = area.origin.y + area.size.height - h - 8.0;
+        }
+        let at = NSRect::new(NSPoint::new(area.origin.x + (area.size.width - w) / 2.0, y), NSSize::new(w, h));
+        let pill_panel = panel(mtm, at, true);
+        let pill: Retained<Pill> = {
+            let this = Pill::alloc(mtm).set_ivars(PillIvars { on_click: RefCell::new(Some(on_click)), label });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::ZERO, at.size)] }
+        };
+        let pv: &NSView = &pill;
+        pill_panel.setContentView(Some(pv));
+        pill_panel.orderFrontRegardless();
+        LIVE.with(|l| *l.borrow_mut() = vec![frame, pill_panel]);
+    }
+
+    pub fn hide() {
+        LIVE.with(|l| {
+            for p in l.borrow_mut().drain(..) {
+                p.orderOut(None);
+            }
+        });
+    }
+}
+
+/// Recents ▸ Move to Trash (menu or Delete): to the Trash (recoverable),
+/// never a plain delete; the cell goes from the grid.
+#[cfg(target_os = "macos")]
+fn trash_recent(path: &str, grid: &objc2::rc::Weak<recent_grid::ShotRecentView>) {
+    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(path));
+    let ok = objc2_foundation::NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .is_ok();
+    if ok {
+        if let Some(g) = grid.load() {
+            g.remove(path);
+        }
+        crate::ui::toast::show("Moved to Trash", "trash");
+    } else {
+        crate::ui::toast::show("Couldn't move it to the Trash", "exclamationmark.triangle.fill");
+    }
+}
+
 /// Register the `do:screenshot:*` hooks into the shared [`Registry`].
 pub fn register_controller(reg: &mut Registry, controller: Arc<Mutex<ScreenshotController>>) {
     #[cfg(target_os = "macos")]
@@ -10327,8 +10871,11 @@ impl ScreenshotController {
             sc.copy_toast = toast;
             self.copy(&shot.image, &sc, None);
         }
+        // The floating preview: the same pin a screenshot's preview uses
+        // (Esc / double-click closes it, Cmd-drag drops it into an app).
+        #[cfg(target_os = "macos")]
         if cfg.preview {
-            self.note("pane-shot: preview window not ported");
+            self.pin_centered(&shot.image);
         }
         let ms = now_millis() - started_ms;
         self.pane_shot_last = json!({
@@ -10354,6 +10901,17 @@ impl ScreenshotController {
         path.unwrap_or_else(|| "copied".to_string())
     }
 
+    /// Pin `img` centred on the screen under the mouse, at its real size.
+    #[cfg(target_os = "macos")]
+    pub fn pin_centered(&mut self, img: &ShotImage) {
+        let scale = mouse_screen_scale().max(1.0);
+        let (w, h) = (img.width as f64 / scale, img.height as f64 / scale);
+        let frame = mouse_screen_frame().map(|f| {
+            Rect::new(f.origin.x + f.size.width / 2.0 - w / 2.0, f.origin.y + f.size.height / 2.0 - h / 2.0, w, h)
+        });
+        self.pin(img, frame, None);
+    }
+
     /// A pane-shot that failed before delivery (`paneShotLast = ["error": …]`).
     pub fn pane_shot_failed(&mut self, message: &str) {
         self.pane_shot_last = json!({ "error": message });
@@ -10374,6 +10932,64 @@ pub fn mouse_screen_scale() -> f64 {
 
 pub fn epoch_millis() -> i64 {
     now_millis()
+}
+
+/// `[pane-shot]` from a commands.toml text (pure scan; both processes).
+pub fn pane_shot_config(text: &str) -> crate::engines::pane_shot::PaneShotConfig {
+    let sections = crate::app::sections::parse_sections(text);
+    crate::engines::pane_shot::PaneShotConfig::from_entries(&sections.get("pane-shot").cloned().unwrap_or_default())
+}
+
+/// `pane-shot[\tWORDS]` for both the main daemon and the quick agent (one
+/// implementation, rule 7): render the terminal pane off the main thread,
+/// then save / copy / preview through `on_main`, and answer `reply` with the
+/// saved path, `copied`, or `error: …`. Main thread (it reads the screen
+/// scale).
+#[cfg(target_os = "macos")]
+pub fn run_pane_shot_message(
+    controller: Arc<Mutex<ScreenshotController>>,
+    words: Vec<String>,
+    cfg: crate::engines::pane_shot::PaneShotConfig,
+    reply: Option<crate::app::socket::Reply>,
+    on_main: Box<dyn FnOnce(Box<dyn FnOnce() + Send>) + Send>,
+) {
+    let args = match crate::engines::pane_shot::PaneShotArgs::parse(&words) {
+        Ok(a) => a,
+        Err(p) => {
+            if let Some(r) = reply {
+                r.send(&format!("error: {}", p.message));
+            }
+            return;
+        }
+    };
+    let scale = if objc2::MainThreadMarker::new().is_some() { mouse_screen_scale() } else { 2.0 };
+    std::thread::spawn(move || {
+        let started = now_millis();
+        let result = pane_shot_image(&args, &cfg, scale);
+        on_main(Box::new(move || {
+            let mut c = controller.lock().unwrap();
+            let line = match result {
+                Ok(shot) => c.deliver_pane_shot(&shot, &args, &cfg, started),
+                Err(f) => {
+                    c.pane_shot_failed(&f.message);
+                    format!("error: {}", f.message)
+                }
+            };
+            #[cfg(target_os = "macos")]
+            c.install_key_monitor();
+            drop(c);
+            if let Some(r) = reply {
+                r.send(&line);
+            }
+        }));
+    });
+}
+
+/// `on_main` for [`run_pane_shot_message`] in a process without its own main
+/// queue (the quick agent): GCD's main queue.
+#[cfg(target_os = "macos")]
+pub fn gcd_main(job: Box<dyn FnOnce() + Send>) {
+    dispatch2::DispatchQueue::main().exec_async(job);
 }
 
 // __PART_G__
@@ -10662,6 +11278,106 @@ mod tests {
 
     fn ki(code: u16, c: Option<char>, cmd: bool, ctrl: bool) -> KeyInput {
         KeyInput { key_code: code, chars: c, cmd, ctrl, shift: false, opt: false, esc_streak: 0 }
+    }
+
+    #[test]
+    fn l_reselects_the_last_area() {
+        let mut s = session();
+        assert!(!s.handle_key(&ki(37, Some('l'), false, false)) || s.selection.is_none(), "no last area: nothing selected");
+        s.state.last_region = Some(crate::engines::screenshot_annotations::ShotRegion {
+            display: 1,
+            x: 10.0,
+            y: 20.0,
+            w: 300.0,
+            h: 200.0,
+        });
+        assert!(s.handle_key(&ki(37, Some('l'), false, false)));
+        let r = s.selection.expect("L selected the last area");
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 20.0, 300.0, 200.0));
+        s.state.last_region.as_mut().unwrap().display = 99;
+        s.selection = None;
+        assert!(!s.select_last_region(), "a display that is gone: nothing");
+    }
+
+    #[test]
+    fn cmd_t_asks_for_a_retake_of_the_selection() {
+        let mut s = session();
+        s.handle_key(&ki(17, Some('t'), true, false));
+        assert!(!s.retake_requested && !s.finished, "no selection: Cmd+T does nothing");
+        s.test_select(Rect::new(10.0, 10.0, 100.0, 80.0), Some(0));
+        s.handle_key(&ki(17, Some('t'), true, false));
+        assert!(s.retake_requested);
+        assert_eq!(s.outcome, Some(ShotOutcome::Abort), "the overlay closes for the wait");
+        // T alone still picks the Text tool.
+        let mut s = session();
+        s.handle_key(&ki(17, Some('t'), false, false));
+        assert_eq!(s.tool, Some(ShotTool::Text));
+    }
+
+    #[test]
+    fn r_is_the_outline_box_and_f_the_filled_one() {
+        let mut s = session();
+        s.handle_key(&ki(15, Some('r'), false, false));
+        assert_eq!(s.tool, Some(ShotTool::Selection), "R = outline");
+        s.handle_key(&ki(3, Some('f'), false, false));
+        assert_eq!(s.tool, Some(ShotTool::Rectangle), "F = filled");
+        assert_eq!(ShotTool::Selection.display_name(), "Rectangle");
+        assert_eq!(ShotTool::Rectangle.display_name(), "Filled rectangle");
+    }
+
+    #[test]
+    fn help_card_is_a_subset_of_the_full_shortcut_list() {
+        let card = shortcut_rows(true, |_, d| d.to_string());
+        let all = shortcut_rows(false, |_, d| d.to_string());
+        assert!(card.len() < all.len());
+        assert!(card.iter().all(|r| all.contains(r)));
+        for key in ["V", "L", "\u{2318}P", "\u{2318}R", "\u{2318}/"] {
+            assert!(card.iter().any(|(k, _)| k == key), "{key} is on the help card");
+        }
+        let mut e = HashMap::new();
+        e.insert("help-record".to_string(), "Film it".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        assert!(c.help_rows.iter().any(|(k, t)| k == "V" && t == "Film it"), "texts come from config");
+        assert_eq!(c.shortcuts.len(), all.len());
+    }
+
+    #[test]
+    fn cmd_slash_toggles_the_full_list_in_both_modes() {
+        let mut s = session();
+        s.handle_key(&ki(44, Some('/'), true, false));
+        assert!(s.shortcuts_shown);
+        s.handle_key(&ki(44, Some('/'), true, false));
+        assert!(!s.shortcuts_shown, "again hides it");
+        s.text_mode = true;
+        s.handle_key(&ki(44, Some('/'), true, false));
+        assert!(s.shortcuts_shown, "works in Copy Text mode too");
+    }
+
+    #[test]
+    fn a_preset_area_opens_in_screenshot_mode_even_with_start_mode_text() {
+        let mut cfg = ScreenshotConfig::default();
+        cfg.start_text = true;
+        let plain = ShotSession::new(cfg.clone(), ShotArgs::default(), temp_path("st1"));
+        assert!(plain.text_mode, "Hyper+X with start-mode = text");
+        let mut a = ShotArgs::default();
+        a.last_region = true;
+        let retake = ShotSession::new(cfg, a, temp_path("st2"));
+        assert!(!retake.text_mode, "a retake / --last-region edits a screenshot");
+    }
+
+    #[test]
+    fn text_card_config_keys() {
+        let mut e = HashMap::new();
+        assert!(ScreenshotConfig::from_entries(&e).text_card.is_some(), "on by default");
+        e.insert("text-card-seconds".to_string(), "9".to_string());
+        e.insert("text-card-undo".to_string(), "Put back".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        let t = c.text_card.unwrap();
+        assert_eq!((t.hold_secs, t.undo_label.as_str()), (9.0, "Put back"));
+        e.insert("text-card".to_string(), "false".to_string());
+        assert!(ScreenshotConfig::from_entries(&e).text_card.is_none(), "off = toast only");
+        e.insert("retake-delay".to_string(), "5".to_string());
+        assert_eq!(ScreenshotConfig::from_entries(&e).retake_delay_ms, 5000);
     }
 
     fn panel_session() -> (ShotSession, PanelLayout) {

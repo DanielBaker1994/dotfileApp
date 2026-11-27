@@ -226,7 +226,8 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
             exec_launcher(paths, "screenshot");
             open_command = Some("screenshot".to_string());
         }
-        Some("pane-shot") => return Outcome::Exit(pane_shot(&sock, &args[2..])),
+        // The quick agent first (always running), then the main daemon.
+        Some("pane-shot") => return Outcome::Exit(pane_shot(&[paths.quick_socket_path(), sock.clone()], &args[2..])),
         Some(mode) if hotkey::is_hotkey_mode(mode) => {
             if send_launch_message(&sock, mode) {
                 return Outcome::Exit(0);
@@ -268,8 +269,9 @@ pub fn run(args: &[String], paths: &Paths) -> Outcome {
     }
 }
 
-/// `kitchen-sink pane-shot [ARGS]` (`-` reads the ANSI from stdin).
-fn pane_shot(sock: &str, rest: &[String]) -> i32 {
+/// `kitchen-sink pane-shot [ARGS]` (`-` reads the ANSI from stdin), sent to
+/// the first of `socks` that answers.
+fn pane_shot(socks: &[String], rest: &[String]) -> i32 {
     let mut words: Vec<String> = rest.to_vec();
     let mut tmp: Option<String> = None;
     match PaneShotArgs::parse(&words) {
@@ -294,7 +296,7 @@ fn pane_shot(sock: &str, rest: &[String]) -> i32 {
         }
     }
     let msg = std::iter::once("pane-shot".to_string()).chain(words).collect::<Vec<_>>().join("\t");
-    let reply = send_request(sock, &msg, Duration::from_secs(60));
+    let reply = socks.iter().find_map(|s| send_request(s, &msg, Duration::from_secs(60)));
     if let Some(t) = tmp {
         let _ = std::fs::remove_file(t);
     }

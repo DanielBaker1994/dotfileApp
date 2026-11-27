@@ -195,7 +195,11 @@ impl ShotTool {
         ShotTool::SizeDown,
     ];
 
-    pub const DEFAULT_BUTTONS: &'static str = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin, recent";
+    /// Tools first (the ring fills the bottom edge left → right), then the
+    /// actions, which wrap onto the top edge right → left: listed backwards
+    /// so the top row reads Copy, Copy Text, Save, Pin, Undo, Redo, Move,
+    /// Recent, Exit.
+    pub const DEFAULT_BUTTONS: &'static str = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy";
 
     pub fn raw_value(&self) -> &'static str {
         match self {
@@ -270,8 +274,10 @@ impl ShotTool {
             ShotTool::Pencil => Some('p'),
             ShotTool::Line => Some('d'),
             ShotTool::Arrow => Some('a'),
-            ShotTool::Selection => Some('s'),
-            ShotTool::Rectangle => Some('r'),
+            // R = the outline box (what "rectangle" means in most capture
+            // tools); F = the filled box, which covers what is under it.
+            ShotTool::Selection => Some('r'),
+            ShotTool::Rectangle => Some('f'),
             ShotTool::Circle => Some('c'),
             ShotTool::Marker => Some('m'),
             ShotTool::Text => Some('t'),
@@ -315,17 +321,36 @@ impl ShotTool {
         }
     }
 
+    /// The name a user sees (layers list): the outline box is "Rectangle",
+    /// the filled one "Filled rectangle" (the enum keeps Flameshot's names).
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ShotTool::Selection => "Rectangle",
+            ShotTool::Rectangle => "Filled rectangle",
+            ShotTool::Pixelate => "Pixelate",
+            ShotTool::Invert => "Invert",
+            ShotTool::Pencil => "Pencil",
+            ShotTool::Line => "Line",
+            ShotTool::Arrow => "Arrow",
+            ShotTool::Circle => "Circle",
+            ShotTool::Marker => "Marker",
+            ShotTool::Text => "Text",
+            ShotTool::Counter => "Counter",
+            _ => self.raw_value(),
+        }
+    }
+
     pub fn tooltip(&self) -> &'static str {
         match self {
             ShotTool::Pencil => "Set the Pencil as the paint tool (P)",
             ShotTool::Line => "Set the Line as the paint tool (D)",
             ShotTool::Arrow => "Set the Arrow as the paint tool (A)",
-            ShotTool::Selection => "Set Selection as the paint tool (S)",
-            ShotTool::Rectangle => "Set the Rectangle as the paint tool (R)",
+            ShotTool::Selection => "Rectangle outline (R)",
+            ShotTool::Rectangle => "Filled rectangle — covers what is under it (F)",
             ShotTool::Circle => "Set the Circle as the paint tool (C)",
             ShotTool::Marker => "Set the Marker as the paint tool (M)",
             ShotTool::Text => "Add text to your capture (T)",
-            ShotTool::Counter => "Add an autoincrementing counter bubble",
+            ShotTool::Counter => "Numbered markers 1, 2, 3",
             ShotTool::Pixelate => "Set Pixelate as the paint tool (B)",
             ShotTool::Invert => "Set Inverter as the paint tool (I)",
             ShotTool::Size => "Selection size",
@@ -335,9 +360,9 @@ impl ShotTool {
             ShotTool::Copy => "Copy selection to clipboard (\u{2318}C)",
             ShotTool::Save => "Save screenshot to a file (\u{2318}S)",
             ShotTool::Accept => "Accept the capture (Return)",
-            ShotTool::Exit => "Leave the capture screen (\u{2318}Q)",
-            ShotTool::Pin => "Pin image on the desktop",
-            ShotTool::Recent => "Recent screenshots",
+            ShotTool::Exit => "Leave the capture screen (Esc)",
+            ShotTool::Pin => "Pin image on the desktop (\u{2318}P)",
+            ShotTool::Recent => "Recent screenshots (\u{2318}R)",
             ShotTool::CopyText => "Copy the text in the selection (\u{21e7}\u{2318}C)",
             ShotTool::SizeUp => "Increase tool size",
             ShotTool::SizeDown => "Decrease tool size",

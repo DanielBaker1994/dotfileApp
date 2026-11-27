@@ -76,6 +76,59 @@ impl ShotOCR {
         }
     }
 
+    /// Images up to this many pixels are doubled for `.fast` recognition.
+    pub const FAST_UPSCALE_MAX_PIXELS: i64 = 6_000_000;
+
+    /// The scale to recognise at. `.fast` misreads screen text at native
+    /// size: on a Retina capture of a monospace table it split "Owner" into
+    /// "Owne r" and read "2026_11_27" as "2026 11 27"; at 2× both came out
+    /// right, for +20 ms on a crop and +35 ms on a whole 2048×1536 screen.
+    /// So `.fast` doubles anything up to [`Self::FAST_UPSCALE_MAX_PIXELS`];
+    /// `.accurate` keeps the Swift rule.
+    pub fn scale_for(width: i64, height: i64, accurate: bool) -> i64 {
+        if height < Self::MIN_HEIGHT {
+            return 2;
+        }
+        if !accurate && width.saturating_mul(height) <= Self::FAST_UPSCALE_MAX_PIXELS {
+            return 2;
+        }
+        1
+    }
+
+    /// Undo the space `.fast` puts before a file extension in a path:
+    /// "/x/daemon. log" → "/x/daemon.log". Only when the word before the dot
+    /// holds a `/` and the word after is a short lowercase extension, so
+    /// prose ("End. Next", "and/or. Then") is left alone.
+    pub fn tidy_paths(text: &str) -> String {
+        text.split('\n')
+            .map(|line| {
+                let mut out = String::with_capacity(line.len());
+                let mut rest = line;
+                while let Some(i) = rest.find(". ") {
+                    let (head, tail) = rest.split_at(i + 1);
+                    let word_start = head.rfind([' ', '\t']).map(|j| j + 1).unwrap_or(0);
+                    let word = &head[word_start..];
+                    let ext_len = tail[1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                        .count();
+                    let ext_end = tail[1..].chars().nth(ext_len);
+                    let ext_ok = (1..=5).contains(&ext_len)
+                        && ext_end.is_none_or(|c| c.is_whitespace() || ",;:)]'\"".contains(c));
+                    out.push_str(head);
+                    if word.contains('/') && word.len() > 2 && ext_ok {
+                        rest = &tail[1..];
+                    } else {
+                        rest = tail;
+                    }
+                }
+                out.push_str(rest);
+                out
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Vision boxes are normalized with a bottom-left origin; `join` wants
     /// pixel coordinates with a top-left origin.
     pub fn map_box(
@@ -96,7 +149,11 @@ impl ShotOCR {
 
     #[cfg(target_os = "macos")]
     pub fn recognize(img: &CGImage, cfg: &ShotOCRConfig) -> Vec<ShotOCRLine> {
-        let scale = Self::upscale_factor(CGImage::height(Some(img)) as i64) as usize;
+        let scale = Self::scale_for(
+            CGImage::width(Some(img)) as i64,
+            CGImage::height(Some(img)) as i64,
+            cfg.accurate,
+        ) as usize;
         let upscaled_owner = if scale > 1 {
             upscaled(img, scale)
         } else {
@@ -461,6 +518,28 @@ mod tests {
         assert_eq!(ShotOCR::truncate("abc", 3), "abc", "exact length kept");
         assert_eq!(ShotOCR::truncate("abcdef", 3), "abc", "long text clipped");
         assert_eq!(ShotOCR::truncate("", 0), "", "empty stays empty");
+    }
+
+    #[test]
+    fn fast_ocr_doubles_screen_sized_images() {
+        assert_eq!(ShotOCR::scale_for(784, 170, false), 2, "a crop: doubled");
+        assert_eq!(ShotOCR::scale_for(2048, 1536, false), 2, "a Retina laptop screen: doubled");
+        assert_eq!(ShotOCR::scale_for(6016, 3384, false), 1, "a 6K screen: native");
+        assert_eq!(ShotOCR::scale_for(784, 170, true), 1, "accurate keeps the Swift rule");
+        assert_eq!(ShotOCR::scale_for(784, 40, true), 2, "short images always doubled");
+    }
+
+    #[test]
+    fn tidy_paths_rejoins_split_extensions() {
+        assert_eq!(
+            ShotOCR::tidy_paths("Error: ENOENT /Users/a/logs/daemon. log"),
+            "Error: ENOENT /Users/a/logs/daemon.log"
+        );
+        assert_eq!(ShotOCR::tidy_paths("see ~/x/a. md, then"), "see ~/x/a.md, then");
+        assert_eq!(ShotOCR::tidy_paths("End. Next line"), "End. Next line", "prose untouched");
+        assert_eq!(ShotOCR::tidy_paths("and/or. Then"), "and/or. Then", "long next word is prose");
+        assert_eq!(ShotOCR::tidy_paths("a/b. c\nd/e. f"), "a/b.c\nd/e.f", "per line");
+        assert_eq!(ShotOCR::tidy_paths("tail /x/y. "), "tail /x/y. ", "nothing after the space");
     }
 
     #[test]

@@ -29,7 +29,7 @@ switcher-name = "kitchen-sink"
 
 palette-first = "paths, filefast, text-table, prettyprint"
 # The Hyper+S palette: these commands, in this order. Empty = every in-palette command.
-palette = "paths, filefast, text-table, prettyprint, find-window"
+palette = "paths, filefast, text-table, prettyprint, pane-shot, find-window"
 # System-wide hotkeys the quick agent registers itself (no window manager or
 # shell in the path). hyper = cmd+ctrl+opt+shift; e.g. "hyper+s", "cmd+shift+f5".
 # Empty = that hotkey off. Read at agent start (`kitchen-sink quick-quit` applies a change).
@@ -150,7 +150,9 @@ contrast-color = "#270032"
 contrast-opacity = 188
 draw-color = "#288000"
 user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
-buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin"
+# Tools fill the bottom edge left to right; the rest wraps onto the top edge
+# right to left, so actions are listed backwards (top row: Copy … Exit).
+buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy"
 button-size = 0
 show-help = true
 show-side-panel-button = true
@@ -183,7 +185,6 @@ jpeg-quality = 75
 save-after-copy = false
 copy-path-after-save = false
 preview = true
-save-last-region = false
 undo-limit = 100
 merge-gap = 16
 merge-gutter = 44
@@ -209,23 +210,48 @@ reverse-arrow = false
 counter-outline = true
 insecure-pixelate = false
 delay = 0
+# Cmd+T in the overlay: hide, wait this many seconds, capture the same area.
+retake-delay = 3
 font = ""
 copy-toast = "Capture saved to clipboard"
 save-toast = "Capture saved as {}"
 permission-toast = "Screen Recording permission needed — opening Settings…"
 fail-toast = "Screen capture failed"
-help-mouse = "Select screenshot area"
-help-save = "Save screenshot to a file"
-help-copy = "Copy selection to clipboard"
-help-wheel = "Change tool size"
-help-right-click = "Show color picker"
-help-space = "Open side panel"
+# Overlay shortcuts. The help card (until you select) shows the first eleven;
+# Cmd+/ shows every row. Only the texts are configurable, not the keys.
+help-mouse = "Select an area · W snaps to a window"
+help-copy = "Copy to clipboard"
+help-save = "Save to a file"
+help-pin = "Pin on screen"
 help-copy-text = "Copy text mode"
+help-record = "Record the selection (Hyper+X stops)"
+help-last-region = "Select the last area again"
+help-recent = "Recent screenshots"
+help-space = "Tool settings"
+help-shortcuts = "All shortcuts"
 help-esc = "Exit"
+help-tools = "Pencil, line, arrow, rectangle, filled, circle, marker, text, pixelate, invert"
+help-retake = "Retake after the delay (menus, hovers)"
+help-copy-text-now = "Copy the text in the selection"
+help-wheel = "Change tool size"
+help-right-click = "Colour wheel"
+help-grab = "Pick a colour from the screen"
+help-arrows = "Move the selection (⇧ resizes)"
+help-move = "Move mode"
+help-undo = "Undo / redo"
+help-select-all = "Select the whole screen"
+help-delete = "Delete the selected drawing"
 help-text = "Drag over text to copy it"
 help-text-mode = "Back to screenshot mode"
 
 [pane-shot]
+# The focused herdr terminal pane as a picture (its scrollback, not just what
+# is on screen). Hyper+S ▸ Pane Shot, or `kitchen-sink pane-shot`; works
+# without the main app.
+enabled = true
+type = "shell"
+label = "Pane Shot"
+icon = "terminal"
 lines = 200
 save = true
 copy = true

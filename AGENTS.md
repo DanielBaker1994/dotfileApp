@@ -388,7 +388,7 @@ backstop the palette remembers the frontmost app (`PALETTE_RETURN`) and hands
 focus back on cancel / popup picks (`palette_hand_back`, `pick_keeps_app`).
 The Hyper+S palette is **one list** of the `[app] palette` commands
 (`hyper_palette`; shipped: Find Recent Files, Create File, Text to Table, Pretty
-Print, Find Window). Ctrl+B W's `/` commands keep the full `in-palette` list.
+Print, Pane Shot, Find Window). Ctrl+B W's `/` commands keep the full `in-palette` list.
 
 ### Quick agent (Hyper+S / Hyper+X)
 
@@ -409,12 +409,14 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   Verbs: `ping`, `toggle` / `show` / `hide` / `quit`, `state` (JSON: `pid`,
   `palette`, `paths`, `tools`, `openTools`, `screenshotBusy`),
   `screenshot[\tWORDS]` (same words / raw-reply semantics as the main daemon,
-  shared `views::screenshot::run_screenshot_message`), `screenshot-permission`.
-  Everything else (`do:`, `reload`, `pane-shot`, …) is the main socket's.
+  shared `views::screenshot::run_screenshot_message`), `screenshot-permission`,
+  `pane-shot[\tWORDS]` (shared `run_pane_shot_message`, the main daemon's code too).
+  Everything else (`do:`, `reload`, `window-shot`, …) is the main socket's.
 - **CLI**: `kitchen-sink toggle` / `quick-toggle`, `quick-show`, `quick-quit`,
   `quick-state`, `quick-screenshot [words]` (quick only; exit 1 = no agent),
   `screenshot [words]` (quick, then a running main daemon, then
-  `bin/kitchen_sink.sh screenshot`). `kitchen-sink quick` with an agent already
+  `bin/kitchen_sink.sh screenshot`), `pane-shot [args]` (quick, then the main
+  daemon). `kitchen-sink quick` with an agent already
   holding the lock just delivers its action and exits (`open -n` starts a
   second process).
 - **Hotkeys (no AeroSpace, no shell)**: the agent registers Hyper+S (palette),
@@ -472,8 +474,9 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
 - **Not in the agent**: the views (Files, Jira, Confluence, AI — forwarded to
   the main socket), health checks (forwarded), the screenshot `do:` hooks and
   every other `do:` verb (the quick socket answers `{"error"}`), `reload`,
-  `pane-shot`. `state live` (not plain `state`, which stays cheap to poll) adds `live` (key window, frontmost app, palette
-  query/selection, tool panels, Find Recent Files cwd/selection/filter/pane),
+  `window-shot`. `state live` (not plain `state`, which stays cheap to poll) adds `live` (key window, frontmost app, palette
+  query/selection, tool panels, Find Recent Files cwd/selection/filter/pane,
+  `screenshot` = the controller's `test_state` incl. `recents`, `textCard` = the Copy Text card),
   read on the main thread with a 1.5 s cap (`null` = main did not answer).
 - **Naming**: user-facing name is Bansho, technical name kitchen-sink (see
   `PRODUCT.md` "Name"); don't rename paths, bundle id or binaries.
@@ -605,6 +608,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
 - Vim search highlight (`VimMatchOverlay`/`hlsearch`): rows are ported for the
   sidebar, files, Jira and Confluence lists; text (`NSTextView` temporary
   background) and web (`CSS.highlights`) targets are still unported.
-- `Cmd+K` action picker, `Cmd+/` shortcuts sheet, pane-shot preview window.
+- `Cmd+K` action picker, `Cmd+/` shortcuts sheet (the screenshot overlay's own
+  Cmd+/ list is drawn; the shared-window sheet is not).
   (`do:jira-jump` and the `<leader>sf` pane finder
   are ported: `views/pane_find.rs`.)

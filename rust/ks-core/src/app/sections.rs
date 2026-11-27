@@ -3,15 +3,15 @@
 
 use std::collections::HashMap;
 
-/// The sections `loadCommands` never turns into commands.
-pub const COMMAND_SECTION_SKIPS: [&str; 10] = [
+/// The sections `loadCommands` never turns into commands. (`[pane-shot]` is
+/// a command since Nov 2026: Hyper+S ▸ Pane Shot.)
+pub const COMMAND_SECTION_SKIPS: [&str; 9] = [
     "icons",
     "shortcuts",
     "app",
     "confluence",
     "ai",
     "notifications",
-    "pane-shot",
     "pane-find",
     "setup",
     "settings-hub",
