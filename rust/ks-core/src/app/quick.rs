@@ -1092,8 +1092,12 @@ mod appkit {
             }
             match code {
                 popup::KEY_ESC if plain => self.files_escape(),
+                // The shared Enter (`files_actions`): a typed path in the filter
+                // jumps there and gives the list the keys; else open the selection.
+                // (Calling `files_open_selected` here opened the first file of a
+                // Cmd+Shift+G jump in the preview and left the keys in the field.)
                 popup::KEY_RETURN | 76 if plain => {
-                    self.files_open_selected();
+                    self.files_event(crate::views::files_view::FilesEvent::Enter);
                 }
                 popup::KEY_DOWN if plain => {
                     self.files_surface(|b| b.list.move_selection(1));
