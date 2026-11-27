@@ -27,7 +27,7 @@ ws_python() {
 # everything under .build/ that is not on this list, the old second cargo tree
 # rust/target, and run output (flow-runs/, hammer/) older than 3 days.
 # Scratch output belongs in the agent's scratchpad, not here.
-WS_BUILD_KEEP="rust-target dist vm ks-input ks-ocr mcp-sandbox gui-sandbox.lock flow-runs hammer sandbox-app"
+WS_BUILD_KEEP="rust-target dist vm ks-input ks-ocr mcp-sandbox gui-sandbox.lock flow-runs quick-runs hammer sandbox-app"
 ws_prune_build() {
     local d name
     rm -rf "$WS_ROOT/rust/target"
@@ -38,7 +38,7 @@ ws_prune_build() {
         case " $WS_BUILD_KEEP " in *" $name "*) continue ;; esac
         rm -rf "$d"
     done
-    for d in flow-runs hammer; do
+    for d in flow-runs quick-runs hammer; do
         [ -d "$WS_ROOT/.build/$d" ] && find "$WS_ROOT/.build/$d" -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} +
     done
     return 0

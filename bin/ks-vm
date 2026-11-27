@@ -9,6 +9,7 @@
 #   bin/ks-vm ssh [CMD…]       shell (or one command) in the VM
 #   bin/ks-vm sync             build the working tree and copy it in (no flows run)
 #   bin/ks-vm pull GUEST HOST  copy a file out of the VM
+#   bin/ks-vm quick [--ids a,b] build, copy in, replay Tests/quick_flows.json (quick agent, real keys)
 #   bin/ks-vm grant [--check]  one-time: let ssh-run tools send keys + capture the screen
 #
 # KS_VM picks the VM (default ks-test). Each VM has its own lock, app build and run
@@ -181,9 +182,9 @@ grant_check() {
 # Accessibility / Screen Recording, and SIP keeps TCC.db read-only (it can be
 # read). Boots the VM with a window on the host, opens each pane, waits for
 # the grant to show up in TCC.db, checks with real input, goes back headless.
-tcc_granted() {   # tcc_granted SERVICE
+tcc_granted() {   # tcc_granted SERVICE [CLIENT]
     gssh "echo $GPASS | sudo -S -p '' sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db' \
-          \"select 1 from access where service='$1' and client='/usr/libexec/sshd-keygen-wrapper' and auth_value=2\"" \
+          \"select 1 from access where service='$1' and client='${2:-/usr/libexec/sshd-keygen-wrapper}' and auth_value=2\"" \
         2>/dev/null | grep -q 1
 }
 cmd_grant() {
@@ -207,6 +208,13 @@ cmd_grant() {
         for i in $(seq 1 180); do tcc_granted "$svc" && break; sleep 2; done
         tcc_granted "$svc" && say "$label granted" || { say "gave up waiting for $label"; return 1; }
     done
+    # The app's own Screen Recording (Hyper+X captures): its row is in the list
+    # once the app has asked; switch it on.
+    if ! tcc_granted kTCCServiceScreenCapture "$BUNDLE_ID"; then
+        gssh "open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'"
+        say "VM window → Screen & System Audio Recording: switch kitchen-sink ON (password admin)"
+        for i in $(seq 1 180); do tcc_granted kTCCServiceScreenCapture "$BUNDLE_ID" && break; sleep 2; done
+    fi
     gssh "osascript -e 'quit app \"System Settings\"'" 2>/dev/null || true
     say "checking …"
     local rc=0
@@ -241,6 +249,33 @@ cmd_test() {
     return $rc
 }
 
+cmd_quick() {
+    if [ -z "${KS_VM_LOCKED:-}" ]; then
+        mkdir -p "$VSTATE"
+        KS_VM_LOCKED=1 exec lockf -k "$VSTATE/test.lock" "$0" quick "$@"
+    fi
+    cmd_up
+    build_vm_app
+    sync_in
+    # Repo mode (commands.toml + bin/ beside the bundle), like the owner's checkout.
+    # ~/.config/kitchen-sink -> the checkout, as on the owner's Mac: the agent's
+    # pure config read (config::commands_conf_path) looks there.
+    gssh "pkill -f 'MacOS/kitchen-sink' ; rm -rf $G_REPO/kitchen-sink.app && cp -R $G_REPO/.build/vm-app/kitchen-sink.app $G_REPO/kitchen-sink.app
+          mkdir -p ~/.config && ln -sfn $G_REPO ~/.config/kitchen-sink"
+    local ts out rc=0 extra=""
+    [ $# -gt 0 ] && extra=$(printf '%q ' "$@")
+    ts=$(date +%Y%m%d-%H%M%S); out=".build/quick-runs/vm-$ts"
+    # Output to a file, stdin closed: anything the flows start (a forwarded
+    # main-app cold start) must not hold the ssh session open.
+    gssh "mkdir -p $G_REPO/$out && cd $G_REPO && $G_PY Tests/run_quick_flows.py --out $G_REPO/$out $extra \
+          >$G_REPO/$out/summary.txt 2>&1 </dev/null; rc=\$?; pkill -f 'MacOS/kitchen-sink'; cat $G_REPO/$out/summary.txt; exit \$rc" || rc=$?
+    mkdir -p "$ROOT/$out"
+    grsync ":$G_REPO/$out/" "$ROOT/$out/" || true
+    gssh "rm -rf $G_REPO/.build/quick-runs"
+    say "results: $out (exit $rc)"
+    return $rc
+}
+
 cmd_sync() {
     if [ -z "${KS_VM_LOCKED:-}" ]; then
         mkdir -p "$VSTATE"
@@ -263,6 +298,7 @@ case "${1:-}" in
     test)   shift; cmd_test "$@" ;;
     sync)   cmd_sync ;;
     grant)  shift; cmd_grant "$@" ;;
+    quick)  shift; cmd_quick "$@" ;;
     pull)   [ $# -eq 3 ] || die "usage: bin/ks-vm pull GUEST_PATH HOST_PATH"; grsync ":$2" "$3" ;;
     *)      die "usage: bin/ks-vm setup|up|down|status|ip|ssh [cmd]|test [run_flows args]|sync|grant [--check]|pull GUEST HOST" ;;
 esac

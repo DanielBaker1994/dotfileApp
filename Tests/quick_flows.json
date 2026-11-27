@@ -1,0 +1,626 @@
+{
+ "about": "Quick-agent regression flows (Hyper+S / Hyper+X / Find Recent Files), replayed with real keys in the VM by Tests/run_quick_flows.py (bin/ks-vm quick). One flow per fixed bug; 'from' names the fix.",
+ "flows": [
+  {
+   "id": "palette-return-first-open",
+   "from": "a936791",
+   "about": "Fresh agent: Hyper+S, 'pretty', Return, type at once -> keys land in Pretty Print, never in the app underneath",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.4
+    },
+    {
+     "type": "pretty"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "type": "qqq"
+    },
+    {
+     "check": [
+      {
+       "state": "live.tools.prettyprint.shown",
+       "equals": true
+      }
+     ],
+     "name": "Pretty Print opened",
+     "settle": 0.6
+    },
+    {
+     "check": [
+      {
+       "textedit": "absent",
+       "text": "q"
+      }
+     ],
+     "name": "nothing leaked into TextEdit"
+    }
+   ]
+  },
+  {
+   "id": "tool-esc-back-to-palette",
+   "from": "f33f310",
+   "about": "Esc in a tool picked from the palette returns to the palette; the app underneath stays frontmost",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.4
+    },
+    {
+     "type": "pretty"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 0.8
+    },
+    {
+     "check": [
+      {
+       "state": "live.tools.prettyprint.shown",
+       "equals": true
+      }
+     ],
+     "name": "Pretty Print opened"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.tools.prettyprint.shown",
+       "equals": false
+      },
+      {
+       "state": "live.palette.shown",
+       "equals": true
+      },
+      {
+       "state": "live.frontmostBundle",
+       "equals": "com.apple.TextEdit"
+      }
+     ],
+     "name": "Esc -> palette"
+    }
+   ]
+  },
+  {
+   "id": "palette-key-grammar",
+   "from": "113c181",
+   "about": "Ctrl+N moves, a plain n types, Esc clears the query, Esc again closes and hands focus back",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.4
+    },
+    {
+     "key": "ctrl+n"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.selection",
+       "equals": 1
+      },
+      {
+       "state": "live.palette.query",
+       "equals": ""
+      }
+     ],
+     "name": "Ctrl+N moves the selection"
+    },
+    {
+     "type": "n"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.query",
+       "equals": "n"
+      }
+     ],
+     "name": "plain n types"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.query",
+       "equals": ""
+      },
+      {
+       "state": "live.palette.shown",
+       "equals": true
+      }
+     ],
+     "name": "Esc clears the query"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.shown",
+       "equals": false
+      },
+      {
+       "state": "live.frontmostBundle",
+       "equals": "com.apple.TextEdit"
+      }
+     ],
+     "name": "Esc closes, TextEdit frontmost"
+    },
+    {
+     "check": [
+      {
+       "textedit": "absent",
+       "text": "n"
+      }
+     ],
+     "name": "nothing leaked into TextEdit"
+    }
+   ]
+  },
+  {
+   "id": "hyperx-esc-closes-overlay",
+   "from": "eb76b0e",
+   "about": "Hyper+X opens the overlay; a real Esc closes it (the frozen overlay ignored all input)",
+   "steps": [
+    {
+     "press": "hyper+x"
+    },
+    {
+     "wait": 1.2
+    },
+    {
+     "check": [
+      {
+       "state": "screenshotBusy",
+       "equals": true
+      }
+     ],
+     "name": "overlay up"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "wait": 0.6
+    },
+    {
+     "check": [
+      {
+       "state": "screenshotBusy",
+       "equals": false
+      }
+     ],
+     "name": "Esc closed it"
+    }
+   ]
+  },
+  {
+   "id": "recent-vim-keys",
+   "from": "f607982",
+   "files": [
+    "a.txt",
+    "b.txt",
+    "c.txt",
+    "d.txt",
+    "e.txt"
+   ],
+   "about": "Find Recent Files list ('..' + 5 files): gg j j / G / gg move the selection, / puts the keys in the filter",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "type": "recent"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.2
+    },
+    {
+     "key": "cmd+shift+g"
+    },
+    {
+     "wait": 0.6
+    },
+    {
+     "type": "~/qf"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.0
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.cwd",
+       "contains": "/qf"
+      },
+      {
+       "state": "live.files.pane",
+       "equals": "files-list"
+      }
+     ],
+     "name": "Cmd+Shift+G jump: on ~/qf, the list has the keys"
+    },
+    {
+     "key": [
+      "g",
+      "g"
+     ]
+    },
+    {
+     "key": [
+      "j",
+      "j"
+     ]
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.selection",
+       "equals": 2
+      }
+     ],
+     "name": "gg j j -> row 2"
+    },
+    {
+     "key": "shift+g"
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.selection",
+       "equals": 5
+      }
+     ],
+     "name": "G -> last row"
+    },
+    {
+     "key": [
+      "g",
+      "g"
+     ]
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.selection",
+       "equals": 0
+      }
+     ],
+     "name": "gg -> first row"
+    },
+    {
+     "key": "/"
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.pane",
+       "equals": "files-filter"
+      }
+     ],
+     "name": "/ -> filter"
+    }
+   ]
+  },
+  {
+   "id": "recent-esc-grammar",
+   "from": "06ce03b",
+   "files": [
+    "a.txt",
+    "b.txt",
+    "c.txt",
+    "d.txt",
+    "e.txt"
+   ],
+   "about": "Esc clears the filter first (window stays), then closes back to the palette",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "type": "recent"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.2
+    },
+    {
+     "key": "cmd+shift+g"
+    },
+    {
+     "wait": 0.6
+    },
+    {
+     "type": "~/qf"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.0
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.cwd",
+       "contains": "/qf"
+      },
+      {
+       "state": "live.files.pane",
+       "equals": "files-list"
+      }
+     ],
+     "name": "Cmd+Shift+G jump: on ~/qf, the list has the keys"
+    },
+    {
+     "key": "/"
+    },
+    {
+     "type": "b"
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.query",
+       "equals": "b"
+      }
+     ],
+     "name": "filter typed"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.query",
+       "equals": ""
+      },
+      {
+       "state": "live.files.shown",
+       "equals": true
+      }
+     ],
+     "name": "Esc clears, window stays"
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.shown",
+       "equals": false
+      },
+      {
+       "state": "live.palette.shown",
+       "equals": true
+      }
+     ],
+     "name": "Esc closes to the palette"
+    }
+   ]
+  },
+  {
+   "id": "recent-get-info-keeps-window",
+   "from": "d5cce0f",
+   "files": [
+    "a.txt",
+    "b.txt",
+    "c.txt",
+    "d.txt",
+    "e.txt"
+   ],
+   "about": "Cmd+I's Get Info sheet must not close Find Recent Files; OK (Return) closes the sheet, the window stays",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "type": "recent"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.2
+    },
+    {
+     "key": "cmd+shift+g"
+    },
+    {
+     "wait": 0.6
+    },
+    {
+     "type": "~/qf"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.0
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.cwd",
+       "contains": "/qf"
+      },
+      {
+       "state": "live.files.pane",
+       "equals": "files-list"
+      }
+     ],
+     "name": "Cmd+Shift+G jump: on ~/qf, the list has the keys"
+    },
+    {
+     "key": [
+      "g",
+      "g"
+     ]
+    },
+    {
+     "key": "cmd+i"
+    },
+    {
+     "wait": 0.8
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.sheet",
+       "equals": true
+      },
+      {
+       "state": "live.files.shown",
+       "equals": true
+      }
+     ],
+     "name": "sheet up, window stays"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.sheet",
+       "equals": false
+      },
+      {
+       "state": "live.files.shown",
+       "equals": true
+      }
+     ],
+     "name": "sheet gone, window stays"
+    }
+   ]
+  },
+  {
+   "id": "recent-rename-f2",
+   "from": "3fa0902",
+   "files": [
+    "a.txt",
+    "b.txt",
+    "c.txt",
+    "d.txt",
+    "e.txt"
+   ],
+   "about": "F2 on the last row (a.txt, oldest), type a name, Return -> renamed on disk",
+   "steps": [
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "type": "recent"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.2
+    },
+    {
+     "key": "cmd+shift+g"
+    },
+    {
+     "wait": 0.6
+    },
+    {
+     "type": "~/qf"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 1.0
+    },
+    {
+     "check": [
+      {
+       "state": "live.files.cwd",
+       "contains": "/qf"
+      },
+      {
+       "state": "live.files.pane",
+       "equals": "files-list"
+      }
+     ],
+     "name": "Cmd+Shift+G jump: on ~/qf, the list has the keys"
+    },
+    {
+     "key": "shift+g"
+    },
+    {
+     "key": "f2"
+    },
+    {
+     "wait": 0.5
+    },
+    {
+     "type": "renamed"
+    },
+    {
+     "key": "return"
+    },
+    {
+     "wait": 0.8
+    },
+    {
+     "check": [
+      {
+       "disk": "~/qf/a.txt",
+       "exists": false
+      },
+      {
+       "state": "live.files.rows",
+       "contains": "renamed.txt"
+      }
+     ],
+     "name": "a.txt -> renamed.txt"
+    }
+   ]
+  }
+ ]
+}
