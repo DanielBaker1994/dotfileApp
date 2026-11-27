@@ -140,7 +140,9 @@ def reset(flow):
         r = sh(KI, "activate", "--pid", textedit_pid())
     if r.returncode:
         raise RuntimeError("cannot activate TextEdit: " + r.stderr.strip())
-    time.sleep(0.3)
+    # Let the activation finish (window ordering lags `activate`): a palette
+    # shown before it lands loses key to TextEdit and closes.
+    time.sleep(1.0)
 
 
 def textedit_text():

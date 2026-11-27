@@ -724,6 +724,9 @@ pub struct ToolPanel {
     ff_copy_btn: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
     /// The last header click (`onHeaderButton`), drained by `poll`.
     click: std::rc::Rc<std::cell::Cell<i32>>,
+    /// Set by the panel's own Esc handler: the next close was Esc (so the
+    /// quick agent goes back to the palette). Read with `take_closed_by_esc`.
+    esc_closed: std::rc::Rc<std::cell::Cell<bool>>,
     #[cfg(target_os = "macos")]
     chrome: Option<Retained<crate::ui::chrome::PopupChrome>>,
     #[cfg(target_os = "macos")]
@@ -797,6 +800,7 @@ impl ToolPanel {
             #[cfg(target_os = "macos")]
             ff_copy_btn: None,
             click: std::rc::Rc::new(std::cell::Cell::new(0)),
+            esc_closed: std::rc::Rc::new(std::cell::Cell::new(false)),
             #[cfg(target_os = "macos")]
             chrome: None,
             #[cfg(target_os = "macos")]
@@ -926,6 +930,11 @@ impl ToolPanel {
     /// Hand focus back to `pid` when the panel closes itself (`None` = stay).
     pub fn set_return_pid(&mut self, pid: Option<i32>) {
         self.return_pid = pid;
+    }
+
+    /// Whether the last close came from the panel's Esc (and clear it).
+    pub fn take_closed_by_esc(&self) -> bool {
+        self.esc_closed.replace(false)
     }
 
     /// The input text: the AppKit editor, else the model's mirror.
@@ -1790,12 +1799,14 @@ impl ToolPanel {
                 // shortcuts) passes through.
                 let panel_ref = panel.clone();
                 let click = self.click.clone();
+                let esc_closed = self.esc_closed.clone();
                 let monitor = crate::ui::popup::install_local_monitor(mtm, move |event| {
                     if !panel_ref.isKeyWindow() {
                         return false;
                     }
                     let key = crate::ui::popup::key_input_from_event(event);
                     if key.key_code == crate::ui::popup::KEY_ESC && !key.cmd && !key.ctrl {
+                        esc_closed.set(true);
                         click.set(crate::ui::chrome::HEADER_CLOSE_ID);
                         return true;
                     }
@@ -1881,6 +1892,7 @@ impl ToolPanel {
                     let dir = self.filefast_dir();
                     let out = self.ff_out.clone();
                     let pending = self.ff_pending.clone();
+                    let esc_closed = self.esc_closed.clone();
                     let monitor = crate::ui::popup::install_local_monitor(mtm, move |event| {
                         // This panel's events only (not `isKeyWindow`: opened from
                         // the palette it may not be key yet, and Tab then died).
@@ -1904,6 +1916,7 @@ impl ToolPanel {
                             return true;
                         }
                         if key.key_code == crate::ui::popup::KEY_ESC {
+                            esc_closed.set(true);
                             panel_ref.orderOut(None);
                             return true;
                         }

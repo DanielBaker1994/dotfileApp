@@ -416,6 +416,8 @@ mod appkit {
         /// (`"paths"` or a tool name) and the app to hand back to. Esc on that
         /// surface returns to the palette; only Esc on the palette closes.
         back_to: RefCell<Option<(String, Option<i32>)>>,
+        /// When our key monitor last saw Esc go down.
+        last_esc: Cell<Option<Instant>>,
     }
 
     impl QuickUi {
@@ -799,7 +801,8 @@ mod appkit {
         fn poll_tick(&self) -> bool {
             let Some(mtm) = MainThreadMarker::new() else { return false };
             let mut any = false;
-            let mut closed: Vec<String> = Vec::new();
+            // (tool, closed by its own Esc)
+            let mut closed: Vec<(String, bool)> = Vec::new();
             if let Ok(mut tools) = self.tools.try_borrow_mut() {
                 let key_wid: i64 = NSApplication::sharedApplication(mtm)
                     .keyWindow()
@@ -820,19 +823,21 @@ mod appkit {
                     let was_shown = panel.is_shown();
                     panel.poll();
                     if was_shown && !panel.is_shown() {
-                        closed.push(name.clone());
+                        closed.push((name.clone(), panel.take_closed_by_esc()));
                     }
                     any |= panel.is_shown();
                 }
             } else {
                 any = true;
             }
-            if !closed.is_empty() {
-                // Esc is the last event the app saw (a timer does not replace it).
-                let by_esc = esc_just_pressed(mtm);
-                for name in closed {
-                    self.surface_closed(&name, by_esc);
-                }
+            // Closed by Esc: the panel's own Esc handler said so, or (Pretty
+            // Print: AppKit closes an NSPanel on Esc itself) our key monitor saw
+            // an Esc just now. Reading the app's current event here was a
+            // guess: by this tick the close had handed focus back and the
+            // current event was no longer that Esc, so the palette stayed shut.
+            let esc_recent = self.last_esc.get().is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+            for (name, by_esc) in closed {
+                self.surface_closed(&name, by_esc || esc_recent);
             }
             self.publish_state();
             any
@@ -1418,6 +1423,10 @@ mod appkit {
         // -- keys ---------------------------------------------------------------
 
         fn route_key_event(&self, event: &NSEvent) -> bool {
+            // Every Esc down, for "did Esc close that tool?" (`poll_tick`).
+            if event.keyCode() == popup::KEY_ESC {
+                self.last_esc.set(Some(Instant::now()));
+            }
             // Ctrl+W deletes the previous word; Cmd+C/V/X/A/Z reach the field
             // editor of a non-activating popup (rule 1).
             if crate::ui::popup_keys::kill_word_in_text_input(event) {
@@ -1593,14 +1602,6 @@ mod appkit {
         }
     }
 
-    /// True when the app's current event is an Esc key-down from the last half second.
-    fn esc_just_pressed(mtm: MainThreadMarker) -> bool {
-        let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else { return false };
-        let uptime = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
-        event.r#type() == objc2_app_kit::NSEventType::KeyDown
-            && event.keyCode() == popup::KEY_ESC
-            && uptime - event.timestamp() < 0.5
-    }
 
     /// One 30 ms poll turn; reschedules only while a tool panel is up.
     fn schedule_poll() {
@@ -1681,6 +1682,7 @@ mod appkit {
             polling: Cell::new(false),
             monitor: RefCell::new(None),
             back_to: RefCell::new(None),
+            last_esc: Cell::new(None),
         });
         QUICK.with(|q| *q.borrow_mut() = Some(ui.clone()));
 
