@@ -211,6 +211,37 @@ impl ShotOCR {
         out
     }
 
+    /// Every QR / barcode payload in `img`, top to bottom (Vision's barcode
+    /// request; empty when there is none or it fails).
+    #[cfg(target_os = "macos")]
+    pub fn barcodes(img: &CGImage) -> Vec<String> {
+        use objc2_vision::VNDetectBarcodesRequest;
+        let req = unsafe { VNDetectBarcodesRequest::new() };
+        let options = NSDictionary::dictionary();
+        let handler = unsafe {
+            VNImageRequestHandler::initWithCGImage_options(VNImageRequestHandler::alloc(), img, &options)
+        };
+        let req_ref: &VNRequest = unsafe { &*(Retained::as_ptr(&req) as *const VNRequest) };
+        if handler.performRequests_error(&NSArray::arrayWithObject(req_ref)).is_err() {
+            return Vec::new();
+        }
+        let mut found: Vec<(f64, String)> = Vec::new();
+        if let Some(results) = unsafe { req.results() } {
+            for o in results.iter() {
+                let Some(p) = (unsafe { o.payloadStringValue() }) else { continue };
+                let p = p.to_string();
+                if p.trim().is_empty() || found.iter().any(|(_, q)| *q == p) {
+                    continue;
+                }
+                // Vision's origin is bottom-left: a higher y is nearer the top.
+                let y = unsafe { o.boundingBox() }.origin.y;
+                found.push((-y, p));
+            }
+        }
+        found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
     pub fn join(lines: &[ShotOCRLine]) -> String {
         ShotOCR::join_columns(lines, 0.0)
     }

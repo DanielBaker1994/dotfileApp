@@ -73,8 +73,12 @@ Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
   options** (Flameshot G3) and the **layers list** (G5).
 - Recents: the ring has a Recent button and `state live` → `screenshot.recents`
   (`shown`, `count`, `highlighted`); there is still no `screenshot:recents*` verb.
-- Not verified in the VM (ks-input cannot move the mouse without a button): the
-  ring's hover tooltip and Cmd-drag out of a pin (AppKit-only, no unit test).
+- VM GUI checks: `ks-input` drags drop the mouse-up and can leave modifiers stuck
+  (a stuck Shift squares every selection). For mouse moves, slow drags and Cmd-drags
+  use `Tests/tools/ks_mouse.swift` (`move`, `drag [--cmd]`, `flags`, `release`) and
+  `ks_droptarget.swift` for drop checks (2026-11-27: hover names, Cmd-drag out of a pin and the
+  QR / hex picks were verified that way). Press Hyper+X only after the agent logs
+  `hotkey hyper+x registered`.
 - `.fast` OCR still drops a lone short cell ("4") and splits some words ("f iles");
   the Copy Text card shows the result so it can be fixed before pasting.
   `.accurate` is broken on macOS 27 (see `ShotOCRConfig::accurate`).
@@ -88,8 +92,6 @@ Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
     Create File for the text).
   - Copy Text from an existing picture: a recent shot, or a picture in Files / Find
     Recent Files.
-  - QR / barcode reading during OCR (Vision's barcode request). Owner: interesting.
-  - Copy hex from the colour picker (`G`). Owner: interesting.
 
 ## Settings hub (`ws-settings`)
 

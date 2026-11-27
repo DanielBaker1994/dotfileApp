@@ -507,7 +507,7 @@ pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 22] = [
     ("help-copy-text-now", "\u{21e7}\u{2318}C", "Copy the text in the selection", false),
     ("help-wheel", "Mouse Wheel", "Change tool size", false),
     ("help-right-click", "Right Click", "Colour wheel", false),
-    ("help-grab", "G", "Pick a colour from the screen", false),
+    ("help-grab", "G", "Pick a colour from the screen (copies its hex)", false),
     ("help-arrows", "Arrows", "Move the selection (\u{21e7} resizes)", false),
     ("help-move", "\u{2318}M", "Move mode", false),
     ("help-undo", "\u{2318}Z / \u{21e7}\u{2318}Z", "Undo / redo", false),
@@ -554,6 +554,9 @@ pub struct ShotOCRConfigModel {
     /// `[screenshot] text-column-gap`: blocks on one row further apart than
     /// this × the line height are joined with a tab (0 = a space).
     pub column_gap: f64,
+    /// `[screenshot] text-barcodes`: a QR / barcode in the area is copied as
+    /// its payload (a URL, a Wi-Fi string …) instead of the text around it.
+    pub barcodes: bool,
 }
 
 impl Default for ShotOCRConfigModel {
@@ -563,6 +566,7 @@ impl Default for ShotOCRConfigModel {
             correction: true,
             accurate: false,
             column_gap: 0.0,
+            barcodes: true,
         }
     }
 }
@@ -651,6 +655,12 @@ pub struct ScreenshotConfig {
     pub start_text: bool,
     pub ocr: ShotOCRConfigModel,
     pub text_toast: String,
+    /// Title when Copy Text found QR / barcodes (`{}` = "a QR code", "2 codes").
+    pub code_toast: String,
+    /// `G` (pick a colour): also copy its hex (`grab-copies-hex`), with this
+    /// toast (`hex-toast`, `{}` = the hex).
+    pub grab_copies_hex: bool,
+    pub hex_toast: String,
     pub no_text_toast: String,
     pub help_text_rows: Vec<(String, String)>,
     pub shortcuts: Vec<(String, String)>,
@@ -711,6 +721,9 @@ impl Default for ScreenshotConfig {
             start_text: false,
             ocr: ShotOCRConfigModel::default(),
             text_toast: "Copied {} to clipboard".to_string(),
+            code_toast: "Copied the contents of {}".to_string(),
+            grab_copies_hex: true,
+            hex_toast: "Copied {}".to_string(),
             no_text_toast: "No text found".to_string(),
             help_text_rows: HELP_TEXT_KEYS
                 .iter()
@@ -896,6 +909,10 @@ impl ScreenshotConfig {
             .filter(|p| !p.is_empty())
             .collect();
         c.ocr.correction = b("text-correction", true);
+        c.ocr.barcodes = b("text-barcodes", true);
+        c.code_toast = s("code-toast", &d.code_toast);
+        c.grab_copies_hex = b("grab-copies-hex", true);
+        c.hex_toast = s("hex-toast", &d.hex_toast);
         c.ocr.accurate = s("text-accuracy", "fast").eq_ignore_ascii_case("accurate");
         c.ocr.column_gap = e
             .get("text-column-gap")
@@ -2235,6 +2252,8 @@ pub struct ShotSession {
     pub counter_offset: i64,
     pub side_panel_open: bool,
     pub grabbing: Option<ShotColor>,
+    /// The hex the last colour pick copied (`grab-copies-hex`).
+    pub picked_hex: Option<String>,
     /// The grab was started from the panel's Grab Color button: the panel
     /// hides for the grab and comes back when it ends (pick or cancel).
     grab_from_panel: bool,
@@ -2305,6 +2324,7 @@ impl ShotSession {
             counter_offset: 0,
             side_panel_open: false,
             grabbing: None,
+            picked_hex: None,
             grab_from_panel: false,
             hex_edit: None,
             panel_wheel: None,
@@ -3903,6 +3923,17 @@ impl ShotSession {
                     self.color = prev;
                 }
                 self.set_color(c);
+                // The picked colour's hex goes on the clipboard too (for CSS,
+                // a ticket, a design tool).
+                if self.cfg.grab_copies_hex {
+                    let hex = c.hex();
+                    #[cfg(not(test))]
+                    {
+                        crate::platform::set_text(&hex);
+                        crate::ui::toast::show(&self.cfg.hex_toast.replace("{}", &hex), "eyedropper");
+                    }
+                    self.picked_hex = Some(hex);
+                }
             }
             self.end_grab();
             return;
@@ -9764,6 +9795,12 @@ impl ScreenshotController {
     }
 
     pub fn copy_text(&mut self, text: &str, cfg: &ScreenshotConfig) {
+        self.copy_text_titled(text, cfg, None);
+    }
+
+    /// [`Self::copy_text`] with the card / toast title given (`None` = the
+    /// `text-toast` line count).
+    pub fn copy_text_titled(&mut self, text: &str, cfg: &ScreenshotConfig, title: Option<String>) {
         // What the clipboard held, so the card's "Undo copy" can put it back.
         #[cfg(target_os = "macos")]
         let before = cfg
@@ -9774,7 +9811,7 @@ impl ScreenshotController {
         let _ = crate::platform::set_text(text);
         self.last_output["copied"] = json!(true);
         let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
-        let title = cfg.text_toast.replace("{}", &summary);
+        let title = title.unwrap_or_else(|| cfg.text_toast.replace("{}", &summary));
         #[cfg(target_os = "macos")]
         if let (Some(spec), Some(mut before)) = (cfg.text_card.clone(), before) {
             before.change_count = crate::platform::clipboard::change_count();
@@ -9794,13 +9831,15 @@ impl ScreenshotController {
         // `ShotOCR.text(img, cfg.ocr)`). Failures (no permission, off-main, a
         // non-decodable image) degrade to the empty string → the no-text toast.
         let started = now_millis();
-        let text = ocr_text(img, &cfg.ocr);
+        let read = ocr_text(img, &cfg.ocr);
+        let text = read.text;
         let ms = (now_millis() - started).max(0);
         let chars = text.chars().count();
         self.last_output = json!({
             "outcome": "text",
             "size": [img.width, img.height],
             "chars": chars,
+            "codes": read.codes,
             "text": crate::engines::screenshot_text::ShotOCR::truncate(&text, 4000),
             "ms": ms,
         });
@@ -9810,6 +9849,9 @@ impl ScreenshotController {
                 cfg.no_text_toast.clone(),
                 "exclamationmark.triangle.fill",
             );
+        } else if read.codes > 0 {
+            let what = if read.codes == 1 { "a QR code".to_string() } else { format!("{} codes", read.codes) };
+            self.copy_text_titled(&text, cfg, Some(cfg.code_toast.replace("{}", &what)));
         } else {
             self.copy_text(&text, cfg);
         }
@@ -10406,6 +10448,7 @@ impl ScreenshotController {
         st["editingText"] = json!(s.editing.is_some());
         st["wheel"] = json!(s.wheel.is_some());
         st["grabbing"] = json!(s.grabbing.is_some());
+        st["pickedHex"] = json!(s.picked_hex);
         st["saveCard"] = match &s.save_card {
             Some(c) => json!({"path": c.field, "key": true}),
             None => Value::Null,
@@ -10421,18 +10464,33 @@ impl ScreenshotController {
 /// seam this module shares with `pin_window::decode_png`); off the main
 /// thread, with no Screen Recording permission, or with bytes that are not a
 /// decodable image, this degrades to the empty string — the "no text" path.
-fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
+/// What Copy Text read: barcode payloads when the area holds a QR / barcode
+/// (and `text-barcodes` is on), else the OCR text.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReadText {
+    pub text: String,
+    /// How many barcodes the text came from (0 = OCR).
+    pub codes: usize,
+}
+
+fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
     #[cfg(target_os = "macos")]
     {
         if objc2::MainThreadMarker::new().is_none() {
-            return String::new();
+            return ReadText::default();
         }
         let Some(png) = img.png.as_deref() else {
-            return String::new();
+            return ReadText::default();
         };
         let Some(image) = pin_window::decode_png(png) else {
-            return String::new();
+            return ReadText::default();
         };
+        if ocr.barcodes {
+            let codes = crate::engines::screenshot_text::ShotOCR::barcodes(&image);
+            if !codes.is_empty() {
+                return ReadText { text: codes.join("\n"), codes: codes.len() };
+            }
+        }
         let cfg = crate::engines::screenshot_text::ShotOCRConfig {
             languages: ocr.languages.clone(),
             correction: ocr.correction,
@@ -10440,7 +10498,12 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
         };
         let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
         let text = crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap);
-        crate::engines::screenshot_text::ShotOCR::tidy_paths(&text)
+        ReadText { text: crate::engines::screenshot_text::ShotOCR::tidy_paths(&text), codes: 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (img, ocr);
+        ReadText::default()
     }
 }
 
@@ -11363,6 +11426,19 @@ mod tests {
         a.last_region = true;
         let retake = ShotSession::new(cfg, a, temp_path("st2"));
         assert!(!retake.text_mode, "a retake / --last-region edits a screenshot");
+    }
+
+    #[test]
+    fn barcode_and_hex_config_keys() {
+        let mut e = HashMap::new();
+        let c = ScreenshotConfig::from_entries(&e);
+        assert!(c.ocr.barcodes && c.grab_copies_hex, "both on by default");
+        e.insert("text-barcodes".to_string(), "false".to_string());
+        e.insert("grab-copies-hex".to_string(), "false".to_string());
+        e.insert("hex-toast".to_string(), "Hex {}".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        assert!(!c.ocr.barcodes && !c.grab_copies_hex);
+        assert_eq!(c.hex_toast, "Hex {}");
     }
 
     #[test]
@@ -12460,9 +12536,9 @@ mod tests {
         // Not a decodable image, no bytes, and (off-main) any real image all
         // degrade to the empty string — never an error or a panic.
         let bad = ShotImage::with_png(10, 10, b"not-an-image".to_vec());
-        assert_eq!(ocr_text(&bad, &ShotOCRConfigModel::default()), "");
+        assert_eq!(ocr_text(&bad, &ShotOCRConfigModel::default()).text, "");
         let none = ShotImage::new(10, 10);
-        assert_eq!(ocr_text(&none, &ShotOCRConfigModel::default()), "");
+        assert_eq!(ocr_text(&none, &ShotOCRConfigModel::default()).text, "");
     }
 
     #[test]

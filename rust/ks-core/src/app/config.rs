@@ -691,7 +691,8 @@ pub const CONFIG_BOOL_KEYS: &[&str] = &[
     "in-palette", "panel", "vim-keys", "vim-mode-badge", "show-help", "show-side-panel-button",
     "show-size-badge", "magnifier", "square-magnifier", "copy-on-double-click", "save-path-fixed",
     "save-after-copy", "copy-path-after-save", "save-last-region", "reverse-arrow",
-    "counter-outline", "insecure-pixelate", "syntax-highlight",
+    "counter-outline", "insecure-pixelate", "syntax-highlight", "text-barcodes",
+    "grab-copies-hex", "text-card",
 ];
 
 pub const CONFIG_COLOR_KEYS: &[&str] = &[
@@ -761,6 +762,7 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("arrow-style", 0.0, 1.0),
     ("delay", 0.0, 60_000.0),
     ("retake-delay", 1.0, 30.0),
+    ("text-card-seconds", 2.0, 60.0),
     ("context-lines", 0.0, 1000.0),
     ("tab-width", 1.0, 16.0),
     ("time-tolerance", 0.0, 86_400.0),

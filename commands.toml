@@ -177,6 +177,13 @@ text-accuracy = "fast"
 text-column-gap = 1.0
 text-toast = "Copied {} to clipboard"
 no-text-toast = "No text found"
+# Copy Text: a QR code / barcode in the area is copied as its contents (a URL,
+# a Wi-Fi string …) instead of the text around it.
+text-barcodes = true
+code-toast = "Copied the contents of {}"
+# G (pick a colour from the screen) also copies the colour's hex.
+grab-copies-hex = true
+hex-toast = "Copied {}"
 save-path = "/private/tmp"
 save-path-fixed = false
 filename-pattern = "%F_%H-%M"
@@ -235,7 +242,7 @@ help-retake = "Retake after the delay (menus, hovers)"
 help-copy-text-now = "Copy the text in the selection"
 help-wheel = "Change tool size"
 help-right-click = "Colour wheel"
-help-grab = "Pick a colour from the screen"
+help-grab = "Pick a colour from the screen (copies its hex)"
 help-arrows = "Move the selection (⇧ resizes)"
 help-move = "Move mode"
 help-undo = "Undo / redo"
