@@ -401,6 +401,16 @@ impl VimKeys {
         VimKeysTestState { mode, pane: self.pane.clone(), search }
     }
 
+    /// Drop an open `/` search: the host showed its own filter for it instead
+    /// of the search bar, so a later Esc must not "cancel" a search nobody sees.
+    pub fn close_search(&mut self) {
+        self.search = None;
+        self.highlighting = false;
+        if self.mode == VimMode::Search {
+            self.mode = VimMode::Normal;
+        }
+    }
+
     /// `handle(_:in:)`: seeds the `gg` timeout from the current wall clock.
     pub fn handle(&mut self, key: KeyInput, ctx: &mut VimContext) -> VimAction {
         self.handle_at(key, ctx, Instant::now())
@@ -1201,6 +1211,18 @@ mod tests {
         vim.mode = VimMode::Insert;
         let mut text = VimTarget::Text(VimText::new("a\nb", 0, 300.0, 20.0));
         assert_eq!(apply(&mut vim, &mut text, "list", true, key(KEY_J, Some('j'))), VimAction::Pass);
+    }
+
+    #[test]
+    fn closed_search_does_not_swallow_the_next_esc() {
+        // Find Recent Files: `/` opens its filter instead of the search bar.
+        let mut vim = VimKeys::new();
+        let mut t = rows(20);
+        apply(&mut vim, &mut t, "list", false, key(44, Some('/')));
+        vim.close_search();
+        assert!(vim.search.is_none());
+        assert_eq!(vim.mode, VimMode::Normal);
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(KEY_ESC, None)), VimAction::Pass);
     }
 
     #[test]

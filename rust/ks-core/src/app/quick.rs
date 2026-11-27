@@ -1214,6 +1214,10 @@ mod appkit {
             match action {
                 VimAction::Pass => false,
                 VimAction::EnterInsert | VimAction::OpenSearch { .. } => {
+                    // `/` gets the filter box, not the vim search bar: drop the
+                    // search VimKeys just opened, or the next Esc in the list
+                    // "cancels" it and the window never closes.
+                    self.files_vim.borrow_mut().close_search();
                     self.files_focus_filter(false);
                     true
                 }
