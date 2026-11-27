@@ -333,7 +333,7 @@ mod appkit {
     pub fn show(copied: &str, before: Snapshot, spec: TextCardSpec, on_action: Option<Box<dyn Fn(&str, &str)>>) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         close_now(false);
-        let Some(scr) = crate::platform::main_screen() else { return };
+        let Some(scr) = crate::platform::screen_under_mouse() else { return };
         let c = PopupThemeDefaults::colors();
         let lines = copied.lines().count();
         let w = WIDTH.min(scr.frame.w - 64.0);

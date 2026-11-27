@@ -173,6 +173,8 @@ return = "copy"
 start-mode = "text"
 text-languages = ""
 text-correction = true
+# fast | accurate | auto. Keep fast: in the app, Vision's accurate model fails on
+# macOS 27 ("CRImageReaderError error 1") and Copy Text then falls back to fast.
 text-accuracy = "fast"
 text-column-gap = 1.0
 text-toast = "Copied {} to clipboard"
@@ -181,7 +183,8 @@ no-text-toast = "No text found"
 # a Wi-Fi string …) instead of the text around it.
 text-barcodes = true
 code-toast = "Copied the contents of {}"
-# G (pick a colour from the screen) also copies the colour's hex.
+# Shift+G (pick a colour from the screen) also copies the colour's hex; plain G
+# only picks it for drawing.
 grab-copies-hex = true
 hex-toast = "Copied {}"
 # The Copy Text card's next-step buttons (empty = no such button): Text to
@@ -189,6 +192,9 @@ hex-toast = "Copied {}"
 text-card-table = "Text to Table"
 text-card-pretty = "Pretty Print"
 text-card-file = "Save as File"
+# When a QR code won: copy the area's text instead.
+text-card-use-text = "Use the text instead"
+text-card-use-text-toast = "Copied the text instead"
 # Files / Find Recent Files ▸ right-click on pictures (empty = no row).
 text-menu-title = "Copy Text from Picture"
 save-path = "/private/tmp"
@@ -249,7 +255,7 @@ help-retake = "Retake after the delay (menus, hovers)"
 help-copy-text-now = "Copy the text in the selection"
 help-wheel = "Change tool size"
 help-right-click = "Colour wheel"
-help-grab = "Pick a colour from the screen (copies its hex)"
+help-grab = "Pick a colour from the screen (⇧G also copies its hex)"
 help-arrows = "Move the selection (⇧ resizes)"
 help-move = "Move mode"
 help-undo = "Undo / redo"

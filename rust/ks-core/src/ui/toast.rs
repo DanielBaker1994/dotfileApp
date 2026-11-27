@@ -82,7 +82,7 @@ mod appkit {
             return;
         }
         super::record(text);
-        let Some(scr) = crate::platform::main_screen() else { return };
+        let Some(scr) = crate::platform::screen_under_mouse() else { return };
         PANEL.with(|p| {
             if let Some(old) = p.borrow_mut().take() {
                 old.orderOut(None);

@@ -507,7 +507,7 @@ pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 22] = [
     ("help-copy-text-now", "\u{21e7}\u{2318}C", "Copy the text in the selection", false),
     ("help-wheel", "Mouse Wheel", "Change tool size", false),
     ("help-right-click", "Right Click", "Colour wheel", false),
-    ("help-grab", "G", "Pick a colour from the screen (copies its hex)", false),
+    ("help-grab", "G / \u{21e7}G", "Pick a colour from the screen (\u{21e7}G also copies its hex)", false),
     ("help-arrows", "Arrows", "Move the selection (\u{21e7} resizes)", false),
     ("help-move", "\u{2318}M", "Move mode", false),
     ("help-undo", "\u{2318}Z / \u{21e7}\u{2318}Z", "Undo / redo", false),
@@ -557,6 +557,8 @@ pub struct ShotOCRConfigModel {
     /// `[screenshot] text-barcodes`: a QR / barcode in the area is copied as
     /// its payload (a URL, a Wi-Fi string …) instead of the text around it.
     pub barcodes: bool,
+    /// `text-accuracy = auto` (the default): `.accurate` once loaded.
+    pub auto_accurate: bool,
 }
 
 impl Default for ShotOCRConfigModel {
@@ -567,6 +569,7 @@ impl Default for ShotOCRConfigModel {
             accurate: false,
             column_gap: 0.0,
             barcodes: true,
+            auto_accurate: false,
         }
     }
 }
@@ -654,8 +657,8 @@ pub struct ScreenshotConfig {
     pub text_toast: String,
     /// Title when Copy Text found QR / barcodes (`{}` = "a QR code", "2 codes").
     pub code_toast: String,
-    /// `G` (pick a colour): also copy its hex (`grab-copies-hex`), with this
-    /// toast (`hex-toast`, `{}` = the hex).
+    /// Shift+G (pick a colour): also copy its hex (`grab-copies-hex`; plain
+    /// G never touches the clipboard), with this toast (`hex-toast`).
     pub grab_copies_hex: bool,
     pub hex_toast: String,
     pub no_text_toast: String,
@@ -672,6 +675,10 @@ pub struct ScreenshotConfig {
     pub next_labels: NextStepLabels,
     /// Files ▸ right-click on pictures (`text-menu-title`; empty = no row).
     pub text_menu_title: String,
+    /// The card's button when a QR code won (`text-card-use-text`) and its
+    /// toast (`text-card-use-text-toast`).
+    pub use_text_label: String,
+    pub use_text_toast: String,
 }
 
 /// Labels for [`next_steps`] (config `text-card-table|pretty|file`).
@@ -773,6 +780,8 @@ impl Default for ScreenshotConfig {
             text_card: Some(crate::ui::text_card::TextCardSpec::default()),
             next_labels: NextStepLabels::default(),
             text_menu_title: "Copy Text from Picture".to_string(),
+            use_text_label: "Use the text instead".to_string(),
+            use_text_toast: "Copied the text instead".to_string(),
         }
     }
 }
@@ -929,6 +938,8 @@ impl ScreenshotConfig {
             }
         });
         c.text_menu_title = s("text-menu-title", &d.text_menu_title);
+        c.use_text_label = s("text-card-use-text", &d.use_text_label);
+        c.use_text_toast = s("text-card-use-text-toast", &d.use_text_toast);
         let nd = NextStepLabels::default();
         c.next_labels = NextStepLabels {
             table: s("text-card-table", &nd.table),
@@ -961,7 +972,11 @@ impl ScreenshotConfig {
         c.code_toast = s("code-toast", &d.code_toast);
         c.grab_copies_hex = b("grab-copies-hex", true);
         c.hex_toast = s("hex-toast", &d.hex_toast);
-        c.ocr.accurate = s("text-accuracy", "fast").eq_ignore_ascii_case("accurate");
+        // fast | accurate | auto (default: fast until the accurate model has
+        // loaded in the background, then accurate).
+        let acc = s("text-accuracy", "fast").to_lowercase();
+        c.ocr.accurate = acc == "accurate";
+        c.ocr.auto_accurate = acc == "auto";
         c.ocr.column_gap = e
             .get("text-column-gap")
             .and_then(|v| v.trim().parse::<f64>().ok())
@@ -2332,6 +2347,8 @@ pub struct ShotSession {
     pub grabbing: Option<ShotColor>,
     /// The hex the last colour pick copied (`grab-copies-hex`).
     pub picked_hex: Option<String>,
+    /// This grab was started with Shift+G: copy the picked hex.
+    pub grab_copies: bool,
     /// The grab was started from the panel's Grab Color button: the panel
     /// hides for the grab and comes back when it ends (pick or cancel).
     grab_from_panel: bool,
@@ -2403,6 +2420,7 @@ impl ShotSession {
             side_panel_open: false,
             grabbing: None,
             picked_hex: None,
+            grab_copies: false,
             grab_from_panel: false,
             hex_edit: None,
             panel_wheel: None,
@@ -3262,6 +3280,7 @@ impl ShotSession {
     pub fn start_grab(&mut self) {
         self.commit_text();
         self.grabbing = Some(self.color);
+        self.grab_copies = false;
     }
     pub fn cancel_grab(&mut self) {
         if let Some(prev) = self.grabbing {
@@ -3647,8 +3666,11 @@ impl ShotSession {
                     self.toggle_side_panel(None);
                     return true;
                 }
+                // G picks a colour to draw with; Shift+G also copies its hex
+                // (plain G used to overwrite the clipboard on every pick).
                 Some('g') => {
                     self.start_grab();
+                    self.grab_copies = k.shift;
                     return true;
                 }
                 Some('o') => {
@@ -4003,7 +4025,7 @@ impl ShotSession {
                 self.set_color(c);
                 // The picked colour's hex goes on the clipboard too (for CSS,
                 // a ticket, a design tool).
-                if self.cfg.grab_copies_hex {
+                if self.cfg.grab_copies_hex && self.grab_copies {
                     let hex = c.hex();
                     #[cfg(not(test))]
                     {
@@ -8900,6 +8922,7 @@ impl ScreenshotController {
             languages: self.config.ocr.languages.clone(),
             correction: self.config.ocr.correction,
             accurate: self.config.ocr.accurate,
+            auto_accurate: self.config.ocr.auto_accurate,
         };
         // Planned on main (once per process); the warm-up itself runs on a
         // background thread (`ShotOCR::warm_up_in_background`).
@@ -9941,6 +9964,12 @@ impl ScreenshotController {
     /// [`Self::copy_text`] with the card / toast title given (`None` = the
     /// `text-toast` line count).
     pub fn copy_text_titled(&mut self, text: &str, cfg: &ScreenshotConfig, title: Option<String>) {
+        self.copy_text_with(text, cfg, title, None);
+    }
+
+    /// [`Self::copy_text_titled`]; `alt` (the area's text when `text` is a QR
+    /// code's contents) adds a "Use the text instead" button to the card.
+    pub fn copy_text_with(&mut self, text: &str, cfg: &ScreenshotConfig, title: Option<String>, alt: Option<String>) {
         // What the clipboard held, so the card's "Undo copy" can put it back.
         #[cfg(target_os = "macos")]
         let before = cfg
@@ -9958,9 +9987,20 @@ impl ScreenshotController {
             let title = if title.is_empty() { spec.title.clone() } else { title };
             // The model slot keeps what the toast would have said (tests, state).
             self.toast = Some(ScreenToast::with_symbol(title.clone(), "text.viewfinder"));
-            let actions = next_steps(text, &cfg.next_labels);
-            // A next step opens that tool with the text already in it.
-            let on_action: Box<dyn Fn(&str, &str)> = Box::new(|id: &str, text: &str| {
+            let mut actions = next_steps(text, &cfg.next_labels);
+            if alt.is_some() && !cfg.use_text_label.is_empty() {
+                actions.insert(0, ("use-text".to_string(), cfg.use_text_label.clone()));
+            }
+            // A next step opens that tool with the text already in it;
+            // "use-text" copies the area's text instead of the QR contents.
+            let alt_text = alt.clone().unwrap_or_default();
+            let used_toast = cfg.use_text_toast.clone();
+            let on_action: Box<dyn Fn(&str, &str)> = Box::new(move |id: &str, text: &str| {
+                if id == "use-text" {
+                    crate::platform::set_text(&alt_text);
+                    crate::ui::toast::show(&used_toast, "text.viewfinder");
+                    return;
+                }
                 if let Some(kind) = crate::views::tools::ToolKind::from_name(id) {
                     crate::views::tools::prefill_next(kind, text);
                     crate::app::hooks::open_tool(id);
@@ -9993,6 +10033,7 @@ impl ScreenshotController {
             "size": [img.width, img.height],
             "chars": chars,
             "codes": read.codes,
+            "accurate": crate::engines::screenshot_text::ShotOCR::use_accurate(cfg.ocr.accurate, cfg.ocr.auto_accurate),
             "text": crate::engines::screenshot_text::ShotOCR::truncate(&text, 4000),
             "ms": ms,
         });
@@ -10004,7 +10045,8 @@ impl ScreenshotController {
             );
         } else if read.codes > 0 {
             let what = if read.codes == 1 { "a QR code".to_string() } else { format!("{} codes", read.codes) };
-            self.copy_text_titled(&text, cfg, Some(cfg.code_toast.replace("{}", &what)));
+            let alt = (!read.alt_text.trim().is_empty()).then(|| read.alt_text.clone());
+            self.copy_text_with(&text, cfg, Some(cfg.code_toast.replace("{}", &what)), alt);
         } else {
             self.copy_text(&text, cfg);
         }
@@ -10494,6 +10536,7 @@ impl ScreenshotController {
             "pins": self.pins.len(),
             "last": self.last_output,
             "capturing": self.capturing,
+            "ocrAccurateReady": crate::engines::screenshot_text::ShotOCR::accurate_ready(),
             "pinWids": self.pins.iter().map(|p| p.window_number).collect::<Vec<_>>(),
             "pinStates": self
                 .pins
@@ -10678,6 +10721,9 @@ pub struct ReadText {
     pub text: String,
     /// How many barcodes the text came from (0 = OCR).
     pub codes: usize,
+    /// When `text` is barcode payloads: the OCR text of the same area, for
+    /// the card's "Use the text instead".
+    pub alt_text: String,
 }
 
 fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
@@ -10692,20 +10738,25 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> ReadText {
         let Some(image) = pin_window::decode_png(png) else {
             return ReadText::default();
         };
-        if ocr.barcodes {
-            let codes = crate::engines::screenshot_text::ShotOCR::barcodes(&image);
-            if !codes.is_empty() {
-                return ReadText { text: codes.join("\n"), codes: codes.len() };
-            }
-        }
+        let codes = if ocr.barcodes {
+            crate::engines::screenshot_text::ShotOCR::barcodes(&image)
+        } else {
+            Vec::new()
+        };
         let cfg = crate::engines::screenshot_text::ShotOCRConfig {
             languages: ocr.languages.clone(),
             correction: ocr.correction,
-            accurate: ocr.accurate,
+            accurate: crate::engines::screenshot_text::ShotOCR::use_accurate(ocr.accurate, ocr.auto_accurate),
+            auto_accurate: false,
         };
-        let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
-        let text = crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap);
-        ReadText { text: crate::engines::screenshot_text::ShotOCR::tidy_paths(&text), codes: 0 }
+        let lines = crate::engines::screenshot_text::ShotOCR::recognize_text(&image, &cfg);
+        let text = crate::engines::screenshot_text::ShotOCR::tidy_paths(
+            &crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap),
+        );
+        if !codes.is_empty() {
+            return ReadText { text: codes.join("\n"), codes: codes.len(), alt_text: text };
+        }
+        ReadText { text, codes: 0, alt_text: String::new() }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -10845,6 +10896,14 @@ pub fn run_screenshot_message(
     });
 }
 
+/// The recording frame's AppKit rect for `rect` (global top-left points, as
+/// `screencapture -R` takes them): AppKit grows up from the *primary*
+/// screen's bottom-left, so the flip uses the primary height `ph` on every
+/// display (a screen left of / above the primary has negative x / y).
+pub fn rec_frame_area(rect: Rect, ph: f64, pad: f64) -> Rect {
+    Rect::new(rect.x - pad, ph - rect.y - rect.h - pad, rect.w + pad * 2.0, rect.h + pad * 2.0)
+}
+
 /// While `V` records: a red frame round the recorded area and a pill above
 /// it ("Recording — click or Hyper+X to stop"). Both are left out of screen
 /// captures, so they never end up in the video.
@@ -10955,11 +11014,8 @@ mod rec_badge {
         let Some(primary) = screens.iter().next() else { return };
         let ph = primary.frame().size.height;
         // AppKit frames grow up from the primary screen's bottom-left.
-        let pad = 3.0;
-        let area = NSRect::new(
-            NSPoint::new(rect.x - pad, ph - rect.y - rect.h - pad),
-            NSSize::new(rect.w + pad * 2.0, rect.h + pad * 2.0),
-        );
+        let f = super::rec_frame_area(rect, ph, 3.0);
+        let area = NSRect::new(NSPoint::new(f.x, f.y), NSSize::new(f.w, f.h));
         let frame = panel(mtm, area, false);
         let fv = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, area.size));
         fv.setWantsLayer(true);
@@ -11658,6 +11714,46 @@ mod tests {
         a.last_region = true;
         let retake = ShotSession::new(cfg, a, temp_path("st2"));
         assert!(!retake.text_mode, "a retake / --last-region edits a screenshot");
+    }
+
+    #[test]
+    fn only_shift_g_copies_the_hex() {
+        let mut s = session();
+        s.test_select(Rect::new(10.0, 10.0, 100.0, 80.0), Some(0));
+        s.handle_key(&ki(5, Some('g'), false, false));
+        assert!(s.grabbing.is_some() && !s.grab_copies, "G: pick only");
+        s.cancel_grab();
+        let mut shift_g = ki(5, Some('G'), false, false);
+        shift_g.shift = true;
+        s.handle_key(&shift_g);
+        assert!(s.grabbing.is_some() && s.grab_copies, "Shift+G: pick and copy");
+        s.cancel_grab();
+        s.start_grab();
+        assert!(!s.grab_copies, "the panel's Grab Color button never copies");
+    }
+
+    #[test]
+    fn recording_frame_lands_on_the_right_display() {
+        // Primary 1710x1107; a second display to its right, 1920x1080, top-aligned.
+        let on_second = rec_frame_area(Rect::new(1800.0, 100.0, 400.0, 300.0), 1107.0, 0.0);
+        assert_eq!((on_second.x, on_second.y), (1800.0, 707.0), "x unchanged, y flipped by the primary height");
+        // A display above the primary: negative top-left y -> above 1107 in AppKit.
+        let above = rec_frame_area(Rect::new(0.0, -1000.0, 200.0, 100.0), 1107.0, 3.0);
+        assert_eq!((above.x, above.y, above.w, above.h), (-3.0, 2004.0, 206.0, 106.0));
+    }
+
+    #[test]
+    fn ocr_accuracy_setting() {
+        let mut e = HashMap::new();
+        let c = ScreenshotConfig::from_entries(&e);
+        assert!(!c.ocr.auto_accurate && !c.ocr.accurate, "fast by default (accurate fails on macOS 27 in the app)");
+        e.insert("text-accuracy".to_string(), "auto".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        assert!(c.ocr.auto_accurate && !c.ocr.accurate);
+        e.insert("text-accuracy".to_string(), "Accurate".to_string());
+        assert!(ScreenshotConfig::from_entries(&e).ocr.accurate);
+        assert!(!crate::engines::screenshot_text::ShotOCR::use_accurate(false, false));
+        assert!(crate::engines::screenshot_text::ShotOCR::use_accurate(true, false));
     }
 
     #[test]

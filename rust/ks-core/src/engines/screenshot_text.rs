@@ -29,12 +29,22 @@ pub struct ShotOCRConfig {
     pub languages: Vec<String>,
     pub correction: bool,
     /// Vision's `.accurate` level instead of `.fast` (`[screenshot]
-    /// text-accuracy`). On macOS 27 (26A428) `.accurate` is broken: its
-    /// precompiled model fails to load (E5RT code 13) on ANE, GPU and CPU
-    /// alike, ~43 s per process and then an error. `.fast` reads screen text
-    /// in ~100–200 ms.
+    /// text-accuracy`). On macOS 27 (26A428) `.accurate`'s first call in a
+    /// process takes ~43 s (the model loads), then every call is as quick as
+    /// `.fast` (55 ms for a drag, 137 ms for a whole screen on an M2) and
+    /// far better: it reads the lone "4", "files", "Owner" and
+    /// "2026_11_27" that `.fast` drops or splits. (Earlier notes said it
+    /// failed outright; on 2026-11-27 it loaded, just slowly.)
     pub accurate: bool,
+    /// `text-accuracy = auto`: load `.accurate` in the background at start
+    /// ([`ShotOCR::warm_up_in_background`]) and use it once it is ready,
+    /// `.fast` until then.
+    pub auto_accurate: bool,
 }
+
+/// Whether this process has loaded Vision's `.accurate` model (set by the
+/// background warm-up when `auto_accurate`).
+static ACCURATE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl Default for ShotOCRConfig {
     fn default() -> Self {
@@ -42,6 +52,7 @@ impl Default for ShotOCRConfig {
             languages: Vec::new(),
             correction: true,
             accurate: false,
+            auto_accurate: false,
         }
     }
 }
@@ -152,6 +163,40 @@ impl ShotOCR {
         )
     }
 
+    /// [`Self::recognize`], but `.accurate` runs on a worker thread (joined,
+    /// ~55 ms): on the app's main thread it failed every time with
+    /// "CRImageReaderError error 1" after the background warm-up had loaded
+    /// the model, while the same request on a plain thread read the text.
+    #[cfg(target_os = "macos")]
+    pub fn recognize_text(img: &CGImage, cfg: &ShotOCRConfig) -> Vec<ShotOCRLine> {
+        if !cfg.accurate || objc2::MainThreadMarker::new().is_none() {
+            let lines = Self::recognize(img, cfg);
+            if lines.is_empty() && cfg.accurate {
+                return Self::recognize(img, &ShotOCRConfig { accurate: false, ..cfg.clone() });
+            }
+            return lines;
+        }
+        struct ImgRef<'a>(&'a CGImage);
+        // SAFETY: a CGImage is immutable and thread-safe (CoreGraphics); the
+        // scoped worker is joined before `img` goes out of scope.
+        unsafe impl Send for ImgRef<'_> {}
+        let r = ImgRef(img);
+        let cfg2 = cfg.clone();
+        let out = std::thread::scope(|sc| {
+            sc.spawn(move || {
+                let r = r;
+                Self::recognize(r.0, &cfg2)
+            })
+            .join()
+        });
+        match out {
+            Ok(lines) if !lines.is_empty() => lines,
+            // `.accurate` read nothing (or failed): never leave the user with
+            // "No text found" — read it again with `.fast`.
+            _ => Self::recognize(img, &ShotOCRConfig { accurate: false, ..cfg.clone() }),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn recognize(img: &CGImage, cfg: &ShotOCRConfig) -> Vec<ShotOCRLine> {
         let scale = Self::scale_for(
@@ -159,11 +204,11 @@ impl ShotOCR {
             CGImage::height(Some(img)) as i64,
             cfg.accurate,
         ) as usize;
-        let upscaled_owner = if scale > 1 {
-            upscaled(img, scale)
-        } else {
-            None
-        };
+        // Always redrawn into plain 8-bit sRGB RGBA, even at 1x: `.accurate`
+        // refuses the capture's own pixel format (a 16-bit / display-profile
+        // bitmap from the PNG decode) with "CRImageReaderError error 1" and
+        // reads nothing; `.fast` happened to accept it.
+        let upscaled_owner = upscaled(img, scale.max(1));
         let input: &CGImage = upscaled_owner.as_deref().unwrap_or(img);
 
         let req = VNRecognizeTextRequest::new();
@@ -190,7 +235,12 @@ impl ShotOCR {
             )
         };
         let req_ref: &VNRequest = unsafe { &*(Retained::as_ptr(&req) as *const VNRequest) };
-        if handler.performRequests_error(&NSArray::arrayWithObject(req_ref)).is_err() {
+        if let Err(e) = handler.performRequests_error(&NSArray::arrayWithObject(req_ref)) {
+            crate::app::logging::ws_log(&format!(
+                "screenshot: OCR ({}) failed: {}",
+                if cfg.accurate { "accurate" } else { "fast" },
+                e.localizedDescription()
+            ));
             return Vec::new();
         }
 
@@ -355,11 +405,41 @@ impl ShotOCR {
         let _ = std::thread::Builder::new().name("ks-ocr-warmup".into()).spawn(move || {
             let ms = ShotOCR::warm_up(&cfg);
             crate::app::logging::ws_log(&format!("screenshot: OCR warm-up {ms} ms (background)"));
+            // `auto`: now load `.accurate` (~43 s once per process, on this
+            // thread, low priority) and switch to it when it reads.
+            if cfg.auto_accurate && !cfg.accurate {
+                let acc = ShotOCRConfig { accurate: true, ..cfg.clone() };
+                let (ms, lines) = ShotOCR::warm_up_lines(&acc);
+                if lines > 0 {
+                    ACCURATE_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::app::logging::ws_log(&format!("screenshot: accurate OCR ready after {ms} ms (background)"));
+                } else {
+                    crate::app::logging::ws_log(&format!("screenshot: accurate OCR did not load ({ms} ms); staying on fast"));
+                }
+            }
         });
+    }
+
+    /// Whether `.accurate` is loaded in this process (see `auto_accurate`).
+    pub fn accurate_ready() -> bool {
+        ACCURATE_READY.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The level a Copy Text uses now: explicit `accurate`, or `auto` once
+    /// the accurate model is ready.
+    pub fn use_accurate(accurate: bool, auto_accurate: bool) -> bool {
+        accurate || (auto_accurate && Self::accurate_ready())
     }
 
     #[cfg(target_os = "macos")]
     pub fn warm_up(cfg: &ShotOCRConfig) -> i64 {
+        Self::warm_up_lines(cfg).0
+    }
+
+    /// [`Self::warm_up`] plus how many lines it read (0 = the model did not
+    /// work).
+    #[cfg(target_os = "macos")]
+    pub fn warm_up_lines(cfg: &ShotOCRConfig) -> (i64, usize) {
         use objc2::runtime::AnyObject;
         use objc2_core_graphics::CGColor;
         use objc2_core_text::{
@@ -370,7 +450,7 @@ impl ShotOCR {
         let start = std::time::Instant::now();
         let (w, h) = (240i64, 48i64);
         let Some(space) = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })) else {
-            return 0;
+            return (0, 0);
         };
         let Some(ctx) = (unsafe {
             CGBitmapContextCreate(
@@ -383,7 +463,7 @@ impl ShotOCR {
                 CGImageAlphaInfo::PremultipliedLast.0,
             )
         }) else {
-            return 0;
+            return (0, 0);
         };
         let white = CGColor::new_srgb(1.0, 1.0, 1.0, 1.0);
         CGContext::set_fill_color_with_color(Some(&*ctx), Some(&*white));
@@ -419,10 +499,8 @@ impl ShotOCR {
             unsafe { CTLine::with_attributed_string(ffi_cast(&*attr)).into() };
         CGContext::set_text_position(Some(&*ctx), 8.0, 14.0);
         unsafe { line.draw(&ctx) };
-        if let Some(img) = CGBitmapContextCreateImage(Some(&*ctx)) {
-            let _ = Self::recognize(&img, cfg);
-        }
-        start.elapsed().as_millis() as i64
+        let lines = CGBitmapContextCreateImage(Some(&*ctx)).map(|img| Self::recognize(&img, cfg).len()).unwrap_or(0);
+        (start.elapsed().as_millis() as i64, lines)
     }
 }
 

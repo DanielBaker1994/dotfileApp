@@ -76,6 +76,15 @@ pub fn main_screen() -> Option<ScreenInfo> {
     info(&scr)
 }
 
+/// The screen under the mouse (where the user just captured or clicked),
+/// else the main screen. Cards and toasts open here, so on a second display
+/// they appear beside the work, not on the menu-bar screen.
+#[cfg(target_os = "macos")]
+pub fn screen_under_mouse() -> Option<ScreenInfo> {
+    let p = objc2_app_kit::NSEvent::mouseLocation();
+    screen_containing(p.x, p.y).or_else(main_screen)
+}
+
 /// The screen whose frame contains `(x, y)`, else `None`.
 #[cfg(target_os = "macos")]
 pub fn screen_containing(x: f64, y: f64) -> Option<ScreenInfo> {
