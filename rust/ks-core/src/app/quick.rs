@@ -200,6 +200,9 @@ pub fn palette_rows(text: &str) -> Vec<(String, String)> {
         if !in_palette || (name == "jira-config" && !jira) {
             continue;
         }
+        if name == "pane-shot" && !crate::views::screenshot::pane_shot_listed(&sections) {
+            continue;
+        }
         let title = vars.get("label").map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
         all.push((name.clone(), title.unwrap_or_else(|| name.clone())));
     }
@@ -1672,6 +1675,12 @@ mod appkit {
             let p = p.to_vec();
             defer(move |ui| ui.show_files_at(&p));
         });
+        // Copy Text card ▸ Text to Table / Pretty Print / Create File.
+        crate::app::hooks::set_open_tool_hook(|name: &str| {
+            if let Some(kind) = ToolKind::from_name(name) {
+                defer(move |ui| ui.open_tool(kind));
+            }
+        });
 
         let shared = QuickShared::new();
         let ui = Rc::new(QuickUi {
@@ -1891,6 +1900,15 @@ label = "Hidden"
 enabled = true
 label = "AI"
 "#;
+
+    #[test]
+    fn pane_shot_row_only_with_herdr() {
+        let text = |bin: &str| {
+            format!("[app]\npalette = \"pane-shot\"\n[pane-shot]\nenabled = true\nlabel = \"Pane Shot\"\nherdr-bin = \"{bin}\"\n")
+        };
+        assert_eq!(palette_rows(&text("/bin/sh")), vec![("pane-shot".to_string(), "Pane Shot".to_string())]);
+        assert!(palette_rows(&text("/nonexistent/herdr")).is_empty(), "no herdr, no dead row");
+    }
 
     #[test]
     fn palette_rows_follow_app_palette_in_order() {

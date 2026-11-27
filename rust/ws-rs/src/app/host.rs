@@ -846,6 +846,10 @@ impl SwitcherController {
             if !in_palette || (spec.name == "jira-config" && !jira) {
                 continue;
             }
+            // Pane Shot needs herdr (shared gate with the quick agent).
+            if name == "pane-shot" && !crate::views::screenshot::pane_shot_listed(sections) {
+                continue;
+            }
             all.push(PaletteCommand::new(
                 spec.name.clone(),
                 spec.label.clone().unwrap_or_else(|| spec.name.clone()),
@@ -3460,6 +3464,16 @@ mod daemon_ui {
             h::set_cancel_click_rename_hook(|| cancel_click_rename());
             h::set_popup_file_actions_hook(|path, sheet| popup_file_menu_actions(path, sheet));
             h::set_popup_rename_hook(|path, name| popup_rename_commit(path, name));
+            // Copy Text card ▸ Text to Table / Pretty Print / Create File:
+            // the same `tool:<name>` a socket client sends (off the main
+            // thread: `do_host_action` may wait on main).
+            let c = controller.clone();
+            h::set_open_tool_hook(move |name| {
+                let (c, name) = (c.clone(), name.to_string());
+                std::thread::spawn(move || {
+                    let _ = c.do_host_action(&format!("tool:{name}"));
+                });
+            });
         }
         // Held for the delayed `prewarm()` (the `controller` itself moves into
         // the UI ivars below).

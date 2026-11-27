@@ -635,9 +635,6 @@ pub struct ScreenshotConfig {
     pub history_dir: String,
     pub copy_path_after_save: bool,
     pub preview: bool,
-    /// Unused since every kept capture saves its area (for L); still parsed
-    /// so old configs load.
-    pub save_last_region: bool,
     pub undo_limit: i64,
     /// Recents ▸ Shift-click merge (`[screenshot] merge-*`).
     pub merge: MergeConfig,
@@ -670,6 +667,49 @@ pub struct ScreenshotConfig {
     /// After Copy Text: the card showing what was copied (`[screenshot]
     /// text-card`, `text-card-*`). `None` = off (toast only).
     pub text_card: Option<crate::ui::text_card::TextCardSpec>,
+    /// The card's next-step button labels (`text-card-table`,
+    /// `text-card-pretty`, `text-card-file`; empty = no such button).
+    pub next_labels: NextStepLabels,
+    /// Files ▸ right-click on pictures (`text-menu-title`; empty = no row).
+    pub text_menu_title: String,
+}
+
+/// Labels for [`next_steps`] (config `text-card-table|pretty|file`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NextStepLabels {
+    pub table: String,
+    pub pretty: String,
+    pub file: String,
+}
+
+impl Default for NextStepLabels {
+    fn default() -> Self {
+        NextStepLabels {
+            table: "Text to Table".to_string(),
+            pretty: "Pretty Print".to_string(),
+            file: "Save as File".to_string(),
+        }
+    }
+}
+
+/// The Copy Text card's next steps for `text`, as `(tool id, label)`: Text to
+/// Table when two or more lines hold tab-separated columns, Pretty Print when
+/// the text is JSON, and always Save as File (Create File).
+pub fn next_steps(text: &str, l: &NextStepLabels) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let tabbed = text.lines().filter(|ln| ln.contains('\t')).count();
+    if tabbed >= 2 && !l.table.is_empty() {
+        out.push(("text-table".to_string(), l.table.clone()));
+    }
+    let t = text.trim();
+    let jsonish = (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']'));
+    if jsonish && serde_json::from_str::<Value>(t).is_ok() && !l.pretty.is_empty() {
+        out.push(("prettyprint".to_string(), l.pretty.clone()));
+    }
+    if !l.file.is_empty() {
+        out.push(("filefast".to_string(), l.file.clone()));
+    }
+    out
 }
 
 impl Default for ScreenshotConfig {
@@ -703,7 +743,6 @@ impl Default for ScreenshotConfig {
             history_dir: DEFAULT_HISTORY_DIR.to_string(),
             copy_path_after_save: false,
             preview: true,
-            save_last_region: false,
             undo_limit: 100,
             merge: MergeConfig::default(),
             arrow_style: 0,
@@ -732,6 +771,8 @@ impl Default for ScreenshotConfig {
             shortcuts: shortcut_rows(false, |_, d| d.to_string()),
             retake_delay_ms: 3000,
             text_card: Some(crate::ui::text_card::TextCardSpec::default()),
+            next_labels: NextStepLabels::default(),
+            text_menu_title: "Copy Text from Picture".to_string(),
         }
     }
 }
@@ -848,7 +889,6 @@ impl ScreenshotConfig {
         c.save_after_copy = b("save-after-copy", false);
         c.copy_path_after_save = b("copy-path-after-save", false);
         c.preview = b("preview", true);
-        c.save_last_region = b("save-last-region", false);
         c.undo_limit = i("undo-limit", 100, 1, 1000);
         let md = MergeConfig::default();
         c.merge = MergeConfig {
@@ -885,8 +925,16 @@ impl ScreenshotConfig {
                 edited_toast: s("text-card-edited-toast", &td.edited_toast),
                 hold_secs: i("text-card-seconds", 6, 2, 60) as f64,
                 max_lines: td.max_lines,
+                actions: Vec::new(),
             }
         });
+        c.text_menu_title = s("text-menu-title", &d.text_menu_title);
+        let nd = NextStepLabels::default();
+        c.next_labels = NextStepLabels {
+            table: s("text-card-table", &nd.table),
+            pretty: s("text-card-pretty", &nd.pretty),
+            file: s("text-card-file", &nd.file),
+        };
         c.font = e.get("font").cloned().unwrap_or_default();
         if let Some(v) = e.get("copy-toast") {
             c.copy_toast = v.clone();
@@ -1791,6 +1839,36 @@ pub fn editor_menu_entry(
         crate::platform::run_on_main(move || {
             if let Ok(mut c) = shot.lock() {
                 c.open_images_in_editor(&paths);
+            }
+        });
+    }))
+}
+
+/// Files / Find Recent Files ▸ right-click on pictures ▸ "Copy Text from
+/// Picture(s)": the same Copy Text (OCR, QR codes, the card) as Hyper+X, on
+/// pictures you already have. `[screenshot] text-menu-title`.
+pub fn copy_text_menu_entry(
+    shot: &Arc<Mutex<ScreenshotController>>,
+    paths: &[String],
+) -> Option<crate::ui::menu_kit::MenuEntry> {
+    if !crate::engines::image_files::all_images(paths) {
+        return None;
+    }
+    let cfg = ScreenshotConfig::load();
+    if !cfg.enabled || cfg.text_menu_title.is_empty() {
+        return None;
+    }
+    let title = if paths.len() == 1 {
+        cfg.text_menu_title.clone()
+    } else {
+        format!("{} ({})", cfg.text_menu_title, paths.len())
+    };
+    let (shot, paths) = (shot.clone(), paths.to_vec());
+    Some(crate::ui::menu_kit::MenuEntry::item(&title, move || {
+        let (shot, paths) = (shot.clone(), paths.clone());
+        crate::platform::run_on_main(move || {
+            if let Ok(mut c) = shot.lock() {
+                c.copy_text_from_files(&paths);
             }
         });
     }))
@@ -7965,6 +8043,34 @@ pub mod recent_grid {
             self.ivars().scroll.set(y.max(0.0));
         }
 
+        /// Highlight shot `i` (the socket's `recents:select:N`).
+        pub fn set_highlight(&self, i: Option<usize>) {
+            let n = self.count();
+            let i = i.filter(|i| *i < n);
+            self.ivars().hover.set(i);
+            if let Some(i) = i {
+                self.scroll_to(i);
+            }
+            self.setNeedsDisplay(true);
+        }
+
+        /// What Return does on the highlighted shot (`recents:open-selected`).
+        pub fn open_highlighted(&self) -> bool {
+            let entry = self.ivars().hover.get().and_then(|i| self.ivars().entries.borrow().get(i).cloned());
+            let cb = self.ivars().on_open.borrow().clone();
+            match (cb, entry) {
+                (Some(cb), Some(e)) => {
+                    cb(e);
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        pub fn path_at(&self, i: usize) -> Option<String> {
+            self.ivars().entries.borrow().get(i).map(|e| e.path.clone())
+        }
+
         /// The highlighted shot (hover or arrow keys), for state / tests.
         pub fn highlighted(&self) -> Option<usize> {
             self.ivars().hover.get()
@@ -9457,9 +9563,10 @@ impl ScreenshotController {
         let weak_grid = objc2::rc::Weak::from_retained(&grid);
         *grid.ivars().on_menu.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let (w1, w2, w3, w4, w5) = (w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
-            let (p1, p2, p3, p4, p5, p6) = (
+            let (w1, w2, w3, w4, w5, w6) = (w.clone(), w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
+            let (p1, p2, p3, p4, p5, p6, p7) = (
                 e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
+                e.path.clone(),
             );
             let g = weak_grid.clone();
             let parent = popup_parent.clone();
@@ -9471,6 +9578,13 @@ impl ScreenshotController {
                     }),
                     MenuEntry::item("Pin on Screen", move || w5(Box::new(move |c| c.reopen_recent_as_pin(&p6)))),
                     MenuEntry::item("Copy", move || w2(Box::new(move |c| c.copy_recent(&p2)))),
+                    MenuEntry::item("Copy Text", move || {
+                        w6(Box::new(move |c| {
+                            c.close_recent();
+                            c.redraw_overlays();
+                            c.copy_text_from_files(std::slice::from_ref(&p7));
+                        }))
+                    }),
                     MenuEntry::item("Open in Popup", move || {
                         w3(Box::new(move |c| {
                             // The grid goes away; the overlay stays live under
@@ -9698,6 +9812,37 @@ impl ScreenshotController {
         self.open_merged_in_editor(paths, horizontal);
     }
 
+    /// Copy Text on pictures already on disk (Recents ▸ Copy Text, Files ▸
+    /// Copy Text from Picture): each is read like a Hyper+X Copy Text (QR
+    /// payloads first, else OCR), the texts joined by a blank line, then the
+    /// usual card. Main thread.
+    #[cfg(target_os = "macos")]
+    pub fn copy_text_from_files(&mut self, paths: &[String]) {
+        let cfg = self.session.as_ref().map(|s| s.cfg.clone()).unwrap_or_else(ScreenshotConfig::load);
+        let mut parts: Vec<String> = Vec::new();
+        let mut codes = 0;
+        for p in paths {
+            let Some(cg) = shot_cg::decode_image_file(p, EDITOR_MAX_IMAGE_PX) else { continue };
+            let Some(img) = encode_shot_image(&cg) else { continue };
+            let read = ocr_text(&img, &cfg.ocr);
+            codes += read.codes;
+            if !read.text.is_empty() {
+                parts.push(read.text);
+            }
+        }
+        let text = parts.join("\n\n");
+        self.last_output = json!({"outcome": "text", "files": paths.len(), "codes": codes, "chars": text.chars().count()});
+        if text.is_empty() {
+            ScreenToast::show(&mut self.toast, cfg.no_text_toast.clone(), "exclamationmark.triangle.fill");
+        } else if codes > 0 && parts.len() == codes {
+            let what = if codes == 1 { "a QR code".to_string() } else { format!("{codes} codes") };
+            self.copy_text_titled(&text, &cfg, Some(cfg.code_toast.replace("{}", &what)));
+        } else {
+            self.copy_text(&text, &cfg);
+        }
+        self.note(format!("screenshot: text from {} file(s), {} chars", paths.len(), text.chars().count()));
+    }
+
     /// Recents ▸ Copy (menu or Cmd+C): the shot onto the clipboard. The
     /// capture under the grid stays as it was (annotations and all).
     #[cfg(target_os = "macos")]
@@ -9716,12 +9861,7 @@ impl ScreenshotController {
         let Some(img) = recent_image(path) else { return };
         self.abort_session();
         let Some(_mtm) = objc2::MainThreadMarker::new() else { return };
-        let scale = 2.0;
-        let (w, h) = (img.width as f64 / scale, img.height as f64 / scale);
-        let frame = mouse_screen_frame().map(|f| {
-            Rect::new(f.origin.x + f.size.width / 2.0 - w / 2.0, f.origin.y + f.size.height / 2.0 - h / 2.0, w, h)
-        });
-        self.pin(&img, frame, None);
+        self.pin_centered(&img);
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.note(format!("screenshot: reopened {name}"));
     }
@@ -9818,7 +9958,20 @@ impl ScreenshotController {
             let title = if title.is_empty() { spec.title.clone() } else { title };
             // The model slot keeps what the toast would have said (tests, state).
             self.toast = Some(ScreenToast::with_symbol(title.clone(), "text.viewfinder"));
-            crate::ui::text_card::show(text, before, crate::ui::text_card::TextCardSpec { title, ..spec });
+            let actions = next_steps(text, &cfg.next_labels);
+            // A next step opens that tool with the text already in it.
+            let on_action: Box<dyn Fn(&str, &str)> = Box::new(|id: &str, text: &str| {
+                if let Some(kind) = crate::views::tools::ToolKind::from_name(id) {
+                    crate::views::tools::prefill_next(kind, text);
+                    crate::app::hooks::open_tool(id);
+                }
+            });
+            crate::ui::text_card::show(
+                text,
+                before,
+                crate::ui::text_card::TextCardSpec { title, actions, ..spec },
+                Some(on_action),
+            );
             return;
         }
         if !title.is_empty() {
@@ -10078,6 +10231,60 @@ impl ScreenshotController {
                 }
                 a.delay_ms = arg.parse().unwrap_or(0);
                 self.trigger(&a)
+            }
+            // The Recents grid for agents: `recents` / `recents:open` opens
+            // it (overlay up), `recents:close`, `recents:select:N`,
+            // `recents:open-selected` (= Return: the editor), and
+            // `recents:copy-text:N` (Copy Text on shot N).
+            #[cfg(target_os = "macos")]
+            "recents" => {
+                let (sub, rest) = arg.split_once(':').unwrap_or((arg, ""));
+                match sub {
+                    "" | "open" => {
+                        if self.session.is_none() {
+                            return Err("recents: no overlay (do:screenshot:show first)".to_string());
+                        }
+                        if self.recent_panel.0.is_none() {
+                            self.toggle_recent();
+                        }
+                        Ok(())
+                    }
+                    "close" => {
+                        self.close_recent();
+                        Ok(())
+                    }
+                    "select" => {
+                        let Some(p) = self.recent_panel.0.as_ref() else { return Err("recents not open".to_string()) };
+                        let i: usize = rest.parse().map_err(|_| "recents:select:N".to_string())?;
+                        if i >= p.grid().count() {
+                            return Err(format!("recents: no shot {i}"));
+                        }
+                        p.grid().set_highlight(Some(i));
+                        Ok(())
+                    }
+                    "open-selected" => {
+                        let Some(p) = self.recent_panel.0.as_ref().cloned() else { return Err("recents not open".to_string()) };
+                        // `on_open` locks this controller: run it after the
+                        // socket hook releases the lock.
+                        let Some(mtm) = objc2::MainThreadMarker::new() else { return Err("main thread only".to_string()) };
+                        let p = dispatch2::MainThreadBound::new(p, mtm);
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                                p.get(mtm).grid().open_highlighted();
+                            }
+                        });
+                        Ok(())
+                    }
+                    "copy-text" => {
+                        let Some(p) = self.recent_panel.0.as_ref() else { return Err("recents not open".to_string()) };
+                        let i: usize = rest.parse().map_err(|_| "recents:copy-text:N".to_string())?;
+                        let Some(path) = p.grid().path_at(i) else { return Err(format!("recents: no shot {i}")) };
+                        self.close_recent();
+                        self.copy_text_from_files(&[path]);
+                        Ok(())
+                    }
+                    _ => Err(format!("unknown recents verb {sub}")),
+                }
             }
             "select" => {
                 let n = nums(arg);
@@ -10961,15 +11168,21 @@ impl ScreenshotController {
         if save && path.is_none() {
             return "error: could not save".to_string();
         }
-        path.unwrap_or_else(|| "copied".to_string())
+        // The reply names what happened: the saved path, else "copied", else
+        // (preview only) "shown".
+        path.unwrap_or_else(|| if copy { "copied" } else { "shown" }.to_string())
     }
 
-    /// Pin `img` centred on the screen under the mouse, at its real size.
+    /// Pin `img` centred on the screen under the mouse: real size, but never
+    /// more than [`PIN_MAX_SCREEN_FRACTION`] of the screen (a 200-line
+    /// pane-shot is 8800 px tall; at real size its preview covered the
+    /// whole screen and off it).
     #[cfg(target_os = "macos")]
     pub fn pin_centered(&mut self, img: &ShotImage) {
         let scale = mouse_screen_scale().max(1.0);
-        let (w, h) = (img.width as f64 / scale, img.height as f64 / scale);
+        let (iw, ih) = (img.width as f64 / scale, img.height as f64 / scale);
         let frame = mouse_screen_frame().map(|f| {
+            let (w, h) = pin_fit(iw, ih, f.size.width, f.size.height);
             Rect::new(f.origin.x + f.size.width / 2.0 - w / 2.0, f.origin.y + f.size.height / 2.0 - h / 2.0, w, h)
         });
         self.pin(img, frame, None);
@@ -10995,6 +11208,25 @@ pub fn mouse_screen_scale() -> f64 {
 
 pub fn epoch_millis() -> i64 {
     now_millis()
+}
+
+/// The largest share of the screen a centred preview pin may take.
+pub const PIN_MAX_SCREEN_FRACTION: f64 = 0.8;
+
+/// `(w, h)` points for a pin of an image `iw` × `ih` points on a screen
+/// `sw` × `sh`: real size when it fits, else scaled down (aspect kept) to
+/// [`PIN_MAX_SCREEN_FRACTION`] of the screen.
+pub fn pin_fit(iw: f64, ih: f64, sw: f64, sh: f64) -> (f64, f64) {
+    let k = (sw * PIN_MAX_SCREEN_FRACTION / iw.max(1.0))
+        .min(sh * PIN_MAX_SCREEN_FRACTION / ih.max(1.0))
+        .min(1.0);
+    ((iw * k).round(), (ih * k).round())
+}
+
+/// Palette gate for Pane Shot (both palettes): herdr is installed.
+pub fn pane_shot_listed(sections: &HashMap<String, HashMap<String, String>>) -> bool {
+    let cfg = crate::engines::pane_shot::PaneShotConfig::from_entries(&sections.get("pane-shot").cloned().unwrap_or_default());
+    crate::engines::pane_shot::Herdr::available(&cfg)
 }
 
 /// `[pane-shot]` from a commands.toml text (pure scan; both processes).
@@ -11426,6 +11658,27 @@ mod tests {
         a.last_region = true;
         let retake = ShotSession::new(cfg, a, temp_path("st2"));
         assert!(!retake.text_mode, "a retake / --last-region edits a screenshot");
+    }
+
+    #[test]
+    fn previews_fit_the_screen() {
+        assert_eq!(pin_fit(400.0, 100.0, 1710.0, 1107.0), (400.0, 100.0), "small: real size");
+        let (w, h) = pin_fit(1801.0, 4400.0, 1710.0, 1107.0);
+        assert!(h <= 1107.0 * 0.8 + 0.5 && w < 1801.0, "a 200-line pane-shot is scaled down: {w}x{h}");
+        assert!(((w / h) - 1801.0 / 4400.0).abs() < 0.01, "aspect kept");
+    }
+
+    #[test]
+    fn next_steps_match_the_text() {
+        let l = NextStepLabels::default();
+        let ids = |t: &str| next_steps(t, &l).into_iter().map(|(i, _)| i).collect::<Vec<_>>();
+        assert_eq!(ids("a\tb\nc\td"), ["text-table", "filefast"], "columns");
+        assert_eq!(ids("one\ttab line only"), ["filefast"], "one tabbed line is not a table");
+        assert_eq!(ids("{\"a\": [1, 2]}"), ["prettyprint", "filefast"], "JSON");
+        assert_eq!(ids("{not json}"), ["filefast"]);
+        assert_eq!(ids("plain prose"), ["filefast"]);
+        let none = NextStepLabels { table: String::new(), pretty: String::new(), file: String::new() };
+        assert!(next_steps("a\tb\nc\td", &none).is_empty(), "empty label = no button");
     }
 
     #[test]
@@ -12225,6 +12478,9 @@ mod tests {
         assert!(c.test_do("bogus").is_err(), "unknown verb");
         assert_eq!(c.test_do("save:").unwrap_err(), "save:PATH");
         assert!(c.test_do("close").is_ok(), "close with no session is a no-op");
+        assert!(c.test_do("recents").is_err(), "recents needs an overlay");
+        assert!(c.test_do("recents:select:0").is_err(), "recents not open");
+        assert!(c.test_do("recents:bogus").is_err());
 
         c.set_session(session());
         assert!(c.test_do("select:10,20,100,50").is_ok());

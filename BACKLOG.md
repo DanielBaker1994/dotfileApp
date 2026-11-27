@@ -69,29 +69,35 @@ Resolved bugs live in git history, not here. Test workers read `TESTING.md` §
 
 ## Screenshot (Hyper+X)
 
-- Side panel exists (size, colour, grab, wheel, hex, display grid). Still missing: **text
-  options** (Flameshot G3) and the **layers list** (G5).
+- Side panel: size, colour, grab, wheel, hex, grid, text options (B/I/U/S, align) and
+  the layers list. Still missing: a **font family** picker (Flameshot G3).
 - Recents: the ring has a Recent button and `state live` → `screenshot.recents`
   (`shown`, `count`, `highlighted`); there is still no `screenshot:recents*` verb.
 - VM GUI checks: `ks-input` drags drop the mouse-up and can leave modifiers stuck
   (a stuck Shift squares every selection). For mouse moves, slow drags and Cmd-drags
-  use `Tests/tools/ks_mouse.swift` (`move`, `drag [--cmd]`, `flags`, `release`) and
+  use `Tests/tools/ks_mouse.swift` (`move`, `click`, `dclick`, `rclick`, `drag [--cmd]`,
+  `flags`, `release`) and
   `ks_droptarget.swift` for drop checks (2026-11-27: hover names, Cmd-drag out of a pin and the
   QR / hex picks were verified that way). Press Hyper+X only after the agent logs
   `hotkey hyper+x registered`.
-- `.fast` OCR still drops a lone short cell ("4") and splits some words ("f iles");
-  the Copy Text card shows the result so it can be fixed before pasting.
-  `.accurate` is broken on macOS 27 (see `ShotOCRConfig::accurate`).
-- A unit test writes 1–7 byte junk `shot-*.png` files into the real
-  `~/.cache/kitchen-sink/screenshots` (blank cells in the grid). Find the `record_png`
-  caller in tests and point it at a temp dir.
+- Owner's Mac checks (2026-11-27): `ks-input key` posts are dropped there (exit 0, nothing
+  arrives, no Secure Input); keys go through System Events (`osascript … key code`), and
+  `ks_mouse` works only outside the command sandbox. Verified there: OCR card + tab stops,
+  Text to Table button, Copy Text from Picture (Files menu, Recents verb), QR/hex, real
+  herdr pane-shot from the CLI and the main socket, preview fit, main-app Recents verbs.
+  **Not checked: a second display** (the Mac has only the built-in screen).
+- `.fast` OCR still drops a lone short cell ("4") and splits some words ("f iles") at
+  every scale; a dropped cell shifts that row's columns (Text to Table pads it). It also
+  mangles JSON quotes/braces from small screen text, so the card's Pretty Print button
+  rarely appears for OCR'd JSON (it needs valid JSON). The card shows the result so it
+  can be fixed before pasting. `.accurate` is broken on macOS 27 (see
+  `ShotOCRConfig::accurate`). Scale is by size (`ShotOCR::scale_for`): a whole MacBook
+  screen stays 1× for speed, so it reads worse than a drag.
 - Non-goals and the full Flameshot comparison: `git show 64bbd4a^:PRD-screenshot-gaps.md`.
-- **Feature ideas (owner agreed, 2026-11-27 usability review; not started):**
-  - Next-step actions on the result card: Annotate, Copy Text, Save, Reveal, plus the
-    Hyper+S tools (Text to Table when columns were found, Pretty Print for JSON,
-    Create File for the text).
-  - Copy Text from an existing picture: a recent shot, or a picture in Files / Find
-    Recent Files.
+- Done 2026-11-27: the card's next-step buttons (Text to Table / Pretty Print / Save as
+  File) and Copy Text from an existing picture (Files + Find Recent Files menu, Recents
+  menu, `do:screenshot:recents:copy-text:N`). Still an idea: Annotate / Reveal buttons on
+  the card.
 
 ## Settings hub (`ws-settings`)
 

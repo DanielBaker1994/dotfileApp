@@ -76,23 +76,28 @@ impl ShotOCR {
         }
     }
 
-    /// Images up to this many pixels are doubled for `.fast` recognition.
-    pub const FAST_UPSCALE_MAX_PIXELS: i64 = 6_000_000;
+    /// Pixel budget for the upscaled `.fast` input: the largest of 3× / 2×
+    /// that stays under it is used.
+    pub const FAST_UPSCALE_BUDGET: i64 = 16_000_000;
 
-    /// The scale to recognise at. `.fast` misreads screen text at native
-    /// size: on a Retina capture of a monospace table it split "Owner" into
-    /// "Owne r" and read "2026_11_27" as "2026 11 27"; at 2× both came out
-    /// right, for +20 ms on a crop and +35 ms on a whole 2048×1536 screen.
-    /// So `.fast` doubles anything up to [`Self::FAST_UPSCALE_MAX_PIXELS`];
-    /// `.accurate` keeps the Swift rule.
+    /// The scale to recognise at. `.fast` misreads small screen text at
+    /// native size: "Owner" came out "Owne r" on a Retina capture of an
+    /// 11 pt monospace table (fixed at 3×, still split at 2×), and
+    /// "2026_11_27" as "2026 11 27" (fixed at 2×). Cost on an M2: +15 ms for
+    /// a 600×130 px drag at 3×, but a whole 3420×2214 screen goes 150 →
+    /// 350 ms at 2× and 650 ms at 3×. So `.fast` takes the biggest of 3× / 2×
+    /// whose result fits [`Self::FAST_UPSCALE_BUDGET`] (a typical drag gets
+    /// 3×, a whole laptop screen 1×). `.accurate` keeps the Swift rule.
     pub fn scale_for(width: i64, height: i64, accurate: bool) -> i64 {
-        if height < Self::MIN_HEIGHT {
-            return 2;
+        let px = width.saturating_mul(height);
+        if !accurate {
+            for k in [3, 2] {
+                if px.saturating_mul(k * k) <= Self::FAST_UPSCALE_BUDGET {
+                    return k;
+                }
+            }
         }
-        if !accurate && width.saturating_mul(height) <= Self::FAST_UPSCALE_MAX_PIXELS {
-            return 2;
-        }
-        1
+        Self::upscale_factor(height)
     }
 
     /// Undo the space `.fast` puts before a file extension in a path:
@@ -553,8 +558,9 @@ mod tests {
 
     #[test]
     fn fast_ocr_doubles_screen_sized_images() {
-        assert_eq!(ShotOCR::scale_for(784, 170, false), 2, "a crop: doubled");
-        assert_eq!(ShotOCR::scale_for(2048, 1536, false), 2, "a Retina laptop screen: doubled");
+        assert_eq!(ShotOCR::scale_for(784, 170, false), 3, "a drag: 3x");
+        assert_eq!(ShotOCR::scale_for(2048, 1536, false), 2, "a 1024x768@2 screen: 2x");
+        assert_eq!(ShotOCR::scale_for(3420, 2214, false), 1, "a whole MacBook screen: native");
         assert_eq!(ShotOCR::scale_for(6016, 3384, false), 1, "a 6K screen: native");
         assert_eq!(ShotOCR::scale_for(784, 170, true), 1, "accurate keeps the Swift rule");
         assert_eq!(ShotOCR::scale_for(784, 40, true), 2, "short images always doubled");

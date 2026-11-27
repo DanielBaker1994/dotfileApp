@@ -1,6 +1,6 @@
 // ks_mouse: paced mouse events for VM UI checks (global top-left points).
 // Build: swiftc -O -target arm64-apple-macos14 Tests/tools/ks_mouse.swift -o ks-mouse
-//   move X Y | drag X1 Y1 X2 Y2 [--cmd] | flags | release
+//   move X Y | click X Y | dclick X Y | rclick X Y | drag X1 Y1 X2 Y2 [--cmd] | flags | release
 import Foundation
 import CoreGraphics
 let a = CommandLine.arguments
@@ -32,11 +32,24 @@ case "drag":
     post(.leftMouseDragged, CGPoint(x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t), f); ms(15) }
   ms(80); post(.leftMouseUp, p2, f); ms(30)
   if cmd { key(55, false) }
+case "click", "dclick":
+  let p = CGPoint(x: Double(a[2])!, y: Double(a[3])!)
+  post(.mouseMoved, p); ms(40)
+  for n in 1...(a[1] == "dclick" ? 2 : 1) {
+    post(.leftMouseDown, p, click: Int64(n)); ms(30); post(.leftMouseUp, p, click: Int64(n)); ms(60)
+  }
+case "rclick":
+  let p = CGPoint(x: Double(a[2])!, y: Double(a[3])!)
+  post(.mouseMoved, p); ms(40)
+  for t in [CGEventType.rightMouseDown, .rightMouseUp] {
+    let e = CGEvent(mouseEventSource: src, mouseType: t, mouseCursorPosition: p, mouseButton: .right)!
+    e.setIntegerValueField(.mouseEventClickState, value: 1); e.post(tap: .cghidEventTap); ms(40)
+  }
 case "flags":
   print(String(CGEventSource.flagsState(.hidSystemState).rawValue, radix: 16))
 case "release":
   for c: CGKeyCode in [55, 54, 56, 60, 58, 61, 59, 62, 63] { key(c, false) }
   print(String(CGEventSource.flagsState(.hidSystemState).rawValue, radix: 16))
 default:
-  print("usage: ksmouse move X Y | drag X1 Y1 X2 Y2 [--cmd] | flags | release"); exit(2)
+  print("usage: ks_mouse move X Y | click X Y | dclick X Y | rclick X Y | drag X1 Y1 X2 Y2 [--cmd] | flags | release"); exit(2)
 }

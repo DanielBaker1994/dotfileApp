@@ -1040,10 +1040,15 @@ pub trait FilesHost: Sized + 'static {
         let editor = self
             .files_screenshot()
             .and_then(|shot| crate::views::screenshot::editor_menu_entry(&shot, &paths));
+        // …and read their text (OCR / QR) onto the clipboard, with the card.
+        let copy_text = self
+            .files_screenshot()
+            .and_then(|shot| crate::views::screenshot::copy_text_menu_entry(&shot, &paths));
         let mut entries: Vec<MenuEntry> = Vec::new();
         if many {
             entries.extend(quick_look);
             entries.extend(editor);
+            entries.extend(copy_text);
             entries.push(MenuEntry::Separator);
             {
                 let joined = paths.join("\n");
@@ -1093,7 +1098,7 @@ pub trait FilesHost: Sized + 'static {
             };
             entries = crate::views::files::file_context_menu(&first, actions);
             // Quick Look and the editor join the open block, before Reveal.
-            for e in [quick_look, editor].into_iter().flatten() {
+            for e in [quick_look, editor, copy_text].into_iter().flatten() {
                 let at = entries
                     .iter()
                     .position(|e| matches!(e, MenuEntry::Item { title, .. } if title == "Reveal in Files"))

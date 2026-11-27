@@ -207,6 +207,12 @@ pub struct Pane {
 pub struct Herdr;
 
 impl Herdr {
+    /// Whether `[pane-shot] herdr-bin` names a runnable herdr: the palette
+    /// shows Pane Shot only then (someone without herdr gets no dead row).
+    pub fn available(cfg: &PaneShotConfig) -> bool {
+        is_executable_file(&expand_tilde(&cfg.herdr_bin))
+    }
+
     pub const MAX_LINES: i64 = MAX_LINES;
 
     pub fn pane_from_json(text: &str) -> Result<Pane, Failure> {

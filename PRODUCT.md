@@ -80,12 +80,15 @@ In priority order:
 ## Capabilities and Constraints
 
 - **Quick agent (Hyper+S / Hyper+X):** the palette (`[app] palette`: Find
-  Recent Files, Create File, Text to Table, Pretty Print, Find Window PID); the screenshot overlay and editor (OCR Copy
-  Text, merge several pictures); Find Recent Files (a file browser with the
-  same actions as the main Files view).
+  Recent Files, Create File, Text to Table, Pretty Print, Pane Shot (shown only
+  with herdr installed), Find Window PID); the screenshot overlay and editor
+  (Copy Text with a review card, QR codes, merge several pictures, record,
+  retake, recents); pane-shot (a terminal pane with its scrollback as a
+  picture); Find Recent Files (a file browser with the same actions as the
+  main Files view).
 - **Main app:** the shared window's views (Files with Recent / Arrived, Jira
   lists / detail / releases / config, Confluence search, AI), health checks,
-  setup, pane-shot.
+  setup, and the same pane-shot code as the quick agent.
 - Palette panels and tool panels never activate the app or bring the shared
   window with them. The window manager decides float or tile; the app
   never changes the layout.

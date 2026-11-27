@@ -184,6 +184,13 @@ code-toast = "Copied the contents of {}"
 # G (pick a colour from the screen) also copies the colour's hex.
 grab-copies-hex = true
 hex-toast = "Copied {}"
+# The Copy Text card's next-step buttons (empty = no such button): Text to
+# Table when columns were found, Pretty Print for JSON, Save as File always.
+text-card-table = "Text to Table"
+text-card-pretty = "Pretty Print"
+text-card-file = "Save as File"
+# Files / Find Recent Files ▸ right-click on pictures (empty = no row).
+text-menu-title = "Copy Text from Picture"
 save-path = "/private/tmp"
 save-path-fixed = false
 filename-pattern = "%F_%H-%M"

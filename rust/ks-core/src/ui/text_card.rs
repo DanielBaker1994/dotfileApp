@@ -27,6 +27,8 @@ pub struct TextCardSpec {
     pub hold_secs: f64,
     /// Text lines shown before the box scrolls.
     pub max_lines: usize,
+    /// Next-step buttons in the header, left of Undo copy: `(id, label)`.
+    pub actions: Vec<(String, String)>,
 }
 
 impl Default for TextCardSpec {
@@ -39,6 +41,7 @@ impl Default for TextCardSpec {
             edited_toast: "Copied your edit".to_string(),
             hold_secs: 6.0,
             max_lines: 10,
+            actions: Vec::new(),
         }
     }
 }
@@ -47,6 +50,33 @@ impl Default for TextCardSpec {
 pub fn card_height(lines: usize, max_lines: usize) -> f64 {
     let shown = lines.clamp(1, max_lines.max(1)) as f64;
     HEADER_H + shown * LINE_H + TEXT_PAD * 2.0 + FOOTER_H
+}
+
+/// Character columns for tab stops so tab-separated OCR tables line up in the
+/// card: each column as wide as its widest cell plus a 2-character gap.
+/// Empty when no line has a tab (the default 8-column tabs are left alone).
+pub fn tab_columns(text: &str) -> Vec<usize> {
+    let mut widths: Vec<usize> = Vec::new();
+    for line in text.lines().filter(|l| l.contains('\t')) {
+        let cells: Vec<&str> = line.split('\t').collect();
+        // The last cell needs no stop after it.
+        for (i, c) in cells.iter().take(cells.len().saturating_sub(1)).enumerate() {
+            let n = c.chars().count();
+            if i >= widths.len() {
+                widths.push(n);
+            } else if n > widths[i] {
+                widths[i] = n;
+            }
+        }
+    }
+    let mut at = 0;
+    widths
+        .into_iter()
+        .map(|w| {
+            at += w + 2;
+            at
+        })
+        .collect()
 }
 
 pub const HEADER_H: f64 = 34.0;
@@ -89,6 +119,7 @@ mod appkit {
         spec: TextCardSpec,
         deadline: Instant,
         generation: u64,
+        on_action: Option<Box<dyn Fn(&str, &str)>>,
         _keys: MonitorHandle,
     }
 
@@ -130,7 +161,9 @@ mod appkit {
     pub struct RootIvars {
         undo: Cell<NSRect>,
         close: Cell<NSRect>,
+        /// 0 none, 1 undo, 2 close, 10 + i action i.
         hover: Cell<u8>,
+        actions: RefCell<Vec<(String, String, NSRect)>>,
         tracking: RefCell<Option<Retained<objc2_app_kit::NSTrackingArea>>>,
         title: RefCell<String>,
         hint: RefCell<String>,
@@ -159,10 +192,13 @@ mod appkit {
             #[unsafe(method(mouseMoved:))]
             fn mouse_moved(&self, e: &NSEvent) {
                 let p = view_base::mouse_point(self, e);
+                let act = self.ivars().actions.borrow().iter().position(|(_, _, r)| contains(*r, p));
                 let h = if contains(self.ivars().undo.get(), p) {
                     1
                 } else if contains(self.ivars().close.get(), p) {
                     2
+                } else if let Some(i) = act {
+                    10 + i as u8
                 } else {
                     0
                 };
@@ -180,10 +216,13 @@ mod appkit {
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, e: &NSEvent) {
                 let p = view_base::mouse_point(self, e);
+                let act = self.ivars().actions.borrow().iter().find(|(_, _, r)| contains(*r, p)).map(|(id, _, _)| id.clone());
                 if contains(self.ivars().undo.get(), p) {
                     dispatch_undo();
                 } else if contains(self.ivars().close.get(), p) {
                     dispatch_close(true);
+                } else if let Some(id) = act {
+                    dispatch_action(id);
                 }
             }
 
@@ -208,8 +247,19 @@ mod appkit {
                 title: RefCell::new(spec.title.clone()),
                 hint: RefCell::new(spec.hint.clone()),
                 undo_label: RefCell::new(spec.undo_label.clone()),
+                actions: RefCell::new(spec.actions.iter().map(|(i, l)| (i.clone(), l.clone(), NSRect::ZERO)).collect()),
             });
             unsafe { msg_send![super(this), initWithFrame: frame] }
+        }
+
+        /// Width left for the title once the header buttons are placed.
+        fn title_room(&self, w: f64) -> f64 {
+            let bf = style::system_font(12.0, Weight::Medium);
+            let mut used = 34.0 + 10.0 + style::text_size(&self.ivars().undo_label.borrow(), &bf).0 + 22.0;
+            for (_, l, _) in self.ivars().actions.borrow().iter() {
+                used += style::text_size(l, &bf).0 + 30.0;
+            }
+            (w - 36.0 - used - 16.0).max(80.0)
         }
 
         fn draw(&self) {
@@ -231,7 +281,7 @@ mod appkit {
             }
             style::draw_text_left(
                 &self.ivars().title.borrow(),
-                crate::ui::chrome::Rect::new(36.0, (HEADER_H - 17.0) / 2.0, w - 240.0, 17.0),
+                crate::ui::chrome::Rect::new(36.0, (HEADER_H - 17.0) / 2.0, self.title_room(w), 17.0),
                 &f,
                 c.text,
             );
@@ -252,6 +302,19 @@ mod appkit {
                 style::fill_rounded(close_r, 11.0, c.text.with_alpha(0.12));
             }
             style::draw_text_centered("\u{2715}", close_r, &bf, c.dim);
+            // Next-step buttons, right to left from Undo copy.
+            let mut x = undo.origin.x - 8.0;
+            let mut acts = self.ivars().actions.borrow_mut();
+            for (i, (_, label, rect)) in acts.iter_mut().enumerate().rev() {
+                let (lw, _) = style::text_size(label, &bf);
+                let r = NSRect::new(NSPoint::new(x - (lw + 22.0), 7.0), NSSize::new(lw + 22.0, 22.0));
+                *rect = r;
+                x = r.origin.x - 8.0;
+                let rr = style::rect_of(r);
+                let on = hover == 10 + i as u8;
+                style::fill_rounded(rr, 11.0, if on { c.accent.with_alpha(0.85) } else { c.accent.with_alpha(0.22) });
+                style::draw_text_centered(label, rr, &bf, if on { c.crust() } else { c.text });
+            }
 
             // Footer hint.
             let hf = style::system_font(11.0, Weight::Regular);
@@ -267,7 +330,7 @@ mod appkit {
     /// Show the card for `copied` (already on the clipboard); `before` is the
     /// clipboard as it was, with its `change_count` set to the count after
     /// our copy.
-    pub fn show(copied: &str, before: Snapshot, spec: TextCardSpec) {
+    pub fn show(copied: &str, before: Snapshot, spec: TextCardSpec, on_action: Option<Box<dyn Fn(&str, &str)>>) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         close_now(false);
         let Some(scr) = crate::platform::main_screen() else { return };
@@ -330,7 +393,43 @@ mod appkit {
         if let Some(tc) = unsafe { tv.textContainer() } {
             tc.setWidthTracksTextView(true);
         }
+        // Tab stops from the table's own columns (a monospace font), so an
+        // OCR'd table reads as one in the card.
+        let cols = tab_columns(copied);
+        let para = (!cols.is_empty()).then(|| {
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSMutableParagraphStyle, NSTextAlignment, NSTextTab};
+            let (cw, _) = style::text_size("MMMMMMMMMM", &style::mono_font(12.0, Weight::Regular));
+            let cw = cw / 10.0;
+            let tabs: Vec<Retained<NSTextTab>> = cols
+                .iter()
+                .map(|c| unsafe {
+                    NSTextTab::initWithTextAlignment_location_options(
+                        NSTextTab::alloc(),
+                        NSTextAlignment::Left,
+                        *c as f64 * cw,
+                        &objc2_foundation::NSDictionary::new(),
+                    )
+                })
+                .collect();
+            let para = NSMutableParagraphStyle::new();
+            para.setTabStops(Some(&objc2_foundation::NSArray::from_retained_slice(&tabs)));
+            para.setDefaultTabInterval(cw * 4.0);
+            tv.setDefaultParagraphStyle(Some(&para));
+            para
+        });
         tv.setString(&NSString::from_str(copied));
+        if let (Some(para), Some(store)) = (para.as_ref(), unsafe { tv.textStorage() }) {
+            let len = store.length();
+            let value: &objc2::runtime::AnyObject = para;
+            unsafe {
+                store.addAttribute_value_range(
+                    objc2_app_kit::NSParagraphStyleAttributeName,
+                    value,
+                    objc2_foundation::NSRange::new(0, len),
+                )
+            };
+        }
         let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), text_rect);
         scroll.setHasVerticalScroller(true);
         scroll.setDrawsBackground(false);
@@ -357,6 +456,7 @@ mod appkit {
                 deadline: Instant::now() + Duration::from_secs_f64(spec.hold_secs.max(1.0)),
                 spec,
                 generation,
+                on_action,
                 _keys: keys,
             });
         });
@@ -429,6 +529,32 @@ mod appkit {
         dispatch2::DispatchQueue::main().exec_async(move || close_now(copy_edit));
     }
 
+    fn dispatch_action(id: String) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let id = dispatch2::MainThreadBound::new(id, mtm);
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                action_now(id.get(mtm));
+            }
+        });
+    }
+
+    /// A next-step button: close the card (copying an edit first), then hand
+    /// the text to the action.
+    fn action_now(id: &str) {
+        let taken = CARD.with(|c| c.borrow_mut().take());
+        let Some(l) = taken else { return };
+        let now = l.text.string().to_string();
+        l.panel.orderOut(None);
+        if now != l.copied && !now.is_empty() {
+            clipboard::set_text(&now);
+        }
+        LAST.with(|s| *s.borrow_mut() = format!("action:{id}"));
+        if let Some(f) = l.on_action.as_ref() {
+            f(id, &now);
+        }
+    }
+
     fn dispatch_undo() {
         dispatch2::DispatchQueue::main().exec_async(undo_now);
     }
@@ -478,6 +604,7 @@ mod appkit {
                 "shown": true,
                 "text": l.text.string().to_string(),
                 "key": l.panel.isKeyWindow(),
+                "actions": l.spec.actions.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>(),
                 "last": last,
             }),
             None => serde_json::json!({"shown": false, "last": last}),
@@ -488,6 +615,13 @@ mod appkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_stops_follow_the_widest_cell_per_column() {
+        let t = "Service\tp50 ms\tOwner\nscreenshot\t38\tquick agent\nplain line";
+        assert_eq!(tab_columns(t), vec![12, 20], "10+2, then 12 + 6+2");
+        assert!(tab_columns("no tabs here").is_empty());
+    }
 
     #[test]
     fn height_grows_with_lines_up_to_the_cap() {
