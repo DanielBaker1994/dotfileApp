@@ -1172,21 +1172,8 @@ mod appkit {
                 }
             });
             LIVE_BODY.with(|l| *l.borrow_mut() = Some(objc2::rc::Weak::from_retained(&v)));
-            // The timer holds only a Weak: the view owns the timer, so a strong
-            // capture would keep it alive forever.
-            let weak = objc2::rc::Weak::from_retained(&v);
-            let secs = v.ivars().settings.refresh.max(2.0);
-            let block = block2::RcBlock::new(move |_t: std::ptr::NonNull<NSTimer>| {
-                let Some(body) = weak.load() else {
-                    return;
-                };
-                if body.ivars().active.get() {
-                    body.emit(JiraConfigAction::Refresh);
-                }
-            });
-            let timer =
-                unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, true, &block) };
-            *v.ivars().timer.borrow_mut() = Some(timer);
+            // The auto-refresh timer is armed only while the Config tab is active
+            // (`set_active`), so it wakes 0 times/sec otherwise.
             v
         }
 
@@ -1199,12 +1186,34 @@ mod appkit {
             }));
         }
 
-        /// `true` while the Config tab is selected: the auto-refresh only runs
-        /// then. The first activation also runs the form's `--check` prefill.
+        /// `true` while the Config tab is selected: the auto-refresh timer only
+        /// runs while active. The first activation also runs the form's `--check` prefill.
         pub fn set_active(&self, on: bool) {
             self.ivars().active.set(on);
-            if on && !self.ivars().prefilled.replace(true) {
-                self.ivars().form.prefill();
+            if on {
+                if !self.ivars().prefilled.replace(true) {
+                    self.ivars().form.prefill();
+                }
+                let mut slot = self.ivars().timer.borrow_mut();
+                if slot.is_none() {
+                    let weak = objc2::rc::Weak::new(self);
+                    let secs = self.ivars().settings.refresh.max(2.0);
+                    let block = block2::RcBlock::new(move |_t: std::ptr::NonNull<NSTimer>| {
+                        let Some(body) = weak.load() else {
+                            return;
+                        };
+                        if body.ivars().active.get() {
+                            body.emit(JiraConfigAction::Refresh);
+                        }
+                    });
+                    let timer = unsafe {
+                        NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, true, &block)
+                    };
+                    timer.setTolerance(secs * 0.2);
+                    *slot = Some(timer);
+                }
+            } else if let Some(timer) = self.ivars().timer.borrow_mut().take() {
+                timer.invalidate();
             }
         }
 

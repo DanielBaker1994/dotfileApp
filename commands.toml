@@ -149,12 +149,14 @@ ui-color = "#740096"
 contrast-color = "#270032"
 contrast-opacity = 188
 draw-color = "#288000"
+highlighter-color = "#ffe600"
 user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
 # Tools fill the bottom edge left to right; the rest wraps onto the top edge
 # right to left, so actions are listed backwards (top row: Copy … Exit).
 buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy"
 button-size = 0
 show-help = true
+help-opacity = 0.45
 show-side-panel-button = true
 side-panel-width = 250
 side-panel-size-label = "Active tool size:"
@@ -666,22 +668,13 @@ setup-env-note = "Using JIRA_{key} from the environment — save will persist it
 [notifications]
 enabled = true
 
-sources = "webex, outlook, imessage"
+sources = "outlook, imessage"
 
 poll-seconds = 60
 
 hide-when-zero = true
 
 mention-max-age-hours = 24
-webex-enabled = true
-webex-app = "Cisco-Systems.Spark"
-webex-tag = "WEBEX"
-
-webex-count = "window"
-
-webex-api = false
-
-webex-rooms = 30
 
 outlook-enabled = true
 outlook-app = "com.microsoft.Outlook"

@@ -69,7 +69,7 @@ def tables_as_text(md: str) -> str:
 
 
 def markdown_for(md: str, target: str) -> str:
-    return tables_as_text(md) if target == "webex" else md
+    return md
 
 
 def pandoc_html(md: str, highlight: bool, pandoc_bin: str):

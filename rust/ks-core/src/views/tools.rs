@@ -914,11 +914,14 @@ impl ToolPanel {
         }
         if self.kind == ToolKind::TextTable {
             if let Some(o) = st.as_object_mut() {
-                let r = self.tt_result.clone().unwrap_or_default();
-                o.insert("ok".into(), json!(r.ok));
-                o.insert("columns".into(), json!(r.columns));
-                o.insert("rows".into(), json!(r.rows));
-                o.insert("delimiter".into(), json!(r.delimiter));
+                let (ok, cols, rows, delim) = match &self.tt_result {
+                    Some(r) => (r.ok, r.columns, r.rows, r.delimiter.as_str()),
+                    None => (false, 0, 0, ""),
+                };
+                o.insert("ok".into(), json!(ok));
+                o.insert("columns".into(), json!(cols));
+                o.insert("rows".into(), json!(rows));
+                o.insert("delimiter".into(), json!(delim));
                 o.insert("running".into(), json!(self.tt_pending.load(std::sync::atomic::Ordering::Relaxed)));
             }
         }
@@ -1153,20 +1156,20 @@ impl ToolPanel {
         filefast_dir_for(&self.spec.save_dir)
     }
 
-    /// `prettyFormat` — jq for JSON, `xmllint --format -` for XML.
+    /// `prettyFormat` — in-process `serde_json` for JSON (no `jq` subprocess),
+    /// `xmllint --format -` for XML.
     pub fn format_text(raw: &str) -> Result<Option<String>, String> {
         let t = raw.trim();
         let Some(first) = t.chars().next() else {
             return Ok(None);
         };
-        let (exe, args): (&str, Vec<String>) = if first == '{' || first == '[' {
-            let exe = ["/opt/homebrew/bin/jq", "/usr/local/bin/jq", "jq"]
-                .iter()
-                .find(|p| !p.contains('/') || std::path::Path::new(p).exists())
-                .copied()
-                .unwrap_or("jq");
-            (exe, vec![".".to_string()])
-        } else if first == '<' {
+        if first == '{' || first == '[' {
+            let v: Value = serde_json::from_str(t).map_err(|e| e.to_string())?;
+            let mut pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+            pretty.push('\n');
+            return Ok(Some(pretty));
+        }
+        let (exe, args): (&str, Vec<String>) = if first == '<' {
             let exe = ["/usr/bin/xmllint", "/opt/homebrew/bin/xmllint"]
                 .iter()
                 .find(|p| std::path::Path::new(p).exists())
@@ -1222,7 +1225,7 @@ impl ToolPanel {
     /// only once the text has settled (never mid-keystroke), so it cannot fight
     /// typing; a no-op when the text is unchanged since the last pass.
     #[cfg(target_os = "macos")]
-    fn apply_pp_highlight(&mut self) {
+    fn apply_pp_highlight(&mut self, known_raw: Option<&str>) {
         if self.kind != ToolKind::PrettyPrint || !self.spec.syntax_highlight {
             return;
         }
@@ -1232,11 +1235,18 @@ impl ToolPanel {
         let Some(colors) = self.colors else {
             return;
         };
-        let raw = editor.string().to_string();
+        let owned;
+        let raw: &str = match known_raw {
+            Some(r) => r,
+            None => {
+                owned = editor.string().to_string();
+                &owned
+            }
+        };
         if raw == self.pp_highlighted {
             return;
         }
-        self.pp_highlighted = raw.clone();
+        self.pp_highlighted = raw.to_string();
         let Some(storage) = (unsafe { editor.textStorage() }) else {
             return;
         };
@@ -2163,7 +2173,8 @@ impl ToolPanel {
                 if !self.fmt_pending.load(std::sync::atomic::Ordering::Relaxed)
                     && self.pp_last_change.is_none()
                 {
-                    self.apply_pp_highlight();
+                    let seen = self.pp_last_seen.clone();
+                    self.apply_pp_highlight(Some(&seen));
                 }
             }
             // `poll_table` (every platform) does the work.

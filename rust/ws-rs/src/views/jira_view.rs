@@ -640,6 +640,14 @@ pub struct JiraList {
     pub pin_builder: Option<(String, PollRun)>,
     /// The issue cache's mtime when `pin_builder` last ran.
     pub issues_mtime: Option<std::time::SystemTime>,
+    /// Last mtimes of `(config_json, status.json, sources_dir, boardCatalog)`
+    /// so `refresh()` skips re-reading JSON + `read_dir` when idle.
+    meta_stamp: Option<(
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+    )>,
 }
 
 /// A file's mtime, `None` when it is missing.
@@ -920,22 +928,54 @@ impl JiraList {
         Some((format!("Synced {ago} ago"), PopupTone::Success))
     }
 
+    fn current_meta_stamp(
+        &self,
+    ) -> (
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+        Option<std::time::SystemTime>,
+    ) {
+        let dir = self.sources_dir();
+        let (cfg_m, st_m, cat_m) = match &self.paths {
+            Some(p) => (
+                mtime_of(&p.config_json),
+                mtime_of(&p.cache_file("status")),
+                mtime_of(&p.cache_file("boardCatalog")),
+            ),
+            None => (None, None, None),
+        };
+        (cfg_m, st_m, mtime_of(&dir), cat_m)
+    }
+
     /// The reload watcher: re-read the sidebar meta and, when the shown
-    /// file changed on disk, its rows (keeping the selected key).
-    pub fn refresh(&mut self) {
-        self.reload_meta();
+    /// file changed on disk, its rows (keeping the selected key). Returns
+    /// `true` if anything changed and the view needs a fresh snapshot.
+    pub fn refresh(&mut self) -> bool {
+        let mut changed = false;
+        let stamp = self.current_meta_stamp();
+        if self.meta_stamp != Some(stamp) {
+            self.meta_stamp = Some(stamp);
+            self.reload_meta();
+            changed = true;
+        }
+        let runs_before = self.pending_runs.len();
         self.rebuild_pin_if_stale();
+        if self.pending_runs.len() != runs_before {
+            changed = true;
+        }
         if self.shown_path.is_empty() {
-            return;
+            return changed;
         }
         // Stat BEFORE reading: a poll landing between the read and the stat
         // would otherwise record the new mtime against the old rows, and the
         // view would sit on them until the next poll changed the file again.
         let m = mtime_of(&self.shown_path);
         if m == self.shown_mtime {
-            return;
+            return changed;
         }
         self.shown_mtime = m;
+        changed = true;
         let keep = self.selected().and_then(|r| r.get("key")).cloned();
         self.all = load_records(&self.shown_path);
         self.refilter();
@@ -954,6 +994,7 @@ impl JiraList {
                 self.request_sprint(&b, &sp);
             }
         }
+        changed
     }
 
     /// Re-run the shown pin view's builder when the issue cache changed

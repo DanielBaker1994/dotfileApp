@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+#[cfg(test)]
 use std::time::Duration;
 
 use serde_json::Value;
@@ -134,6 +135,8 @@ pub struct CommandServer {
     path: PathBuf,
     #[cfg(unix)]
     fd: Arc<AtomicI32>,
+    #[cfg(unix)]
+    wake_tx: AtomicI32,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -146,12 +149,14 @@ impl CommandServer {
     ) -> io::Result<CommandServer> {
         let path = path.as_ref().to_path_buf();
         let fd = bind_listener(&path)?;
+        let (wake_rx, wake_tx) = make_wake_pipe()?;
         let shared = Arc::new(AtomicI32::new(fd));
         let thread_fd = Arc::clone(&shared);
-        let handle = thread::spawn(move || accept_loop(thread_fd, handler));
+        let handle = thread::spawn(move || accept_loop(thread_fd, wake_rx, handler));
         Ok(CommandServer {
             path,
             fd: shared,
+            wake_tx: AtomicI32::new(wake_tx),
             handle: Mutex::new(Some(handle)),
         })
     }
@@ -163,6 +168,14 @@ impl CommandServer {
     /// Stop accepting, join the thread and unlink the socket file.
     pub fn stop(&mut self) {
         let fd = self.fd.swap(-1, Ordering::SeqCst);
+        let tx = self.wake_tx.swap(-1, Ordering::SeqCst);
+        if tx >= 0 {
+            let b = [1u8; 1];
+            unsafe {
+                libc::write(tx, b.as_ptr() as *const libc::c_void, 1);
+                libc::close(tx);
+            }
+        }
         if fd >= 0 {
             unsafe { libc::close(fd) };
         }
@@ -213,33 +226,72 @@ fn bind_listener(path: &Path) -> io::Result<RawFd> {
         unsafe { libc::close(fd) };
         return Err(e);
     }
+    set_cloexec(fd);
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
     unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     Ok(fd)
 }
 
 #[cfg(unix)]
-fn accept_loop(listener: Arc<AtomicI32>, handler: Arc<dyn CommandHandler>) {
+fn make_wake_pipe() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [-1 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    for &pfd in &fds {
+        set_cloexec(pfd);
+        let flags = unsafe { libc::fcntl(pfd, libc::F_GETFL, 0) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(pfd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        }
+    }
+    Ok((fds[0], fds[1]))
+}
+
+#[cfg(unix)]
+fn accept_loop(listener: Arc<AtomicI32>, wake_rx: RawFd, handler: Arc<dyn CommandHandler>) {
     loop {
         let fd = listener.load(Ordering::SeqCst);
         if fd < 0 {
             break;
         }
-        let cfd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-        if cfd < 0 {
-            if listener.load(Ordering::SeqCst) < 0 {
-                break;
-            }
+        let mut pfds = [
+            libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: wake_rx, events: libc::POLLIN, revents: 0 },
+        ];
+        let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) };
+        if rc < 0 {
             let e = io::Error::last_os_error();
-            if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
-                thread::sleep(Duration::from_millis(5));
+            if e.raw_os_error() == Some(libc::EINTR) {
+                continue;
             }
+            break;
+        }
+        if listener.load(Ordering::SeqCst) < 0 || pfds[1].revents != 0 {
+            break;
+        }
+        if pfds[0].revents == 0 {
             continue;
         }
-        configure_conn(cfd);
-        handle_conn(cfd, handler.as_ref());
-        unsafe { libc::close(cfd) };
+        loop {
+            let cfd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+            if cfd < 0 {
+                let e = io::Error::last_os_error();
+                if matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
+                    break;
+                }
+                if listener.load(Ordering::SeqCst) < 0 {
+                    unsafe { libc::close(wake_rx) };
+                    return;
+                }
+                break;
+            }
+            configure_conn(cfd);
+            handle_conn(cfd, handler.as_ref());
+            unsafe { libc::close(cfd) };
+        }
     }
+    unsafe { libc::close(wake_rx) };
 }
 
 /// Mark `fd` close-on-exec so `Command::spawn` cannot hand it to a child.

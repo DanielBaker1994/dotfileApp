@@ -930,6 +930,11 @@ impl SwitcherController {
         (inner.settings.hide_on_focus_loss, inner.settings.focus_loss_delay)
     }
 
+    /// `settings.pane_focus_themed` without cloning `AppSettings`.
+    pub fn pane_focus_themed(&self) -> bool {
+        self.inner.lock().unwrap().settings.pane_focus_themed
+    }
+
     /// `setGlobalHideOnFocusLoss(_:)` — flip the global switch; `persist`
     /// writes `[app] hide-on-focus-loss` (the status-menu path). The shared
     /// window has no per-view `sticky` override, so nothing else changes.
@@ -2988,6 +2993,9 @@ mod daemon_ui {
     /// main thread (headless tests keep the mirrored values).
     pub(super) fn live_focus() -> Option<super::LiveFocus> {
         let mtm = MainThreadMarker::new()?;
+        if let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) {
+            ui.sync_state_for_query();
+        }
         let app = NSApplication::sharedApplication(mtm);
         let key = app.keyWindow();
         Some(super::LiveFocus {
@@ -3375,6 +3383,9 @@ mod daemon_ui {
         /// Last full poll tick (`now_secs`) and the cadence it chose.
         last_poll: Cell<f64>,
         fast_mode: Cell<bool>,
+        /// Repeating poll timer — armed only while a window/panel/stream is
+        /// active so the daemon wakes 0 times/sec when completely hidden.
+        timer: RefCell<Option<Retained<NSTimer>>>,
         state: RefCell<Option<DaemonUiState>>,
         /// Palette / tool / paths / terminal panels (no shared window needed).
         panels: RefCell<PanelState>,
@@ -3489,7 +3500,8 @@ mod daemon_ui {
             main_queue,
             wake: wake.clone(),
             last_poll: Cell::new(0.0),
-            fast_mode: Cell::new(true),
+            fast_mode: Cell::new(false),
+            timer: RefCell::new(None),
             state: RefCell::new(None),
             panels: RefCell::new(PanelState::default()),
             esc_streak: Cell::new(0),
@@ -3537,22 +3549,10 @@ mod daemon_ui {
                 on_ui(|ui| ui.prewarm_palette());
             })
             .ok();
-        // `ScreenshotController.prewarm()` ~1.5 s after launch: SCK + OCR warm
-        // so the first capture / first OCR does not pay the cold cost. The OCR
-        // pass runs outside the controller mutex (a cold Vision load takes
-        // seconds; holding it wedged `state` and every `do:` behind the single
-        // socket thread — old bug #21).
-        if let Some(shot) = shot_prewarm {
-            dispatch2::DispatchQueue::main()
-                .after(dispatch2::DispatchTime::NOW.time(1_500_000_000), move || {
-                    let plan = shot.lock().unwrap().prewarm_plan();
-                    #[cfg(target_os = "macos")]
-                    if let Some(cfg) = plan {
-                        crate::engines::screenshot_text::ShotOCR::warm_up_in_background(cfg);
-                    }
-                })
-                .ok();
-        }
+        // Hyper+X lives in the quick agent (which warms Vision OCR at
+        // QOS_CLASS_BACKGROUND); skip duplicate eager ~43 s OCR compilation
+        // in the main daemon — it still warms lazily on first OCR use.
+        let _ = shot_prewarm;
         // The window's local keyDown guard (mirrors `PopupWindow.installMonitors`):
         // the block holds the UI weakly so AppKit's monitor retains no cycle.
         let weak = Weak::new(&*ui);
@@ -3562,45 +3562,10 @@ mod daemon_ui {
                 .unwrap_or(false)
         });
         *ui.ivars().key_monitor.borrow_mut() = Some(monitor);
-        // `startFocusBridge`'s global click monitor: a click outside our
-        // windows marks `lastOtherAppClick` (the user left on purpose, so an
-        // AeroSpace focus echo must not pull the app back).
-        {
-            use block2::RcBlock;
-            use objc2_app_kit::NSEventMask;
-            let clicked = ui.ivars().last_other_click.clone();
-            let block = RcBlock::new(move |_event: std::ptr::NonNull<NSEvent>| {
-                let Some(mtm) = MainThreadMarker::new() else {
-                    return;
-                };
-                let p = NSEvent::mouseLocation();
-                let in_ours = NSApplication::sharedApplication(mtm).windows().iter().any(|w| {
-                    let f = w.frame();
-                    w.isVisible()
-                        && p.x >= f.origin.x
-                        && p.x <= f.origin.x + f.size.width
-                        && p.y >= f.origin.y
-                        && p.y <= f.origin.y + f.size.height
-                });
-                if !in_ours {
-                    clicked.set(now_secs());
-                }
-            });
-            let m = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-                NSEventMask::LeftMouseDown,
-                &block,
-            );
-            *ui.ivars().click_monitor.borrow_mut() = m;
-        }
-        unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                0.03,
-                as_any(&*ui),
-                sel!(drain:),
-                None,
-                true,
-            );
-        }
+        // The global click monitor and repeating poll timer are armed lazily
+        // only while a window/panel is visible (`sync_active_state`), keeping
+        // idle wakeups at 0 when hidden.
+        ui.sync_active_state();
         ui
     }
 
@@ -3727,11 +3692,13 @@ mod daemon_ui {
     }
 
     impl DaemonUi {
-        /// Cheap enqueue-driven drain (UI commands, the settling syncs, main
+        /// Cheap enqueue-driven drain (UI commands, visible tool ticks, main
         /// jobs). Runs from the waker the moment something is queued and as
-        /// part of every due timer tick.
+        /// part of every active timer tick. Heavy `test_state` JSON mirrors
+        /// run on demand in [`Self::sync_state_for_query`] instead of at 33 Hz.
         fn apply_commands(&self) {
-            // UI commands first, then the settling syncs, then the blocking
+            let mut ran_cmds = false;
+            // UI commands first, then active tool polls, then the blocking
             // `do:` jobs: a `do:` caller waits on a main-queue job and must see
             // the window it just asked for (`views.*` / `windows`).
             for _ in 0..100 {
@@ -3742,6 +3709,7 @@ mod daemon_ui {
                     }
                     q.drain(..).collect()
                 };
+                ran_cmds = true;
                 for cmd in cmds {
                     match cmd {
                         UiCommand::Present(v) => self.present(v),
@@ -3807,12 +3775,13 @@ mod daemon_ui {
                     }
                 }
             }
-            self.sync_tools();
-            self.sync_member_states();
-            if let Some(mtm) = MainThreadMarker::new() {
-                self.ivars()
-                    .controller
-                    .set_window_count(visible_window_count(mtm));
+            self.poll_tools();
+            if ran_cmds {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    self.ivars()
+                        .controller
+                        .set_window_count(visible_window_count(mtm));
+                }
             }
             for _ in 0..100 {
                 let jobs: Vec<Box<dyn FnOnce() + Send>> = {
@@ -3828,6 +3797,110 @@ mod daemon_ui {
             }
         }
 
+        /// On-demand mirror of every view/tool/pane JSON document into the
+        /// controller, called from `live_focus()` only when a socket `state`
+        /// or `do:` query actually reads state.
+        fn sync_state_for_query(&self) {
+            self.sync_tools_docs();
+            self.sync_member_states();
+            if let Some((w, panes)) = self.live_panes() {
+                self.publish_live_pane(&w, &panes);
+            } else {
+                let sig = "none".to_string();
+                if *self.ivars().live_pane_sig.borrow() != sig {
+                    *self.ivars().live_pane_sig.borrow_mut() = sig;
+                    self.ivars().controller.set_live_pane_state(json!({}));
+                }
+            }
+        }
+
+        /// Arm the active poll timer (30 ms with 5 ms coalescing tolerance).
+        fn ensure_timer(&self) {
+            if let Ok(mut slot) = self.ivars().timer.try_borrow_mut() {
+                if slot.is_none() {
+                    let t = unsafe {
+                        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                            0.03,
+                            as_any(self),
+                            sel!(drain:),
+                            None,
+                            true,
+                        )
+                    };
+                    t.setTolerance(0.005);
+                    *slot = Some(t);
+                }
+            }
+        }
+
+        /// Stop the poll timer when nothing is visible/streaming (0 wakeups/sec).
+        fn stop_timer(&self) {
+            if let Ok(mut slot) = self.ivars().timer.try_borrow_mut() {
+                if let Some(t) = slot.take() {
+                    t.invalidate();
+                }
+            }
+        }
+
+        /// Install the global `LeftMouseDown` monitor only while the shared
+        /// window is visible; remove it when hidden so clicks in other apps do
+        /// not wake the daemon.
+        fn sync_click_monitor(&self, shared_visible: bool) {
+            let Ok(mut slot) = self.ivars().click_monitor.try_borrow_mut() else {
+                return;
+            };
+            if shared_visible {
+                if slot.is_none() {
+                    use block2::RcBlock;
+                    use objc2_app_kit::NSEventMask;
+                    let clicked = self.ivars().last_other_click.clone();
+                    let block = RcBlock::new(move |_event: std::ptr::NonNull<NSEvent>| {
+                        let Some(mtm) = MainThreadMarker::new() else {
+                            return;
+                        };
+                        let p = NSEvent::mouseLocation();
+                        let in_ours = NSApplication::sharedApplication(mtm).windows().iter().any(|w| {
+                            let f = w.frame();
+                            w.isVisible()
+                                && p.x >= f.origin.x
+                                && p.x <= f.origin.x + f.size.width
+                                && p.y >= f.origin.y
+                                && p.y <= f.origin.y + f.size.height
+                        });
+                        if !in_ours {
+                            clicked.set(now_secs());
+                        }
+                    });
+                    *slot = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+                        NSEventMask::LeftMouseDown,
+                        &block,
+                    );
+                }
+            } else if let Some(m) = slot.take() {
+                unsafe { NSEvent::removeMonitor(&m) };
+            }
+        }
+
+        /// Synchronize the poll timer, global click monitor, and stall watchdog
+        /// with whether any window, panel, or background stream is active.
+        fn sync_active_state(&self) {
+            let active = self.compute_fast_mode();
+            self.ivars().fast_mode.set(active);
+            if active {
+                self.ensure_timer();
+            } else {
+                self.stop_timer();
+            }
+            let shared_visible = self
+                .ivars()
+                .state
+                .try_borrow()
+                .ok()
+                .is_some_and(|st| st.as_ref().is_some_and(|s| s.window.isVisible()));
+            self.sync_click_monitor(shared_visible);
+            crate::app::logging::set_watchdog_active(active);
+        }
+
         /// The periodic observers (file/focus/Jira/AI/Confluence polls).
         fn poll_tick(&self) {
             self.poll_files_dir();
@@ -3839,19 +3912,14 @@ mod daemon_ui {
             self.poll_ai();
         }
 
-        /// The repeating 30 ms timer: a cheap gate, then a full tick when due
-        /// (30 ms while any window/panel is up, 250 ms when everything is
-        /// hidden). Commands do not wait for it: the waker drains them.
+        /// The repeating 30 ms timer (armed only while active). Commands do not
+        /// wait for it: the waker drains them immediately.
         fn timer_tick(&self) {
             let now = now_secs();
-            let iv = super::poll_interval_secs(self.ivars().fast_mode.get());
-            if !super::poll_due(self.ivars().last_poll.get(), now, iv) {
-                return;
-            }
             self.ivars().last_poll.set(now);
             self.apply_commands();
             self.poll_tick();
-            self.ivars().fast_mode.set(self.compute_fast_mode());
+            self.sync_active_state();
         }
 
         /// The waker's main-thread body.
@@ -3859,27 +3927,34 @@ mod daemon_ui {
             self.ivars().wake.clear();
             // The main dispatch queue also drains inside nested run loops
             // (context-menu tracking, sheets) — entered from handlers that may
-            // hold a `state`/`panels` borrow. The old NSTimer only fired in the
-            // default mode; keep that guarantee and leave the queue to the
-            // timer tick (which is default-mode only) while a nested loop runs.
+            // hold a `state`/`panels` borrow. Arm the default-mode timer so
+            // queued commands drain as soon as the nested loop returns.
             let default_mode = unsafe {
                 objc2_foundation::NSRunLoop::currentRunLoop()
                     .currentMode()
                     .is_none_or(|m| &*m == objc2_foundation::NSDefaultRunLoopMode)
             };
             if !default_mode {
+                self.ensure_timer();
                 return;
             }
             self.apply_commands();
-            self.ivars().fast_mode.set(self.compute_fast_mode());
+            self.sync_active_state();
         }
 
-        /// Is the shared window or any palette/tool/terminal/paths/screenshot
-        /// panel up (so polls must stay at the fast cadence)?
+        /// Is the shared window, any visible palette/tool/paths/screenshot
+        /// panel, or an active AI stream running?
         fn compute_fast_mode(&self) -> bool {
             if let Ok(state) = self.ivars().state.try_borrow() {
-                if state.as_ref().is_some_and(|st| st.window.isVisible()) {
-                    return true;
+                if let Some(st) = state.as_ref() {
+                    if st.window.isVisible()
+                        || st.switcher.as_ref().is_some_and(|x| x.is_visible())
+                    {
+                        return true;
+                    }
+                    if st.ai.as_ref().is_some_and(|a| a.model.is_running() || a.was_running) {
+                        return true;
+                    }
                 }
             } else {
                 return true;
@@ -3887,7 +3962,7 @@ mod daemon_ui {
             match self.ivars().panels.try_borrow() {
                 Ok(p) => {
                     if p.palette.as_ref().is_some_and(|x| x.is_visible())
-                        || !p.tools.is_empty()
+                        || p.tools.values().any(|t| t.is_shown())
                         || p.paths
                             .as_ref()
                             .is_some_and(|w| w.window.as_ref().is_some_and(|win| win.isVisible()))
@@ -4032,13 +4107,22 @@ mod daemon_ui {
                 return;
             };
             let controller = self.ivars().controller.clone();
-            let mut panel = self
-                .ivars()
-                .panels
-                .borrow_mut()
+            // Never stack the palette behind a level-1000 screenshot overlay.
+            if let Some(shot) = controller.screenshot_controller() {
+                if let Ok(mut c) = shot.try_lock() {
+                    if !c.is_idle() || c.has_recent_open() {
+                        c.abort_session();
+                    }
+                }
+            }
+            let Ok(mut panel_guard) = self.ivars().panels.try_borrow_mut() else {
+                return;
+            };
+            let mut panel = panel_guard
                 .palette
                 .take()
                 .unwrap_or_else(PalettePanel::new);
+            drop(panel_guard);
             panel.set_rows(controller.hyper_palette_commands());
             panel.set_callbacks(
                 Box::new({
@@ -4508,56 +4592,60 @@ mod daemon_ui {
             }
         }
 
-        /// Per-drain: let each tool panel apply background results, keep the
-        /// keyboard on a just-opened panel (`reclaimToolKey`), and mirror its
-        /// `testState` (+ wid/level) into `state.tools`.
-        fn sync_tools(&self) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
+        /// Per-tick fast path: let each visible tool panel apply background
+        /// results and keep the keyboard on a just-opened panel (`reclaimToolKey`),
+        /// without serializing `testState` JSON every 30 ms.
+        fn poll_tools(&self) {
+            let Ok(mut panels) = self.ivars().panels.try_borrow_mut() else {
+                return;
+            };
+            let st = &mut *panels;
+            if st.tools.is_empty() {
+                return;
+            }
+            let now = now_secs();
+            let mtm = MainThreadMarker::new();
+            let key_wid: i64 = if st.tool_opened_at.is_empty() {
+                0
+            } else {
+                mtm.and_then(|m| {
+                    NSApplication::sharedApplication(m)
+                        .keyWindow()
+                        .map(|w| w.windowNumber() as i64)
+                })
+                .unwrap_or(0)
+            };
+            for (name, panel) in st.tools.iter_mut() {
+                if !panel.is_shown() {
+                    st.tool_opened_at.remove(name);
+                    continue;
+                }
+                // `reclaimToolKey`: one check 0.25 s after opening — if
+                // another window took the keyboard, take it back once
+                // (a later hotkey to the shared window wins).
+                if let (Some(mtm), Some(opened)) = (mtm, st.tool_opened_at.get(name).copied()) {
+                    if now - opened >= 0.25 {
+                        st.tool_opened_at.remove(name);
+                        if !panel.has_key() && key_wid != panel.window_number() {
+                            panel.show(mtm);
+                        }
+                    }
+                }
+                panel.poll();
+            }
+        }
+
+        /// On-demand: mirror every tool panel's and the paths shelf's
+        /// `testState` into `state.tools` / `state.paths`.
+        fn sync_tools_docs(&self) {
             let mut docs: Vec<(String, serde_json::Value)> = Vec::new();
             let mut paths_doc: Option<(serde_json::Value, i64)> = None;
-            {
-                let mut panels = self.ivars().panels.borrow_mut();
-                {
-                    let st = &mut *panels;
-                    let mtm = MainThreadMarker::new();
-                    let key_wid: i64 = mtm
-                        .and_then(|m| {
-                            NSApplication::sharedApplication(m)
-                                .keyWindow()
-                                .map(|w| w.windowNumber() as i64)
-                        })
-                        .unwrap_or(0);
-                    for (name, panel) in st.tools.iter_mut() {
-                        // `reclaimToolKey`: one check 0.25 s after opening — if
-                        // another window took the keyboard, take it back once
-                        // (a later hotkey to the shared window wins).
-                        if let (Some(mtm), Some(opened)) = (
-                            mtm,
-                            st.tool_opened_at.get(name).copied(),
-                        ) {
-                            if now - opened >= 0.25 {
-                                st.tool_opened_at.remove(name);
-                                // `key_wid == 0`: no window of ours is key — a palette
-                                // pick handed activation back to the user's app and
-                                // that activation landed after the panel took key.
-                                if !panel.has_key() && key_wid != panel.window_number() {
-                                    panel.show(mtm);
-                                }
-                            }
-                        }
-                        panel.poll();
-                        docs.push((name.clone(), panel.test_state()));
-                    }
-                    // The shelf is its own window, not a `ToolPanel`: mirror its
-                    // live document too, so a key-driven close (Esc / Return /
-                    // click-off → `PathsWindow::hide_window`) is reflected in
-                    // `state.paths` on the next drain instead of staying stale.
-                    if let Some(p) = st.paths.as_ref() {
-                        paths_doc = Some((p.test_state(), p.window_number()));
-                    }
+            if let Ok(panels) = self.ivars().panels.try_borrow() {
+                for (name, panel) in panels.tools.iter() {
+                    docs.push((name.clone(), panel.test_state()));
+                }
+                if let Some(p) = panels.paths.as_ref() {
+                    paths_doc = Some((p.test_state(), p.window_number()));
                 }
             }
             for (name, doc) in docs {
@@ -5208,8 +5296,11 @@ return Some(true)
 
         /// The current member's `navPanes` (real AppKit views) + the window.
         fn live_panes(&self) -> Option<(Retained<SlotHostWindow>, Vec<crate::app::live_panes::LivePane>)> {
-            let state = self.ivars().state.borrow();
+            let state = self.ivars().state.try_borrow().ok()?;
             let st = state.as_ref()?;
+            if !st.window.isVisible() {
+                return None;
+            }
             let panes = match st.current? {
                 SlotView::Files => st.files.as_ref()?.view.as_ref()?.nav_panes(),
                 SlotView::Jira => st.jira.as_ref()?.1.nav_panes(),
@@ -5247,8 +5338,7 @@ return Some(true)
         /// current view's accent so it sits in the theme instead of a fixed
         /// silver hairline.
         fn theme_focus_ring(&self) {
-            let s = self.ivars().controller.settings();
-            if !s.pane_focus_themed {
+            if !self.ivars().controller.pane_focus_themed() {
                 return;
             }
             let Some(v) = self.ivars().controller.current() else { return };
@@ -5258,22 +5348,13 @@ return Some(true)
         }
 
         /// `refreshSoon`: keep the ring on whatever holds the keyboard (a
-        /// click, a sheet, a view switch) — run from the drain tick.
+        /// click, a sheet, a view switch) — run from the active poll tick.
+        /// JSON state publishing happens on demand in `sync_state_for_query`.
         fn live_pane_refresh(&self) {
-            match self.live_panes() {
-                Some((w, panes)) => {
-                    self.theme_focus_ring();
-                    self.ivars().live_nav.borrow_mut().refresh(&w, &panes);
-                    self.vim_refresh(&w, &panes);
-                    self.publish_live_pane(&w, &panes);
-                }
-                None => {
-                    let sig = "none".to_string();
-                    if *self.ivars().live_pane_sig.borrow() != sig {
-                        *self.ivars().live_pane_sig.borrow_mut() = sig;
-                        self.ivars().controller.set_live_pane_state(json!({}));
-                    }
-                }
+            if let Some((w, panes)) = self.live_panes() {
+                self.theme_focus_ring();
+                self.ivars().live_nav.borrow_mut().refresh(&w, &panes);
+                self.vim_refresh(&w, &panes);
             }
         }
 
@@ -7867,20 +7948,12 @@ return Some(true)
                 }));
                 out.push(MenuEntry::Separator);
                 let w = wk();
-                let copy_outlook = MenuEntry::item("Outlook", move || {
+                out.push(MenuEntry::item("Copy for Outlook", move || {
                     if let Some(ui) = w.load() {
                         ui.ai_surface(|a| a.model.set_mode(PaneMode::Outlook));
                         ui.ai_event(AIEvent::Copy);
                     }
-                });
-                let w = wk();
-                let copy_webex = MenuEntry::item("Webex", move || {
-                    if let Some(ui) = w.load() {
-                        ui.ai_surface(|a| a.model.set_mode(PaneMode::Webex));
-                        ui.ai_event(AIEvent::Copy);
-                    }
-                });
-                out.push(MenuEntry::submenu("Copy for", vec![copy_outlook, copy_webex]));
+                }));
                 let w = wk();
                 out.push(MenuEntry::item("Copy as Markdown", move || {
                     if let Some(ui) = w.load() {
@@ -8285,7 +8358,8 @@ return Some(true)
         }
 
         /// Every 10 s while Jira is up: the sidebar badges / sync line and
-        /// the shown list follow the poller.
+        /// the shown list follow the poller — skipping snapshot/redraw work
+        /// when nothing on disk changed.
         fn refresh_jira(&self) {
             let now = now_secs();
             if now - self.ivars().jira_refresh_at.get() < 10.0 {
@@ -8295,7 +8369,25 @@ return Some(true)
             if !self.ivars().controller.current().is_some_and(|v| v.is_jira()) {
                 return;
             }
-            self.jira_surface(|l| l.refresh());
+            let (writes, runs) = {
+                let mut state = self.ivars().state.borrow_mut();
+                let Some(st) = state.as_mut() else { return };
+                if !st.window.isVisible() {
+                    return;
+                }
+                let Some((list, view)) = st.jira.as_mut() else { return };
+                if !list.refresh() {
+                    return;
+                }
+                view.apply(list.snapshot());
+                (std::mem::take(&mut list.pending_writes), std::mem::take(&mut list.pending_runs))
+            };
+            for w in writes {
+                jira_poll_write(w);
+            }
+            for run in runs {
+                jira_poll_run(run);
+            }
         }
 
         /// `ConfluenceWindow.handleKey`: Cmd+L / Cmd+F search field, Cmd+G /
@@ -9071,33 +9163,34 @@ return Some(true)
             if self.ivars().controller.current() != Some(SlotView::Files) {
                 return;
             }
-            let need = {
-                let state = self.ivars().state.borrow();
-                state
-                    .as_ref()
-                    .and_then(|st| st.files.as_ref())
-                    .is_some_and(|b| b.in_recent() && b.query.is_empty())
-            };
-            if !need {
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else { return };
+            if !st.window.isVisible() {
                 return;
             }
-            self.files_surface(|b| {
-                let v = b.virtual_index.unwrap_or(0);
-                let fresh = b.recent_entries(v == 1);
-                let sig = |r: &[crate::views::files::Entry]| {
-                    r.iter().map(|e| format!("{}{}", e.path, e.trailing_text)).collect::<Vec<_>>()
-                };
-                if sig(&fresh) != sig(&b.all) {
-                    let keep = b.list.rows.get(b.list.selection).map(|e| e.path.clone());
-                    b.all = fresh;
-                    b.refilter();
-                    if let Some(k) = keep {
-                        if let Some(i) = b.list.rows.iter().position(|e| e.path == k) {
-                            b.list.selection = i;
-                        }
-                    }
+            let Some(b) = st.files.as_mut() else { return };
+            if !b.in_recent() || !b.query.is_empty() {
+                return;
+            }
+            let v = b.virtual_index.unwrap_or(0);
+            let fresh = b.recent_entries(v == 1);
+            let changed = fresh.len() != b.all.len()
+                || fresh
+                    .iter()
+                    .zip(b.all.iter())
+                    .any(|(a, cur)| a.path != cur.path || a.trailing_text != cur.trailing_text);
+            if !changed {
+                return;
+            }
+            let keep = b.list.rows.get(b.list.selection).map(|e| e.path.clone());
+            b.all = fresh;
+            b.refilter();
+            if let Some(k) = keep {
+                if let Some(i) = b.list.rows.iter().position(|e| e.path == k) {
+                    b.list.selection = i;
                 }
-            });
+            }
+            b.sync_view();
         }
 
         // -- list keys (`PopupWindow.listKey` on the focused list) ------------
@@ -9406,13 +9499,12 @@ return Some(true)
             }
         }
 
-        /// The per-drain files/jira sync: `views.*` selection extras.
+        /// On-demand files/jira/confluence `views.*` selection extras.
         fn sync_member_states(&self) {
             let mut files_state = None;
             let mut jira_state = None;
             let mut conf_w = None;
-            {
-                let state = self.ivars().state.borrow();
+            if let Ok(state) = self.ivars().state.try_borrow() {
                 if let Some(st) = state.as_ref() {
                     if let Some(b) = st.files.as_ref() {
                         files_state = Some(b.test_state());
@@ -9737,7 +9829,7 @@ return Some(true)
             let fx = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), root.bounds());
             fx.setMaterial(NSVisualEffectMaterial::HUDWindow);
             fx.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            fx.setState(NSVisualEffectState::Active);
+            fx.setState(NSVisualEffectState::FollowsWindowActiveState);
             fx.setAutoresizingMask(mask_fill());
 
             let tint = NSView::initWithFrame(NSView::alloc(mtm), root.bounds());

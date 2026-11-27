@@ -76,6 +76,8 @@ pub enum FilesEvent {
     DragEnded,
     /// A tab in the tab bar was clicked.
     Tab(usize),
+    /// A background recursive search finished and its results are ready.
+    AsyncReady,
 }
 
 /// Toolbar hit ids.
@@ -668,6 +670,8 @@ mod appkit {
             let name_f = style::system_font(12.0 * z, Weight::Regular);
             let dir_f = style::system_font(11.0 * z, Weight::Bold);
             let trail_f = style::system_font(10.0 * z, Weight::Regular);
+            let caret_h = style::text_size("\u{25be}", &trail_f).1;
+            let slash_h = style::text_size("/", &dir_f).1;
             for i in first..=last {
                 let e = &rows[i];
                 let full = self.row_rect(i);
@@ -678,20 +682,14 @@ mod appkit {
                 // ▾ on an open folder.
                 let indent = indent_for(e.depth, z);
                 if e.expanded {
-                    let (_, gh) = style::text_size("\u{25be}", &trail_f);
-                    style::draw_text("\u{25be}", full.x + indent + 1.0, full.mid_y() - gh / 2.0, &trail_f, c.dim);
+                    style::draw_text("\u{25be}", full.x + indent + 1.0, full.mid_y() - caret_h / 2.0, &trail_f, c.dim);
                 }
                 let r = Rect::new(full.x + indent, full.y, (full.width - indent).max(0.0), full.height);
-                let ir = Rect::new(r.x + 10.0, r.y, isz, rh).inset_by(1.0, (rh - isz) / 2.0);
-                let icon = if e.is_parent() {
-                    style::symbol_image("arrow.turn.left.up", 11.0, Weight::Semibold, c.dim)
-                        .unwrap_or_else(|| file_icon(&e.path))
-                } else {
-                    file_icon(&e.path)
-                };
                 if e.is_parent() {
                     style::draw_symbol("arrow.turn.left.up", Rect::new(r.x + 10.0, r.y, isz, rh), c.dim, 11.0);
                 } else {
+                    let ir = Rect::new(r.x + 10.0, r.y, isz, rh).inset_by(1.0, (rh - isz) / 2.0);
+                    let icon = file_icon(&e.path);
                     style::draw_image(&icon, ir, 1.0);
                 }
                 let mut tx = r.x + 10.0 + isz + 6.0;
@@ -699,21 +697,19 @@ mod appkit {
                 if is_dir {
                     tx += 4.0;
                 }
-                let trail_w = if e.trailing_text.is_empty() {
-                    0.0
+                let (trail_w, trail_h) = if e.trailing_text.is_empty() {
+                    (0.0, 0.0)
                 } else {
-                    style::text_size(&e.trailing_text, &trail_f).0
+                    style::text_size(&e.trailing_text, &trail_f)
                 };
                 let avail = full.max_x().min(w) - tx - 8.0 - if trail_w > 0.0 { trail_w + 16.0 + 4.0 } else { 0.0 };
                 let name_color = if on { c.text } else { c.text.with_alpha(0.85) };
                 let drawn = style::draw_text_left(&e.name, Rect::new(tx, r.y, avail.max(20.0), rh), &name_f, name_color);
                 if is_dir {
-                    let (_, gh) = style::text_size("/", &dir_f);
-                    style::draw_text("/", tx + drawn + 2.0, r.mid_y() - gh / 2.0, &dir_f, c.tone(PopupTone::Accent2));
+                    style::draw_text("/", tx + drawn + 2.0, r.mid_y() - slash_h / 2.0, &dir_f, c.tone(PopupTone::Accent2));
                 }
                 if trail_w > 0.0 {
-                    let (_, th) = style::text_size(&e.trailing_text, &trail_f);
-                    style::draw_text(&e.trailing_text, w - trail_w - 16.0, r.mid_y() - th / 2.0, &trail_f, c.dim);
+                    style::draw_text(&e.trailing_text, w - trail_w - 16.0, r.mid_y() - trail_h / 2.0, &trail_f, c.dim);
                 }
             }
         }
@@ -955,6 +951,11 @@ mod appkit {
             if let Some(cb) = cb {
                 cb(ev);
             }
+        }
+
+        /// Notify the owner that a background recursive search completed.
+        pub fn emit_async_ready(&self) {
+            self.emit(FilesEvent::AsyncReady);
         }
 
         pub fn search_field(&self) -> Retained<NSTextField> {

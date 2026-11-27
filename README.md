@@ -80,7 +80,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | Jira / Health windows | menu-bar **wrench** icon |
 | Window borders | borders (brew service) |
 | Jira window | the palette or the menu bar — spreadsheet table, columns from `commands.toml [jira] columns` |
-| AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook/Webex); right pane = Diff / Markdown / Outlook / Webex preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
+| AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook); right pane = Diff / Markdown / Outlook preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
 | Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window**; the Jira view's **Tickets \| Config** pill → **Config** shows the poll jobs, schedules, Force Poll and Setup… |
 | Jira poll agent | launchd `com.jira.poll` (60s tick; `jira_poll.py` runs only due endpoints) |
 
@@ -105,7 +105,7 @@ menu, or pass a command. `./ws help` lists everything.
   client, config, Python helper client; `ui/` popup framework + shared
   window; `views/` files, jira, confluence, AI, screenshot, …;
   `engines/` pure logic; `panes/` pane focus + vim keys
-- `rust/ws-helpers` — the notify AX helpers (`dock_badges`, `webex_unread`)
+- `rust/ws-helpers` — the notify AX helper (`dock_badges`)
 - `bin/build-app.sh` — `cargo build` → the signed `kitchen-sink.app`
 - `commands.toml` — every user-facing string + window definition (the app is
   config-driven; new windows need no code)

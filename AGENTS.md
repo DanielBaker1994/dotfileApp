@@ -270,7 +270,7 @@ gitignored.
     `confluence.rs`, `ai.rs`, `setup.rs`
     (`AppInstall` + setup UI), the jira/confluence/ai views.
   - `engines/` — ai_format only.
-- `ws-helpers` — `dock_badges` + `webex_unread` AX helpers (run by
+- `ws-helpers` — `dock_badges` AX helper (run by
   `notify/notify_poll.py`).
 
 Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,

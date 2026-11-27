@@ -204,16 +204,25 @@ impl Paths {
     }
 }
 
-/// `YYYY_MM_DD` via the `date` command (no locale/chrono dependency).
+/// `YYYY_MM_DD` in local time via `libc::localtime_r` (no `/bin/date` fork).
 fn log_date_stamp() -> String {
-    std::process::Command::new("date")
-        .arg("+%Y_%m_%d")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown_date".to_string())
+    #[cfg(unix)]
+    {
+        let mut t: libc::time_t = 0;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::time(&mut t);
+            if !libc::localtime_r(&t, &mut tm).is_null() {
+                return format!(
+                    "{:04}_{:02}_{:02}",
+                    tm.tm_year + 1900,
+                    tm.tm_mon + 1,
+                    tm.tm_mday
+                );
+            }
+        }
+    }
+    "unknown_date".to_string()
 }
 
 /// `JiraPaths` — resolved once through the helper (`jira.paths`, the same

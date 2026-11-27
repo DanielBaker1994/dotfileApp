@@ -490,7 +490,7 @@ pub const DEFAULT_USER_COLORS: &str =
 /// text, on the help card)`. The help card (shown until a selection exists)
 /// takes the `true` rows; Cmd+/ shows them all. Each text is overridable with
 /// its `[screenshot] help-*` key (rule 3).
-pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 22] = [
+pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 23] = [
     ("help-mouse", "Mouse", "Select an area \u{b7} W snaps to a window", true),
     ("help-copy", "\u{2318}C / Return", "Copy to clipboard", true),
     ("help-save", "\u{2318}S", "Save to a file", true),
@@ -502,10 +502,11 @@ pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 22] = [
     ("help-space", "Space", "Tool settings", true),
     ("help-shortcuts", "\u{2318}/", "All shortcuts", true),
     ("help-esc", "Esc", "Exit", true),
-    ("help-tools", "P D A R F C M T B I", "Pencil, line, arrow, rectangle, filled, circle, marker, text, pixelate, invert", false),
+    ("help-tools", "P D A R F C H T B I", "Pencil, line, arrow, rectangle, filled, circle, highlighter, text, pixelate, invert", false),
     ("help-retake", "\u{2318}T", "Retake after the delay (menus, hovers)", false),
     ("help-copy-text-now", "\u{21e7}\u{2318}C", "Copy the text in the selection", false),
-    ("help-wheel", "Mouse Wheel", "Change tool size", false),
+    ("help-wheel", "Wheel / [ ]", "Change tool or font size", false),
+    ("help-text-style", "\u{2318}B / \u{2318}I / \u{2318}\u{00b1}", "Bold, italic, or resize text while typing", false),
     ("help-right-click", "Right Click", "Colour wheel", false),
     ("help-grab", "G / \u{21e7}G", "Pick a colour from the screen (\u{21e7}G also copies its hex)", false),
     ("help-arrows", "Arrows", "Move the selection (\u{21e7} resizes)", false),
@@ -609,10 +610,14 @@ pub struct ScreenshotConfig {
     pub contrast_color: ShotColor,
     pub contrast_opacity: i64,
     pub draw_color: ShotColor,
+    pub highlighter_color: ShotColor,
     pub user_colors: Vec<Option<ShotColor>>,
     pub buttons: Vec<ShotTool>,
     pub button_size: f64,
     pub show_help: bool,
+    /// `[screenshot] help-opacity` (0.0…1.0): translucency of the centered
+    /// blue/purple help card before a selection exists (also auto-fades on hover).
+    pub help_opacity: f64,
     pub show_side_panel_button: bool,
     /// `[screenshot] side-panel-width` (Flameshot's sidebar is 250pt).
     pub side_panel_width: f64,
@@ -679,10 +684,12 @@ impl Default for ScreenshotConfig {
             contrast_color: hex("#270032"),
             contrast_opacity: 190,
             draw_color: hex("#ff0000"),
+            highlighter_color: hex("#ffe600"),
             user_colors: vec![None],
             buttons: ShotTool::ring("", false),
             button_size: 34.0,
             show_help: true,
+            help_opacity: 0.45,
             show_side_panel_button: true,
             side_panel_width: ShotSidePanel::WIDTH,
             panel_labels: PanelLabels::default(),
@@ -784,6 +791,7 @@ impl ScreenshotConfig {
             contrast_color: col("contrast-color", d.contrast_color),
             contrast_opacity: i("contrast-opacity", 190, 0, 255),
             draw_color: col("draw-color", d.draw_color),
+            highlighter_color: col("highlighter-color", d.highlighter_color),
             ..d.clone()
         };
 
@@ -808,6 +816,9 @@ impl ScreenshotConfig {
             ButtonRing::default_button_size(15.5)
         };
         c.show_help = b("show-help", true);
+        if let Some(op) = e.get("help-opacity").and_then(|v| v.trim().parse::<f64>().ok()) {
+            c.help_opacity = op.clamp(0.0, 1.0);
+        }
         c.show_side_panel_button = b("show-side-panel-button", true);
         c.side_panel_width = i("side-panel-width", ShotSidePanel::WIDTH as i64, 180, 480) as f64;
         c.panel_labels = PanelLabels {
@@ -2231,6 +2242,14 @@ enum Drag {
         start: Point,
         moved: bool,
     },
+    /// Resizing a selected shape (8 handles for boxes, 2 endpoints for lines/arrows).
+    ResizingObject {
+        index: usize,
+        handle: i64,
+        from: ShotObject,
+        start: Point,
+        moved: bool,
+    },
     /// Scaling the text draft by a box handle: the opposite handle stays put.
     ScalingText {
         anchor: Point,
@@ -2269,6 +2288,9 @@ pub struct ShotSession {
     pub move_mode: bool,
     pub text_mode: bool,
     pub color: ShotColor,
+    /// Dedicated colour for the Highlighter (`ShotTool::Marker`), defaulting
+    /// to bright yellow (`cfg.highlighter_color`) independently of pen/shape colour.
+    pub marker_color: ShotColor,
     pub counter_offset: i64,
     pub side_panel_open: bool,
     pub grabbing: Option<ShotColor>,
@@ -2323,9 +2345,15 @@ impl ShotSession {
             .as_deref()
             .and_then(ShotColor::from_hex)
             .unwrap_or(cfg.draw_color);
+        let marker_color = state
+            .marker_color
+            .as_deref()
+            .and_then(ShotColor::from_hex)
+            .unwrap_or(cfg.highlighter_color);
         let mut s = ShotSession {
             doc: ShotDocument::new(cfg.undo_limit.max(1) as usize),
             color,
+            marker_color,
             text_mode: args.mode == ShotMode::Text
                 // A preset area (`--region`, `--last-region`, a Cmd+T retake)
                 // means editing a screenshot, not copying text.
@@ -2423,8 +2451,12 @@ impl ShotSession {
         self.tool.map(|t| self.size(t))
     }
     pub fn current_color(&self) -> ShotColor {
+        if let Some(e) = &self.editing {
+            return e.object.color;
+        }
         match self.doc.selected {
             Some(i) if i < self.doc.objects.len() => self.doc.objects[i].color,
+            _ if self.tool == Some(ShotTool::Marker) => self.marker_color,
             _ => self.color,
         }
     }
@@ -2550,10 +2582,27 @@ impl ShotSession {
         }
     }
     pub fn set_color(&mut self, c: ShotColor) {
+        if let Some(e) = self.editing.as_mut() {
+            e.object.color = c;
+            self.color = c;
+            self.state.color = Some(c.hex());
+            self.save_state();
+            return;
+        }
         if let Some(i) = self.doc.selected {
             if i < self.doc.objects.len() {
+                let is_marker = self.doc.objects[i].tool == ShotTool::Marker;
                 self.doc.update(i, None, |o| o.color = c);
+                if is_marker {
+                    self.marker_color = c;
+                    self.state.marker_color = Some(c.hex());
+                    self.save_state();
+                }
             }
+        } else if self.tool == Some(ShotTool::Marker) {
+            self.marker_color = c;
+            self.state.marker_color = Some(c.hex());
+            self.save_state();
         } else {
             self.color = c;
             self.state.color = Some(c.hex());
@@ -2561,6 +2610,14 @@ impl ShotSession {
         }
     }
     pub fn change_size(&mut self, delta: i64) {
+        if let Some(e) = self.editing.as_mut() {
+            let (lo, hi) = ShotTool::Text.size_range();
+            let v = (e.object.size + delta).clamp(lo, hi);
+            e.object.size = v;
+            self.state.sizes.insert(ShotTool::Text.raw_value().to_string(), v);
+            self.save_state();
+            return;
+        }
         if let Some(i) = self.doc.selected {
             if i < self.doc.objects.len() {
                 let t = self.doc.objects[i].tool;
@@ -2578,9 +2635,13 @@ impl ShotSession {
         self.save_state();
     }
     pub fn set_size(&mut self, v: i64) {
-        let cur = match self.doc.selected {
-            Some(i) if i < self.doc.objects.len() => Some(self.doc.objects[i].size),
-            _ => self.tool.map(|t| self.size(t)),
+        let cur = if let Some(e) = &self.editing {
+            Some(e.object.size)
+        } else {
+            match self.doc.selected {
+                Some(i) if i < self.doc.objects.len() => Some(self.doc.objects[i].size),
+                _ => self.tool.map(|t| self.size(t)),
+            }
         };
         if let Some(cur) = cur {
             self.change_size(v - cur);
@@ -2590,7 +2651,12 @@ impl ShotSession {
     // -- selection --------------------------------------------------------
 
     pub fn new_object(&self, t: ShotTool, p: Point) -> ShotObject {
-        let mut o = ShotObject::new(t, vec![p, p], self.color, self.size(t));
+        let color = if t == ShotTool::Marker {
+            self.marker_color
+        } else {
+            self.color
+        };
+        let mut o = ShotObject::new(t, vec![p, p], color, self.size(t));
         o.open_arrow = self.cfg.arrow_style == 1;
         o.reversed = self.cfg.reverse_arrow;
         o.outline = self.cfg.counter_outline;
@@ -2600,7 +2666,7 @@ impl ShotSession {
             o.points = vec![p];
             o.number_offset = self.counter_offset;
         }
-        if t == ShotTool::Pencil {
+        if t == ShotTool::Pencil || t == ShotTool::Marker {
             o.points = vec![p];
         }
         o
@@ -2771,6 +2837,24 @@ impl ShotSession {
                 self.doc.update(i, None, |o| f(&mut o.style));
             }
         }
+    }
+
+    /// Cycle the text font family through [`FONT_PRESETS`].
+    pub fn cycle_font_family(&mut self, step: i64) {
+        let cur = self.panel_text_style().family;
+        let n = FONT_PRESETS.len() as i64;
+        let idx = FONT_PRESETS
+            .iter()
+            .position(|(f, _)| f.eq_ignore_ascii_case(&cur))
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        let next = if idx < 0 {
+            0
+        } else {
+            (idx + step).rem_euclid(n) as usize
+        };
+        let fam = FONT_PRESETS[next].0.to_string();
+        self.set_text_style(|st| st.family = fam.clone());
     }
 
     // -- side panel / shortcuts / grab / wheel ----------------------------
@@ -2983,9 +3067,13 @@ impl ShotSession {
         true
     }
 
-    /// The size the panel's size control edits: the selected object's, else
-    /// the active tool's, as `(value, lo, hi)`; `None` with neither.
+    /// The size the panel's size control edits: the live text draft's, the
+    /// selected object's, else the active tool's, as `(value, lo, hi)`.
     pub fn panel_size(&self) -> Option<(i64, i64, i64)> {
+        if let Some(e) = &self.editing {
+            let (lo, hi) = ShotTool::Text.size_range();
+            return Some((e.object.size, lo, hi));
+        }
         let t = match self.doc.selected {
             Some(i) if i < self.doc.objects.len() => {
                 let o = &self.doc.objects[i];
@@ -2996,6 +3084,111 @@ impl ShotSession {
         };
         let (lo, hi) = t.size_range();
         Some((self.size(t), lo, hi))
+    }
+
+    /// The tool the quick-style bar / size badge is currently targeting.
+    pub fn active_style_tool(&self) -> Option<ShotTool> {
+        if self.editing.is_some() {
+            return Some(ShotTool::Text);
+        }
+        if let Some(i) = self.doc.selected {
+            if let Some(o) = self.doc.objects.get(i) {
+                return Some(o.tool);
+            }
+        }
+        self.tool.filter(|t| t.is_drawing())
+    }
+
+    /// Human-readable size label for the quick-style bar (`16pt` for Text,
+    /// `3px` for stroke tools, `12px` for Highlighter).
+    pub fn quick_size_label(&self) -> Option<String> {
+        let t = self.active_style_tool()?;
+        let (v, _, _) = self.panel_size()?;
+        let text = match t {
+            ShotTool::Text => format!("{}pt", v + 8),
+            ShotTool::Marker => format!("{}px", v * 2 + 2),
+            ShotTool::Pixelate => format!("{}x", v),
+            ShotTool::Counter => format!("#{}", v),
+            _ => format!("{}px", v),
+        };
+        Some(text)
+    }
+
+    /// The floating quick-style bar layout on display `d` when a drawing tool,
+    /// selected annotation, or active text draft is present.
+    pub fn quick_bar_layout(&self, d: usize) -> Option<QuickBarLayout> {
+        if self.text_mode
+            || self.is_dragging()
+            || self.save_card.is_some()
+            || self.wheel.is_some()
+            || self.grabbing.is_some()
+            || self.shortcuts_shown
+            || Some(d) != self.active
+        {
+            return None;
+        }
+        self.active_style_tool()?;
+        let sel = self.selection?;
+        let disp = self.displays.get(d)?;
+        let ring = ButtonRing::layout(sel, disp.bounds(), self.cfg.buttons.len(), self.cfg.button_size);
+        let side_x = self.panel_layout(d).map(|l| l.panel.max_x()).unwrap_or(0.0);
+        Some(ShotQuickBar::layout(
+            sel,
+            disp.bounds(),
+            disp.top_inset,
+            side_x,
+            &ring.frames,
+            &self.cfg.user_colors,
+            self.text_section_shown(),
+        ))
+    }
+
+    /// Apply a click inside the floating quick-style bar. Returns `false` if
+    /// `p` is outside it. Keeps any live text draft open so users can recolor,
+    /// resize, or switch font while typing.
+    fn quick_bar_press(&mut self, d: usize, p: Point) -> bool {
+        let Some(l) = self.quick_bar_layout(d) else {
+            return false;
+        };
+        let Some(hit) = ShotQuickBar::hit(&l, p) else {
+            return false;
+        };
+        let step = if self.active_style_tool() == Some(ShotTool::Text) { 2 } else { 1 };
+        match hit {
+            QuickBarHit::Swatch(i) => {
+                if let Some((_, c)) = l.swatches.get(i) {
+                    self.set_color(*c);
+                }
+            }
+            QuickBarHit::Picker => {
+                self.toggle_side_panel(None);
+            }
+            QuickBarHit::SizeDown => self.change_size(-step),
+            QuickBarHit::SizeUp => self.change_size(step),
+            QuickBarHit::FontCycle => self.cycle_font_family(1),
+            QuickBarHit::Bold => {
+                let on = !self.panel_text_style().bold;
+                self.set_text_style(|st| st.bold = on);
+            }
+            QuickBarHit::Italic => {
+                let on = !self.panel_text_style().italic;
+                self.set_text_style(|st| st.italic = on);
+            }
+            QuickBarHit::Body => {}
+        }
+        self.chrome_press = Some(ChromePress::QuickBar(hit));
+        true
+    }
+
+    /// Test/socket helper: click at `p` on the quick-style bar on the active display.
+    pub fn quick_bar_click(&mut self, p: Point) -> bool {
+        let Some(d) = self.active else { return false };
+        if self.quick_bar_layout(d).is_none() {
+            return false;
+        }
+        self.mouse_down(d, p, 1, false, false);
+        self.mouse_up(d, p, false, false);
+        true
     }
 
     pub fn set_grid(&mut self, on: bool) {
@@ -3180,8 +3373,14 @@ impl ShotSession {
     /// The wheel's live colour: shown at once, persisted on release.
     fn preview_panel_color(&mut self, c: ShotColor) {
         self.panel_wheel = Some(c);
-        if self.doc.selected.is_none() {
-            self.color = c;
+        if let Some(e) = self.editing.as_mut() {
+            e.object.color = c;
+        } else if self.doc.selected.is_none() {
+            if self.tool == Some(ShotTool::Marker) {
+                self.marker_color = c;
+            } else {
+                self.color = c;
+            }
         }
     }
 
@@ -3449,7 +3648,48 @@ impl ShotSession {
             // The text draft (`ShotTextField`): printable characters append,
             // Backspace deletes; a plain Return inserts a line break (the
             // renderer draws multi-line text), Cmd+Return commits above.
+            // Rule 1 edit shortcuts + quick font/style shortcuts work live.
             if self.editing.is_some() {
+                let edit = k.cmd || k.ctrl;
+                if edit && ch == Some('v') {
+                    if let Some(t) = crate::platform::get_text() {
+                        let t: String = t.chars().filter(|&c| c != '\r').collect();
+                        self.edit_text(|s| s.push_str(&t));
+                    }
+                    return true;
+                }
+                if edit && matches!(ch, Some('c') | Some('x')) {
+                    if let Some(e) = &self.editing {
+                        crate::platform::set_text(&e.text);
+                    }
+                    if ch == Some('x') {
+                        self.edit_text(|s| s.clear());
+                    }
+                    return true;
+                }
+                if k.cmd && ch == Some('b') {
+                    let on = !self.panel_text_style().bold;
+                    self.set_text_style(|st| st.bold = on);
+                    return true;
+                }
+                if k.cmd && ch == Some('i') {
+                    let on = !self.panel_text_style().italic;
+                    self.set_text_style(|st| st.italic = on);
+                    return true;
+                }
+                if k.cmd && ch == Some('u') {
+                    let on = !self.panel_text_style().underline;
+                    self.set_text_style(|st| st.underline = on);
+                    return true;
+                }
+                if k.cmd && matches!(ch, Some('=') | Some('+')) {
+                    self.change_size(2);
+                    return true;
+                }
+                if k.cmd && ch == Some('-') {
+                    self.change_size(-2);
+                    return true;
+                }
                 if code == KEY_DELETE || code == KEY_FORWARD_DELETE {
                     self.edit_text(|t| {
                         t.pop();
@@ -3557,6 +3797,24 @@ impl ShotSession {
             }
             return true;
         }
+        if k.cmd && ch == Some('b') && self.text_section_shown() {
+            let on = !self.panel_text_style().bold;
+            self.set_text_style(|st| st.bold = on);
+            return true;
+        }
+        if k.cmd && ch == Some('i') && self.text_section_shown() {
+            let on = !self.panel_text_style().italic;
+            self.set_text_style(|st| st.italic = on);
+            return true;
+        }
+        if k.cmd && matches!(ch, Some('=') | Some('+')) {
+            self.change_size(if self.active_style_tool() == Some(ShotTool::Text) { 2 } else { 1 });
+            return true;
+        }
+        if k.cmd && ch == Some('-') {
+            self.change_size(if self.active_style_tool() == Some(ShotTool::Text) { -2 } else { -1 });
+            return true;
+        }
         if k.cmd && code == KEY_RETURN {
             self.commit_text();
             return true;
@@ -3619,6 +3877,14 @@ impl ShotSession {
                         self.record_requested = true;
                         self.finish(ShotOutcome::Abort);
                     }
+                    return true;
+                }
+                Some('[') | Some('-') => {
+                    self.change_size(-1);
+                    return true;
+                }
+                Some(']') | Some('=') | Some('+') => {
+                    self.change_size(1);
                     return true;
                 }
                 _ => {}
@@ -3928,6 +4194,11 @@ impl ShotSession {
             self.chrome_press = Some(ChromePress::Ring(i));
             return;
         }
+        // Floating quick-style bar (swatches, size, font, B/I): takes clicks
+        // before text commit so styling a live text draft never closes it.
+        if !self.is_dragging() && self.quick_bar_press(d, p) {
+            return;
+        }
         if self.wheel.is_some() {
             let hot = self
                 .wheel
@@ -4006,6 +4277,22 @@ impl ShotSession {
                     }
                     if self.cfg.copy_on_double_click && self.tool.is_none() {
                         self.finish(ShotOutcome::Copy);
+                        return;
+                    }
+                }
+            }
+        }
+        if in_active && self.selection.is_some() {
+            if let Some(i) = self.doc.selected {
+                if let Some(o) = self.doc.objects.get(i) {
+                    if let Some(h) = object_handle_at(o, p) {
+                        self.drag = Drag::ResizingObject {
+                            index: i,
+                            handle: h,
+                            from: o.clone(),
+                            start: p,
+                            moved: false,
+                        };
                         return;
                     }
                 }
@@ -4128,6 +4415,18 @@ impl ShotSession {
                             o.points.push(p);
                         }
                     }
+                    ShotTool::Marker => {
+                        if shift {
+                            o.points = vec![o.start(), ShotSnap::angle(o.start(), p)];
+                        } else if o
+                            .points
+                            .last()
+                            .map(|l| ShotGeom::dist(*l, p) >= 2.0)
+                            .unwrap_or(true)
+                        {
+                            o.points.push(p);
+                        }
+                    }
                     ShotTool::Counter => o.points = vec![o.start(), p],
                     _ => {
                         o.points = vec![
@@ -4179,6 +4478,45 @@ impl ShotSession {
                     moved: true,
                 };
             }
+            Drag::ResizingObject {
+                index,
+                handle,
+                from,
+                start,
+                ..
+            } => {
+                let dv = (p.x - start.x, p.y - start.y);
+                let next_pts = match from.tool {
+                    ShotTool::Selection
+                    | ShotTool::Rectangle
+                    | ShotTool::Circle
+                    | ShotTool::Pixelate
+                    | ShotTool::Invert => {
+                        let nr = ShotSession::resize(from.rect(), handle, dv, cmd, shift);
+                        vec![Point::new(nr.min_x(), nr.min_y()), Point::new(nr.max_x(), nr.max_y())]
+                    }
+                    ShotTool::Line | ShotTool::Arrow | ShotTool::Marker => {
+                        if handle == 0 {
+                            let anchor = from.end();
+                            let q = if shift { ShotSnap::angle(anchor, p) } else { p };
+                            vec![q, anchor]
+                        } else {
+                            let anchor = from.start();
+                            let q = if shift { ShotSnap::angle(anchor, p) } else { p };
+                            vec![anchor, q]
+                        }
+                    }
+                    _ => from.points.clone(),
+                };
+                self.doc.update_live(index, |o| o.points = next_pts);
+                self.drag = Drag::ResizingObject {
+                    index,
+                    handle,
+                    from,
+                    start,
+                    moved: true,
+                };
+            }
         }
     }
 
@@ -4206,6 +4544,9 @@ impl ShotSession {
                 if let Some(c) = self.panel_wheel.take() {
                     self.set_color(c);
                 }
+                return;
+            }
+            if let ChromePress::QuickBar(_) = press {
                 return;
             }
             if press == ChromePress::Tab {
@@ -4265,9 +4606,28 @@ impl ShotSession {
                             self.counter_offset = 0;
                         }
                     }
+                    ShotTool::Marker => {
+                        let b = ShotGeom::bounds(&o.points);
+                        if o.points.len() >= 2 && b.w.max(b.h) >= 2.0 {
+                            self.doc.add(o);
+                        }
+                    }
                     _ => {
                         if r.w.max(r.h) >= 2.0 {
-                            self.doc.add(o);
+                            let resizable = matches!(
+                                o.tool,
+                                ShotTool::Selection
+                                    | ShotTool::Rectangle
+                                    | ShotTool::Circle
+                                    | ShotTool::Pixelate
+                                    | ShotTool::Invert
+                                    | ShotTool::Line
+                                    | ShotTool::Arrow
+                            );
+                            let idx = self.doc.add(o);
+                            if resizable {
+                                self.doc.selected = Some(idx);
+                            }
                         }
                     }
                 }
@@ -4277,8 +4637,14 @@ impl ShotSession {
                 from,
                 moved,
                 ..
+            }
+            | Drag::ResizingObject {
+                index,
+                from,
+                moved,
+                ..
             } => {
-                if moved {
+                if moved && index < self.doc.objects.len() {
                     let now = self.doc.objects[index].clone();
                     self.doc.update_live(index, |o| *o = from);
                     self.doc.update(index, None, |o| *o = now);
@@ -4608,6 +4974,240 @@ enum ChromePress {
     Tab,
     /// A row of the merge editor's reorder strip (the drag is in `merge`).
     MergeRow,
+    /// A control on the floating quick-style bar.
+    QuickBar(QuickBarHit),
+}
+
+/// Curated macOS font presets cycled by the Quick-Style Bar's font pill.
+pub const FONT_PRESETS: [(&str, &str); 5] = [
+    ("", "Sans"),
+    ("Menlo", "Mono"),
+    ("Georgia", "Serif"),
+    ("Avenir Next", "Clean"),
+    ("Marker Felt", "Hand"),
+];
+
+/// Short display label for a font family name (used on the Quick-Style Bar pill).
+pub fn font_preset_label(family: &str) -> &str {
+    if let Some((_, label)) = FONT_PRESETS.iter().find(|(f, _)| f.eq_ignore_ascii_case(family)) {
+        return label;
+    }
+    family.split_whitespace().next().unwrap_or("Font")
+}
+
+/// Resize handle points for a drawn annotation object:
+/// - Box shapes (`Selection`, `Rectangle`, `Circle`, `Pixelate`, `Invert`):
+///   8 handles matching `selection_handles` (`0=TL, 1=T, 2=TR, 3=R, 4=BR, 5=B, 6=BL, 7=L`).
+/// - Endpoint shapes (`Line`, `Arrow`, and 2-point straight `Marker`):
+///   2 endpoint handles (`0=start`, `1=end`).
+pub fn object_handles(o: &ShotObject) -> Vec<Point> {
+    match o.tool {
+        ShotTool::Selection
+        | ShotTool::Rectangle
+        | ShotTool::Circle
+        | ShotTool::Pixelate
+        | ShotTool::Invert => selection_handles(o.rect()).to_vec(),
+        ShotTool::Line | ShotTool::Arrow => vec![o.start(), o.end()],
+        ShotTool::Marker if o.points.len() == 2 => vec![o.start(), o.end()],
+        _ => Vec::new(),
+    }
+}
+
+/// Closest resize handle of `o` within a forgiving 10 pt grab radius.
+pub fn object_handle_at(o: &ShotObject, p: Point) -> Option<i64> {
+    let mut best: Option<(i64, f64)> = None;
+    for (i, h) in object_handles(o).into_iter().enumerate() {
+        let d = ShotGeom::dist(p, h);
+        if d <= 10.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i as i64, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// What a click on the floating quick-style bar landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickBarHit {
+    Swatch(usize),
+    Picker,
+    SizeDown,
+    SizeUp,
+    FontCycle,
+    Bold,
+    Italic,
+    Body,
+}
+
+/// Pure geometry of the floating quick-style bar in overlay points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuickBarLayout {
+    pub bar: Rect,
+    pub swatches: Vec<(Rect, ShotColor)>,
+    pub picker: Option<Rect>,
+    pub size_down: Rect,
+    pub size_value: Rect,
+    pub size_up: Rect,
+    pub font: Option<Rect>,
+    pub bold: Option<Rect>,
+    pub italic: Option<Rect>,
+}
+
+pub struct ShotQuickBar;
+
+impl ShotQuickBar {
+    pub const HEIGHT: f64 = 34.0;
+    const PAD_X: f64 = 10.0;
+    const SWATCH: f64 = 18.0;
+    const SWATCH_GAP: f64 = 6.0;
+    const DIV_GAP: f64 = 12.0;
+
+    pub fn layout(
+        sel: Rect,
+        bounds: Rect,
+        top_inset: f64,
+        side_panel_x: f64,
+        ring_frames: &[Rect],
+        colors: &[Option<ShotColor>],
+        show_text: bool,
+    ) -> QuickBarLayout {
+        let concrete: Vec<ShotColor> = colors.iter().filter_map(|c| *c).collect();
+        let has_picker = colors.iter().any(|c| c.is_none());
+        let h = Self::HEIGHT;
+
+        let mut w = Self::PAD_X * 2.0;
+        if !concrete.is_empty() {
+            w += concrete.len() as f64 * Self::SWATCH
+                + (concrete.len().saturating_sub(1)) as f64 * Self::SWATCH_GAP;
+        }
+        if has_picker {
+            if !concrete.is_empty() {
+                w += Self::SWATCH_GAP;
+            }
+            w += 20.0;
+        }
+        if !concrete.is_empty() || has_picker {
+            w += Self::DIV_GAP;
+        }
+        // Size stepper: [-] [40pt label] [+]
+        w += 22.0 + 42.0 + 22.0;
+        if show_text {
+            // Divider + Font pill + B + I
+            w += Self::DIV_GAP + 58.0 + 4.0 + 24.0 + 4.0 + 24.0;
+        }
+
+        let min_x = (side_panel_x + 8.0).max(bounds.x + 8.0);
+        let max_x = (bounds.max_x() - w - 8.0).max(min_x);
+        let bx = (sel.mid_x() - w / 2.0).clamp(min_x, max_x).round();
+
+        let min_y = bounds.y + top_inset.max(24.0) + 16.0 + ShotModePill::HEIGHT + 10.0;
+        let max_y = (bounds.max_y() - h - 8.0).max(min_y);
+        let ring_top = ring_frames
+            .iter()
+            .map(|r| r.min_y())
+            .fold(sel.min_y(), f64::min);
+        let ring_bot = ring_frames
+            .iter()
+            .map(|r| r.max_y())
+            .fold(sel.max_y(), f64::max);
+
+        let above = ring_top - h - 10.0;
+        let below = ring_bot + 10.0;
+        let by = if above >= min_y {
+            above
+        } else if below <= max_y {
+            below
+        } else {
+            (sel.min_y() + 10.0).clamp(min_y, max_y)
+        }
+        .round();
+
+        let bar = Rect::new(bx, by, w, h);
+        let mut x = bx + Self::PAD_X;
+        let cy = by + h / 2.0;
+
+        let mut swatches = Vec::with_capacity(concrete.len());
+        for (idx, c) in concrete.into_iter().enumerate() {
+            if idx > 0 {
+                x += Self::SWATCH_GAP;
+            }
+            swatches.push((
+                Rect::new(x, cy - Self::SWATCH / 2.0, Self::SWATCH, Self::SWATCH),
+                c,
+            ));
+            x += Self::SWATCH;
+        }
+        let picker = if has_picker {
+            if !swatches.is_empty() {
+                x += Self::SWATCH_GAP;
+            }
+            let r = Rect::new(x, cy - 10.0, 20.0, 20.0);
+            x += 20.0;
+            Some(r)
+        } else {
+            None
+        };
+        if !swatches.is_empty() || picker.is_some() {
+            x += Self::DIV_GAP;
+        }
+        let size_down = Rect::new(x, cy - 11.0, 22.0, 22.0);
+        x += 22.0;
+        let size_value = Rect::new(x, cy - 11.0, 42.0, 22.0);
+        x += 42.0;
+        let size_up = Rect::new(x, cy - 11.0, 22.0, 22.0);
+        x += 22.0;
+
+        let (font, bold, italic) = if show_text {
+            x += Self::DIV_GAP;
+            let f = Rect::new(x, cy - 11.0, 58.0, 22.0);
+            x += 58.0 + 4.0;
+            let b = Rect::new(x, cy - 11.0, 24.0, 22.0);
+            x += 24.0 + 4.0;
+            let it = Rect::new(x, cy - 11.0, 24.0, 22.0);
+            (Some(f), Some(b), Some(it))
+        } else {
+            (None, None, None)
+        };
+
+        QuickBarLayout {
+            bar,
+            swatches,
+            picker,
+            size_down,
+            size_value,
+            size_up,
+            font,
+            bold,
+            italic,
+        }
+    }
+
+    pub fn hit(l: &QuickBarLayout, p: Point) -> Option<QuickBarHit> {
+        if !l.bar.contains_point(p) {
+            return None;
+        }
+        if let Some(i) = l.swatches.iter().position(|(r, _)| r.inset(-2.0, -2.0).contains_point(p)) {
+            return Some(QuickBarHit::Swatch(i));
+        }
+        if l.picker.is_some_and(|r| r.inset(-2.0, -2.0).contains_point(p)) {
+            return Some(QuickBarHit::Picker);
+        }
+        if l.size_down.contains_point(p) {
+            return Some(QuickBarHit::SizeDown);
+        }
+        if l.size_up.contains_point(p) {
+            return Some(QuickBarHit::SizeUp);
+        }
+        if l.font.is_some_and(|r| r.contains_point(p)) {
+            return Some(QuickBarHit::FontCycle);
+        }
+        if l.bold.is_some_and(|r| r.contains_point(p)) {
+            return Some(QuickBarHit::Bold);
+        }
+        if l.italic.is_some_and(|r| r.contains_point(p)) {
+            return Some(QuickBarHit::Italic);
+        }
+        Some(QuickBarHit::Body)
+    }
 }
 
 /// `ShotRecentButton` — the recents button beside the mode pill.
@@ -5607,15 +6207,22 @@ mod shot_cg {
             ShotTool::Pencil => stroke_pts(ctx, &o.points, o.stroke_width()),
             ShotTool::Line => stroke_pts(ctx, &[o.start(), o.end()], 0.0),
             ShotTool::Marker => {
-                CGContext::set_blend_mode(Some(ctx), CGBlendMode::Multiply);
-                set_stroke(ctx, o.color.with_alpha(0.4));
-                CGContext::set_line_cap(Some(ctx), CGLineCap::Butt);
-                let pts: Vec<Point> = if o.points.len() > 2 {
-                    o.points.clone()
-                } else {
-                    vec![o.start(), o.end()]
-                };
-                stroke_pts(ctx, &pts, o.stroke_width());
+                // Translucent normal-blend wash so the highlighter stays vivid
+                // and legible on BOTH light documents and dark terminals/IDEs.
+                CGContext::set_blend_mode(Some(ctx), CGBlendMode::Normal);
+                let c = o.color.with_alpha(0.38);
+                set_stroke(ctx, c);
+                set_fill(ctx, c);
+                CGContext::set_line_cap(
+                    Some(ctx),
+                    if o.points.len() <= 2 {
+                        CGLineCap::Square
+                    } else {
+                        CGLineCap::Round
+                    },
+                );
+                CGContext::set_line_join(Some(ctx), CGLineJoin::Round);
+                stroke_pts(ctx, &o.points, o.stroke_width());
             }
             ShotTool::Arrow => {
                 let (a, b) = if o.reversed {
@@ -6212,7 +6819,8 @@ mod overlay {
                     shot_cg::draw_objects(&ctx, base, scale, pixels, &objs);
                     CGContext::restore_g_state(Some(&ctx));
                 }
-                // The selected object: a dashed box 4pt outside its bounds.
+                // The selected object: a dashed box 4pt outside its bounds, plus
+                // crisp resize handles for box/endpoint shapes so resizing is effortless.
                 if let Some(o) = session.doc.selected.and_then(|i| session.doc.objects.get(i)) {
                     CGContext::save_g_state(Some(&ctx));
                     set_stroke(&ctx, cfg.ui_color);
@@ -6221,6 +6829,16 @@ mod overlay {
                     unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, dashes.as_ptr(), dashes.len()) };
                     let b = o.bbox();
                     CGContext::stroke_rect(Some(&ctx), cg_rect(Rect::new(b.x - 4.0, b.y - 4.0, b.w + 8.0, b.h + 8.0)));
+                    unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, std::ptr::null(), 0) };
+                    let handles = super::object_handles(o);
+                    for pt in handles {
+                        let hr = Rect::new(pt.x - 4.0, pt.y - 4.0, 8.0, 8.0);
+                        set_fill(&ctx, ShotColor::WHITE);
+                        CGContext::fill_rect(Some(&ctx), cg_rect(hr));
+                        set_stroke(&ctx, cfg.ui_color);
+                        CGContext::set_line_width(Some(&ctx), 1.5);
+                        CGContext::stroke_rect(Some(&ctx), cg_rect(hr));
+                    }
                     CGContext::restore_g_state(Some(&ctx));
                 }
             }
@@ -6320,9 +6938,9 @@ mod overlay {
             // Cmd+/ : every shortcut (any time); else the help card, centred
             // while nothing is selected.
             if session.shortcuts_shown {
-                draw_rows_card(ctx, &cfg.shortcuts, cfg.ui_color, full);
+                draw_rows_card(ctx, &cfg.shortcuts, cfg.ui_color, full, 0.90, 1.0);
             } else if cfg.show_help && session.selection.is_none() {
-                draw_help_card(ctx, session, full);
+                draw_help_card(ctx, session, full, d);
             }
 
             // Mode pill (Copy Text | Screenshot) + the recents button beside
@@ -6347,6 +6965,11 @@ mod overlay {
                 if !session.text_mode {
                     draw_button_ring(ctx, session, d, sel);
                 }
+            }
+
+            // Floating quick-style bar (color swatches, size, font, B/I).
+            if let Some(qb) = session.quick_bar_layout(d) {
+                draw_quick_bar(ctx, session, d, &qb);
             }
 
             // Colour wheel (right-click) on its display.
@@ -6522,27 +7145,34 @@ mod overlay {
         draw_symbol("clock.arrow.circlepath", recent, 13.0, true, glyph);
     }
 
-    /// `ShotHelpCard`: a centred rounded card of key/action rows.
-    fn draw_help_card(ctx: &CGContext, session: &ShotSession, full: Rect) {
+    /// `ShotHelpCard`: a translucent centred rounded card of key/action rows.
+    /// Fades almost completely out when the pointer approaches it so it never
+    /// blocks an item the user is trying to select.
+    fn draw_help_card(ctx: &CGContext, session: &ShotSession, full: Rect, d: usize) {
         let cfg = &session.cfg;
         let rows: &[(String, String)] = if session.text_mode {
             &cfg.help_text_rows
         } else {
             &cfg.help_rows
         };
+        if rows.is_empty() || cfg.help_opacity <= 0.01 {
+            return;
+        }
         let ui = if session.text_mode {
             SHOT_TEXT_BLUE
         } else {
             cfg.ui_color
         };
-        draw_rows_card(ctx, rows, ui, full);
+        let (size, o) = rows_card_frame(rows, full);
+        let card_rect = Rect::new(o.x, o.y, size.w, size.h);
+        let near_pointer = session
+            .mouse
+            .is_some_and(|(md, mp)| md == d && card_rect.inset(-40.0, -40.0).contains_point(mp));
+        let fade = if near_pointer { 0.14 } else { 1.0 };
+        draw_rows_card(ctx, rows, ui, full, cfg.help_opacity, fade);
     }
 
-    /// A centred card of `key  action` rows (the help card, the Cmd+/ list).
-    fn draw_rows_card(ctx: &CGContext, rows: &[(String, String)], ui: ShotColor, full: Rect) {
-        if rows.is_empty() {
-            return;
-        }
+    fn rows_card_frame(rows: &[(String, String)], full: Rect) -> (super::Size, Point) {
         let (point, bold) = (14.0, 14.0);
         let key_w = rows
             .iter()
@@ -6556,22 +7186,43 @@ mod overlay {
             (key_w + act_w + 18.0 + 48.0).ceil(),
             ShotHelpCard::height(rows.len()),
         );
-        let o = ShotHelpCard::centered_origin(full, size);
-        let fg = if ui.is_dark() {
+        (size, ShotHelpCard::centered_origin(full, size))
+    }
+
+    /// A centred rounded card of `key  action` rows (the help card, the Cmd+/ list).
+    fn draw_rows_card(
+        ctx: &CGContext,
+        rows: &[(String, String)],
+        ui: ShotColor,
+        full: Rect,
+        bg_alpha: f64,
+        fade: f64,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        let (point, bold) = (14.0, 14.0);
+        let key_w = rows
+            .iter()
+            .map(|(k, _)| shot_cg::measure_text_width(k, bold, true))
+            .fold(0.0f64, f64::max);
+        let (size, o) = rows_card_frame(rows, full);
+        let r = Rect::new(o.x, o.y, size.w, size.h);
+        let fg = if ui.is_dark() || bg_alpha < 0.7 {
             ShotColor::WHITE
         } else {
             ShotColor::BLACK
         };
-        set_fill(ctx, ui.with_alpha(0.92));
-        CGContext::fill_rect(Some(ctx), cg_rect(Rect::new(o.x, o.y, size.w, size.h)));
-        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.45));
-        CGContext::set_line_width(Some(ctx), 1.0);
-        CGContext::stroke_rect(Some(ctx), cg_rect(Rect::new(o.x, o.y, size.w, size.h)));
+        let fill_a = (bg_alpha * fade).clamp(0.0, 1.0);
+        let border_a = (0.48 * fade).clamp(0.0, 1.0);
+        let text_a = (0.94 * fade).clamp(0.0, 1.0);
+        fill_round(ctx, r, 10.0, ui.with_alpha(fill_a));
+        stroke_round(ctx, r, 10.0, ShotColor::WHITE.with_alpha(border_a), 1.0);
         let mut y = o.y + 16.0;
         for (k, a) in rows {
             let kw = shot_cg::measure_text_width(k, bold, true);
-            draw_text_at(ctx, k, o.x + 24.0 + key_w - kw, y, bold, fg, true);
-            draw_text_at(ctx, a, o.x + 24.0 + key_w + 18.0, y, point, fg, false);
+            draw_text_at(ctx, k, o.x + 24.0 + key_w - kw, y, bold, fg.with_alpha(text_a), true);
+            draw_text_at(ctx, a, o.x + 24.0 + key_w + 18.0, y, point, fg.with_alpha(text_a), false);
             y += ShotHelpCard::LINE_HEIGHT;
         }
     }
@@ -6692,6 +7343,101 @@ mod overlay {
         CGContext::add_path(Some(ctx), Some(&*path));
         CGContext::fill_path(Some(ctx));
         draw_text_at(ctx, text, x + 8.0, y + 3.0, pt, ShotColor::WHITE, false);
+    }
+
+    /// Floating quick-style bar: one-click color swatches, size/font-size
+    /// stepper, and (for Text) font family + Bold/Italic pills.
+    fn draw_quick_bar(ctx: &CGContext, session: &ShotSession, d: usize, l: &super::QuickBarLayout) {
+        let cfg = &session.cfg;
+        let ui = cfg.ui_color;
+        let cur = session.current_color();
+        let hover_at = |r: Rect| session.mouse.is_some_and(|(md, mp)| md == d && r.contains_point(mp));
+
+        // Pill body + crisp hairline border.
+        let bg = cfg.contrast_color.mixed(&ShotColor::BLACK, 0.55).with_alpha(0.92);
+        fill_round(ctx, l.bar, l.bar.h / 2.0, bg);
+        stroke_round(ctx, l.bar, l.bar.h / 2.0, ShotColor::WHITE.with_alpha(0.24), 1.0);
+
+        // Color swatches.
+        for (r, c) in &l.swatches {
+            let active = cur.hex().eq_ignore_ascii_case(&c.hex());
+            let hover = hover_at(r.inset(-2.0, -2.0));
+            let draw_r = if hover { r.inset(-1.0, -1.0) } else { *r };
+            set_fill(ctx, *c);
+            CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(draw_r));
+            if active {
+                set_stroke(ctx, ShotColor::WHITE);
+                CGContext::set_line_width(Some(ctx), 2.0);
+                CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(draw_r.inset(-1.5, -1.5)));
+            } else {
+                set_stroke(ctx, ShotColor::WHITE.with_alpha(0.45));
+                CGContext::set_line_width(Some(ctx), 1.0);
+                CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(draw_r));
+            }
+        }
+
+        // Optional custom color picker button (toggles side panel).
+        if let Some(pr) = l.picker {
+            let fill = if session.side_panel_open {
+                ui
+            } else if hover_at(pr) {
+                ShotColor::WHITE.with_alpha(0.24)
+            } else {
+                ShotColor::WHITE.with_alpha(0.12)
+            };
+            set_fill(ctx, fill);
+            CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(pr));
+            set_stroke(ctx, ShotColor::WHITE.with_alpha(0.4));
+            CGContext::set_line_width(Some(ctx), 1.0);
+            CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(pr));
+            draw_symbol("paintpalette", pr, 11.0, false, ShotColor::WHITE);
+        }
+
+        // Divider before size stepper.
+        if !l.swatches.is_empty() || l.picker.is_some() {
+            let dx = (l.size_down.x - 6.0).floor() + 0.5;
+            fill_rect(ctx, Rect::new(dx, l.bar.y + 8.0, 1.0, l.bar.h - 16.0), ShotColor::WHITE.with_alpha(0.22));
+        }
+
+        // Size / font-size stepper: [-] [16pt] [+]
+        for (r, glyph) in [(l.size_down, "\u{2212}"), (l.size_up, "+")] {
+            let fill = if hover_at(r) {
+                ui.mixed(&ShotColor::WHITE, 0.18)
+            } else {
+                ShotColor::WHITE.with_alpha(0.14)
+            };
+            fill_round(ctx, r, 5.0, fill);
+            draw_text_centered(ctx, glyph, r, 14.0, ShotColor::WHITE, true);
+        }
+        let size_txt = session.quick_size_label().unwrap_or_default();
+        draw_text_centered(ctx, &size_txt, l.size_value, 12.0, ShotColor::WHITE, true);
+
+        // Text-specific controls: Font family pill + Bold + Italic.
+        if let (Some(fr), Some(br), Some(ir)) = (l.font, l.bold, l.italic) {
+            let dx = (fr.x - 6.0).floor() + 0.5;
+            fill_rect(ctx, Rect::new(dx, l.bar.y + 8.0, 1.0, l.bar.h - 16.0), ShotColor::WHITE.with_alpha(0.22));
+            let st = session.panel_text_style();
+            let font_label = super::font_preset_label(&st.family);
+            let fbg = if hover_at(fr) {
+                ui.mixed(&ShotColor::WHITE, 0.18)
+            } else {
+                ShotColor::WHITE.with_alpha(0.14)
+            };
+            fill_round(ctx, fr, 5.0, fbg);
+            draw_text_centered(ctx, font_label, fr, 11.5, ShotColor::WHITE, true);
+
+            for (r, label, on, is_bold) in [(br, "B", st.bold, true), (ir, "I", st.italic, false)] {
+                let bg_c = if on {
+                    ui
+                } else if hover_at(r) {
+                    ShotColor::WHITE.with_alpha(0.24)
+                } else {
+                    ShotColor::WHITE.with_alpha(0.12)
+                };
+                fill_round(ctx, r, 5.0, bg_c);
+                draw_text_centered(ctx, label, r, 12.0, ShotColor::WHITE, is_bold);
+            }
+        }
     }
 
     /// `ShotWheelView`: the colour swatches around the current colour hub.
@@ -8563,6 +9309,8 @@ pub struct ScreenshotController {
     /// A `-d` / `[screenshot] delay` timer is outstanding (Swift's `capturing`
     /// stays true across the `asyncAfter`, so a delayed capture is not idle).
     delay_pending: bool,
+    /// Bumped when a delayed capture is scheduled or aborted so stale timers drop.
+    delay_gen: u64,
     forced_save_path: Option<String>,
     ocr_warm: bool,
     #[cfg(target_os = "macos")]
@@ -8619,6 +9367,7 @@ impl ScreenshotController {
             capture_gen: 0,
             merge_parent: None,
             delay_pending: false,
+            delay_gen: 0,
             forced_save_path: None,
             ocr_warm: false,
             #[cfg(target_os = "macos")]
@@ -8819,8 +9568,15 @@ impl ScreenshotController {
         self.session = Some(s);
     }
     pub fn close(&mut self) {
+        self.capture_pending = false;
+        self.capture_gen = self.capture_gen.wrapping_add(1);
+        self.delay_pending = false;
+        self.delay_gen = self.delay_gen.wrapping_add(1);
         #[cfg(target_os = "macos")]
-        self.dismiss_overlay();
+        {
+            self.close_recent();
+            self.dismiss_overlay();
+        }
         self.session = None;
         #[cfg(target_os = "macos")]
         self.drop_key_monitor_if_idle();
@@ -9019,6 +9775,8 @@ impl ScreenshotController {
             let weak = self.self_ref.clone();
             if weak.strong_count() > 0 {
                 self.delay_pending = true;
+                self.delay_gen = self.delay_gen.wrapping_add(1);
+                let dgen = self.delay_gen;
                 let a = args.clone();
                 dispatch2::DispatchQueue::main()
                     .after(
@@ -9026,6 +9784,9 @@ impl ScreenshotController {
                         move || {
                             if let Some(c) = weak.upgrade() {
                                 if let Ok(mut c) = c.try_lock() {
+                                    if !c.delay_pending || c.delay_gen != dgen {
+                                        return;
+                                    }
                                     c.delay_pending = false;
                                     let _ = c.trigger_inner(&a, &RealCapture, false);
                                 }
@@ -9299,7 +10060,16 @@ impl ScreenshotController {
 
     /// No overlay up and no capture in flight (a session has finished).
     pub fn is_idle(&self) -> bool {
-        self.session.is_none() && !self.capturing && !self.delay_pending
+        self.session.is_none()
+            && !self.capturing
+            && !self.capture_pending
+            && !self.delay_pending
+    }
+
+    /// Whether the recent-screenshots grid panel is open.
+    #[cfg(target_os = "macos")]
+    pub fn has_recent_open(&self) -> bool {
+        self.recent_panel.0.is_some()
     }
 
     /// `ScreenshotController.handle(words:)`.
@@ -9607,17 +10377,28 @@ impl ScreenshotController {
         self.redraw_overlays();
     }
 
-    /// `finish(s, .abort)`: drop the overlay session (and the grid).
+    /// `finish(s, .abort)`: drop the overlay session (and the grid), plus any
+    /// in-flight async capture or pending retake delay so nothing pops back up.
     pub fn abort_session(&mut self) {
         self.merge_parent = None;
+        self.capture_pending = false;
+        self.capture_gen = self.capture_gen.wrapping_add(1);
+        self.delay_pending = false;
+        self.delay_gen = self.delay_gen.wrapping_add(1);
         #[cfg(target_os = "macos")]
-        self.close_recent();
+        {
+            self.close_recent();
+            crate::views::file_popup::close();
+        }
         if let Some(s) = self.session.as_mut() {
             if !s.finished {
                 s.finish(ShotOutcome::Abort);
             }
         }
         self.complete_finished_session();
+        if self.session.is_some() {
+            self.close();
+        }
     }
 
     /// Recents ▸ Shift-click 2+ screenshots: stack them top to bottom (pick
@@ -10022,6 +10803,8 @@ impl ScreenshotController {
                 }
             }
         }
+        self.capture_pending = false;
+        self.capture_gen = self.capture_gen.wrapping_add(1);
         #[cfg(target_os = "macos")]
         self.dismiss_overlay();
         self.session = None;
@@ -13042,5 +13825,184 @@ mod tests {
         // Once the timer fires, the controller is idle again.
         c.delay_pending = false;
         assert!(c.is_idle());
+    }
+
+    #[test]
+    fn rectangle_auto_selects_and_resizes_via_handles_with_undo() {
+        let mut s = session();
+        s.test_select(Rect::new(50.0, 50.0, 600.0, 400.0), Some(0));
+        // Press R → Rectangle outline (`ShotTool::Selection`).
+        assert!(s.handle_key(&shot_key_event("r").unwrap()));
+        assert_eq!(s.tool, Some(ShotTool::Selection));
+
+        // Draw rectangle from (100,100) to (220,180).
+        s.mouse_down(0, Point::new(100.0, 100.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(220.0, 180.0), false, false);
+        s.mouse_up(0, Point::new(220.0, 180.0), false, false);
+        assert_eq!(s.doc.objects.len(), 1);
+        assert_eq!(s.doc.selected, Some(0), "just-drawn rectangle is auto-selected for instant resize");
+        assert_eq!(s.doc.objects[0].rect(), Rect::new(100.0, 100.0, 120.0, 80.0));
+
+        // 8 handles exist on the selected rectangle; grab bottom-right corner (index 4).
+        let handles = object_handles(&s.doc.objects[0]);
+        assert_eq!(handles.len(), 8);
+        assert_eq!(object_handle_at(&s.doc.objects[0], Point::new(223.0, 182.0)), Some(4));
+
+        // Drag bottom-right corner +50x, +40y → 170x120.
+        s.mouse_down(0, Point::new(220.0, 180.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(270.0, 220.0), false, false);
+        s.mouse_up(0, Point::new(270.0, 220.0), false, false);
+        assert_eq!(s.doc.objects[0].rect(), Rect::new(100.0, 100.0, 170.0, 120.0));
+        assert_eq!(s.doc.selected, Some(0), "stays selected after resize");
+
+        // Grab left mid-edge handle (index 7) and pull left by 20px → x=80, w=190.
+        s.mouse_down(0, Point::new(100.0, 160.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(80.0, 160.0), false, false);
+        s.mouse_up(0, Point::new(80.0, 160.0), false, false);
+        assert_eq!(s.doc.objects[0].rect(), Rect::new(80.0, 100.0, 190.0, 120.0));
+
+        // Undo reverts the edge resize cleanly in one step, then the corner resize.
+        s.undo();
+        assert_eq!(s.doc.objects[0].rect(), Rect::new(100.0, 100.0, 170.0, 120.0));
+        s.undo();
+        assert_eq!(s.doc.objects[0].rect(), Rect::new(100.0, 100.0, 120.0, 80.0));
+
+        // Clicking near the thin outline (within forgiving slop) re-selects it.
+        s.doc.selected = None;
+        s.mouse_down(0, Point::new(106.0, 140.0), 1, false, false);
+        s.mouse_up(0, Point::new(106.0, 140.0), false, false);
+        assert_eq!(s.doc.selected, Some(0));
+    }
+
+    #[test]
+    fn quick_bar_styles_live_text_and_selected_rectangle() {
+        let mut cfg = ScreenshotConfig::default();
+        cfg.user_colors = vec![
+            None,
+            ShotColor::from_hex("#ff0000"),
+            ShotColor::from_hex("#ffff00"),
+            ShotColor::from_hex("#0000ff"),
+        ];
+        let mut s = ShotSession::new(cfg, ShotArgs::default(), "/tmp/ks-shot-qb-test.json");
+        s.add_display(ShotDisplay::new(1, Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0));
+        s.test_select(Rect::new(200.0, 200.0, 600.0, 400.0), Some(0));
+
+        // 1. Text tool + live typing: quick-bar shows swatches, size, font, B, I.
+        assert!(s.handle_key(&shot_key_event("t").unwrap()));
+        s.begin_text(0, Point::new(300.0, 300.0), None);
+        s.handle_key(&shot_key_event("h").unwrap());
+        s.handle_key(&shot_key_event("i").unwrap());
+        assert_eq!(s.editing.as_ref().unwrap().text, "hi");
+
+        let qb = s.quick_bar_layout(0).expect("quick bar shown while typing text");
+        assert!(qb.font.is_some() && qb.bold.is_some() && qb.italic.is_some());
+
+        // Click blue swatch (index 2): updates live text color WITHOUT closing text edit!
+        let blue_pt = Point::new(qb.swatches[2].0.mid_x(), qb.swatches[2].0.mid_y());
+        assert!(s.quick_bar_click(blue_pt));
+        assert!(s.editing.is_some(), "clicking quick bar keeps text draft open");
+        assert_eq!(s.editing.as_ref().unwrap().object.color, ShotColor::from_hex("#0000ff").unwrap());
+
+        // Click SizeUp (+), FontCycle, Bold, Italic on quick bar.
+        let s0 = s.editing.as_ref().unwrap().object.size;
+        assert!(s.quick_bar_click(Point::new(qb.size_up.mid_x(), qb.size_up.mid_y())));
+        assert_eq!(s.editing.as_ref().unwrap().object.size, s0 + 2);
+        assert!(s.quick_bar_click(Point::new(qb.font.unwrap().mid_x(), qb.font.unwrap().mid_y())));
+        assert_eq!(s.editing.as_ref().unwrap().object.style.family, "Menlo");
+        assert!(s.quick_bar_click(Point::new(qb.bold.unwrap().mid_x(), qb.bold.unwrap().mid_y())));
+        assert!(s.editing.as_ref().unwrap().object.style.bold);
+        assert!(s.quick_bar_click(Point::new(qb.italic.unwrap().mid_x(), qb.italic.unwrap().mid_y())));
+        assert!(s.editing.as_ref().unwrap().object.style.italic);
+
+        // Live keyboard shortcuts while editing text: Cmd+B, Cmd+=, Cmd+-.
+        assert!(s.handle_key(&shot_key_event("cmd+b").unwrap()));
+        assert!(!s.editing.as_ref().unwrap().object.style.bold);
+        let s1 = s.editing.as_ref().unwrap().object.size;
+        assert!(s.handle_key(&KeyInput {
+            key_code: 24, chars: Some('='), cmd: true, ctrl: false, shift: false, opt: false, esc_streak: 0,
+        }));
+        assert_eq!(s.editing.as_ref().unwrap().object.size, s1 + 2);
+        s.commit_text();
+
+        // 2. Selected Rectangle (R): quick bar hides font/B/I, recolors & thickens live.
+        assert!(s.handle_key(&shot_key_event("r").unwrap()));
+        s.mouse_down(0, Point::new(250.0, 250.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(400.0, 350.0), false, false);
+        s.mouse_up(0, Point::new(400.0, 350.0), false, false);
+        let idx = s.doc.selected.expect("rectangle selected");
+        let rqb = s.quick_bar_layout(0).expect("quick bar shown for rectangle");
+        assert!(rqb.font.is_none(), "non-text tool omits font controls");
+
+        // Click red swatch + size up + keyboard ']' shortcut.
+        assert!(s.quick_bar_click(Point::new(rqb.swatches[0].0.mid_x(), rqb.swatches[0].0.mid_y())));
+        assert_eq!(s.doc.objects[idx].color, ShotColor::from_hex("#ff0000").unwrap());
+        let w0 = s.doc.objects[idx].size;
+        assert!(s.quick_bar_click(Point::new(rqb.size_up.mid_x(), rqb.size_up.mid_y())));
+        assert_eq!(s.doc.objects[idx].size, w0 + 1);
+        assert!(s.handle_key(&KeyInput {
+            key_code: 30, chars: Some(']'), cmd: false, ctrl: false, shift: false, opt: false, esc_streak: 0,
+        }));
+        assert_eq!(s.doc.objects[idx].size, w0 + 2);
+        let _ = std::fs::remove_file("/tmp/ks-shot-qb-test.json");
+    }
+
+    #[test]
+    fn highlighter_freehand_shift_snap_and_dedicated_color() {
+        let mut s = session();
+        s.test_select(Rect::new(50.0, 50.0, 600.0, 400.0), Some(0));
+
+        // Both H and M select Highlighter (`ShotTool::Marker`), defaulting to bright yellow.
+        assert_eq!(ShotTool::for_letter('h'), Some(ShotTool::Marker));
+        assert_eq!(ShotTool::for_letter('m'), Some(ShotTool::Marker));
+        assert!(s.handle_key(&shot_key_event("h").unwrap()));
+        assert_eq!(s.tool, Some(ShotTool::Marker));
+        assert_eq!(s.current_color(), ShotColor::from_hex("#ffe600").unwrap());
+
+        // Freehand drag appends multiple smooth points.
+        s.mouse_down(0, Point::new(100.0, 120.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(130.0, 122.0), false, false);
+        s.mouse_dragged(0, Point::new(170.0, 125.0), false, false);
+        s.mouse_dragged(0, Point::new(210.0, 120.0), false, false);
+        s.mouse_up(0, Point::new(210.0, 120.0), false, false);
+        assert_eq!(s.doc.objects.len(), 1);
+        assert_eq!(s.doc.objects[0].tool, ShotTool::Marker);
+        assert_eq!(s.doc.objects[0].color, ShotColor::from_hex("#ffe600").unwrap());
+        assert!(s.doc.objects[0].points.len() >= 4, "freehand highlighter captures path");
+
+        // Shift-drag snaps to a straight horizontal highlight bar (2 points).
+        s.mouse_down(0, Point::new(100.0, 200.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(300.0, 206.0), true, false);
+        s.mouse_up(0, Point::new(300.0, 206.0), true, false);
+        assert_eq!(s.doc.objects.len(), 2);
+        assert_eq!(s.doc.objects[1].points.len(), 2);
+        assert!((s.doc.objects[1].end().y - 200.0).abs() < 0.01, "Shift snaps straight line");
+
+        // Changing highlighter color keeps rectangle/pen color independent!
+        let pen_before = s.color;
+        let green = ShotColor::from_hex("#00ff00").unwrap();
+        s.set_color(green);
+        assert_eq!(s.marker_color, green);
+        assert_eq!(s.color, pen_before, "regular draw color unchanged");
+    }
+
+    #[test]
+    fn help_opacity_config_and_abort_clears_pending_capture_and_delay() {
+        let mut map = HashMap::new();
+        map.insert("help-opacity".to_string(), "0.35".to_string());
+        map.insert("highlighter-color".to_string(), "#ffaa00".to_string());
+        let cfg = ScreenshotConfig::from_entries(&map);
+        assert!((cfg.help_opacity - 0.35).abs() < 1e-6);
+        assert_eq!(cfg.highlighter_color, ShotColor::from_hex("#ffaa00").unwrap());
+
+        let mut c = ScreenshotController::new();
+        c.capture_pending = true;
+        c.delay_pending = true;
+        let gen0 = c.capture_gen;
+        let dgen0 = c.delay_gen;
+        assert!(!c.is_idle());
+        c.abort_session();
+        assert!(c.is_idle(), "abort clears pending capture and delay");
+        assert_ne!(c.capture_gen, gen0, "capture_gen bumped so late capture drops");
+        assert_ne!(c.delay_gen, dgen0, "delay_gen bumped so stale delay timer drops");
     }
 }

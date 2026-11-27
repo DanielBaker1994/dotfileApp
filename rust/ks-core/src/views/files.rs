@@ -644,10 +644,24 @@ pub const RECURSIVE_SEARCH_EXCLUDES: [&str; 3] = ["Library", "node_modules", ".T
 /// Directories are not rows, hidden names are skipped unless `hidden`, and the
 /// shared search excludes are never descended into.
 pub fn recursive_search(base: &str, glob: &str, hidden: bool, limit: usize) -> Vec<Entry> {
+    let gen = std::sync::atomic::AtomicU64::new(0);
+    recursive_search_cancellable(base, glob, hidden, limit, &gen, 0)
+}
+
+/// Cancellable recursive search: aborts early as soon as `cancel_gen != my_gen`
+/// (e.g. the user typed another character while a walk was in flight).
+fn recursive_search_cancellable(
+    base: &str,
+    glob: &str,
+    hidden: bool,
+    limit: usize,
+    cancel_gen: &std::sync::atomic::AtomicU64,
+    my_gen: u64,
+) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     let root = Path::new(base);
     let deadline = std::time::Instant::now() + RECURSIVE_SEARCH_BUDGET;
-    walk_tree(root, root, glob, hidden, limit, deadline, &mut out);
+    walk_tree(root, root, glob, hidden, limit, deadline, cancel_gen, my_gen, &mut out);
     out
 }
 
@@ -658,17 +672,23 @@ fn walk_tree(
     hidden: bool,
     limit: usize,
     deadline: std::time::Instant,
+    cancel_gen: &std::sync::atomic::AtomicU64,
+    my_gen: u64,
     out: &mut Vec<Entry>,
 ) {
-    if out.len() >= limit || std::time::Instant::now() >= deadline {
+    if out.len() >= limit
+        || cancel_gen.load(std::sync::atomic::Ordering::Relaxed) != my_gen
+        || std::time::Instant::now() >= deadline
+    {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut entries: Vec<std::fs::DirEntry> = rd.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for ent in entries {
+    for ent in rd.flatten() {
+        if cancel_gen.load(std::sync::atomic::Ordering::Relaxed) != my_gen {
+            return;
+        }
         let name = ent.file_name().to_string_lossy().into_owned();
         if !hidden && name.starts_with('.') {
             continue;
@@ -679,7 +699,7 @@ fn walk_tree(
             if RECURSIVE_SEARCH_EXCLUDES.contains(&name.as_str()) {
                 continue;
             }
-            walk_tree(&path, base, glob, hidden, limit, deadline, out);
+            walk_tree(&path, base, glob, hidden, limit, deadline, cancel_gen, my_gen, out);
             if out.len() >= limit {
                 return;
             }
@@ -1708,6 +1728,9 @@ pub struct FileBrowser {
     pub recent_everywhere: bool,
     /// A transient status message (`setStatus`) shown until the next change.
     pub status_note: Option<String>,
+    /// Generation counter + result slot for off-main recursive (`**`) searches.
+    recursive_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    recursive_results: std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<Entry>)>>>,
 }
 
 impl FileBrowser {
@@ -1742,6 +1765,8 @@ impl FileBrowser {
             favorites_file: favorites_file_path(),
             recent_everywhere: true,
             status_note: None,
+            recursive_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recursive_results: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2178,6 +2203,9 @@ impl FileBrowser {
             E::Tab(i) => {
                 self.select_tab(i);
             }
+            E::AsyncReady => {
+                self.apply_async_search();
+            }
             E::Escape => {
                 if !self.query.is_empty() {
                     self.set_query("");
@@ -2271,8 +2299,9 @@ impl FileBrowser {
             return;
         }
         let dir = self.cwd.clone();
-        let entries = self.list_dir(&dir, self.show_hidden);
-        self.set_all(entries);
+        // `list_dir` already decorates and sorts every entry; avoid sorting twice.
+        self.all = self.list_dir(&dir, self.show_hidden);
+        self.refilter();
     }
 
     /// The current folder's modification time (`None` on Recent / Arrived).
@@ -2300,7 +2329,28 @@ impl FileBrowser {
 
     /// `refilter()` for All / Local / Terminal / Dir / Recursive (the live
     /// app's search scheduling is out of scope — the walk runs inline).
+    /// Apply completed background recursive search results if they match the
+    /// latest query generation.
+    pub fn apply_async_search(&mut self) -> bool {
+        let pending = self.recursive_results.lock().ok().and_then(|mut g| g.take());
+        let Some((gen, rows)) = pending else {
+            return false;
+        };
+        if gen != self.recursive_gen.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if self.status_note.as_deref() == Some("Searching…") {
+            self.status_note = None;
+        }
+        self.list.set_rows(rows);
+        true
+    }
+
     pub fn refilter(&mut self) {
+        let my_gen = self
+            .recursive_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
         self.mode = parse_query(&self.query, &self.cwd, &self.terminal_words);
         let rows: Vec<Entry> = match &self.mode {
             QueryMode::All if !self.in_recent() => self.with_expanded(self.all.clone()),
@@ -2325,10 +2375,51 @@ impl FileBrowser {
             QueryMode::Recursive { base, glob } => {
                 let glob = widen_recursive_glob(glob);
                 let hidden = self.show_hidden || glob.starts_with('.') || glob.contains("/.");
+                #[cfg(target_os = "macos")]
+                if let (Some(v), Some(mtm)) = (self.view.as_ref(), objc2::MainThreadMarker::new()) {
+                    let base = base.clone();
+                    let sort_key = self.sort_key;
+                    let sort_desc = self.sort_descending;
+                    let gen_arc = self.recursive_gen.clone();
+                    let res_arc = self.recursive_results.clone();
+                    let bound = dispatch2::MainThreadBound::new(objc2::rc::Weak::from_retained(v), mtm);
+                    self.status_note = Some("Searching…".into());
+                    let _ = std::thread::Builder::new().name("ks-files-search".into()).spawn(move || {
+                        let found = recursive_search_cancellable(
+                            &base,
+                            &glob,
+                            hidden,
+                            RECURSIVE_SEARCH_LIMIT,
+                            &gen_arc,
+                            my_gen,
+                        );
+                        if gen_arc.load(std::sync::atomic::Ordering::Relaxed) != my_gen {
+                            return;
+                        }
+                        let sorted = sort_entries(&found, sort_key, sort_desc);
+                        if gen_arc.load(std::sync::atomic::Ordering::Relaxed) != my_gen {
+                            return;
+                        }
+                        if let Ok(mut slot) = res_arc.lock() {
+                            *slot = Some((my_gen, sorted));
+                        }
+                        crate::platform::run_on_main(move || {
+                            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                                if let Some(view) = bound.get(mtm).load() {
+                                    view.emit_async_ready();
+                                }
+                            }
+                        });
+                    });
+                    return;
+                }
                 let rows = recursive_search(base, &glob, hidden, RECURSIVE_SEARCH_LIMIT);
                 sort_entries(&rows, self.sort_key, self.sort_descending)
             }
         };
+        if self.status_note.as_deref() == Some("Searching…") {
+            self.status_note = None;
+        }
         self.list.set_rows(rows);
     }
 

@@ -1,16 +1,10 @@
 {
   "defaults": {
     "enabled": "false",
-    "sources": "webex, outlook, imessage",
+    "sources": "outlook, imessage",
     "poll-seconds": "60",
     "hide-when-zero": "true",
     "mention-max-age-hours": "24",
-    "webex-enabled": "true",
-    "webex-app": "Cisco-Systems.Spark",
-    "webex-tag": "WEBEX",
-    "webex-api": "true",
-    "webex-count": "window",
-    "webex-rooms": "30",
     "outlook-enabled": "false",
     "outlook-app": "com.microsoft.Outlook",
     "outlook-tag": "MAIL",
@@ -20,12 +14,5 @@
     "imessage-tag": "MESSAGES",
     "imessage-api": "false"
   },
-  "api_sources": ["webex"],
-  "webex": {
-    "api": "https://webexapis.com/v1",
-    "scopes": "spark:rooms_read spark:messages_read spark:memberships_read spark:people_read",
-    "port": 8765,
-    "maxRetryWait": 30,
-    "loginHint": "sign in: python3 ~/.config/kitchen-sink/notify/webex_api.py --login"
-  }
+  "api_sources": []
 }

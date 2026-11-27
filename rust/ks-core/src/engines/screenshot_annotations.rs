@@ -279,7 +279,7 @@ impl ShotTool {
             ShotTool::Selection => Some('r'),
             ShotTool::Rectangle => Some('f'),
             ShotTool::Circle => Some('c'),
-            ShotTool::Marker => Some('m'),
+            ShotTool::Marker => Some('h'),
             ShotTool::Text => Some('t'),
             ShotTool::Pixelate => Some('b'),
             ShotTool::Invert => Some('i'),
@@ -289,6 +289,9 @@ impl ShotTool {
 
     pub fn for_letter(c: char) -> Option<ShotTool> {
         let c = c.to_ascii_lowercase();
+        if c == 'm' {
+            return Some(ShotTool::Marker);
+        }
         ShotTool::ALL.iter().copied().find(|t| t.letter() == Some(c))
     }
 
@@ -333,7 +336,7 @@ impl ShotTool {
             ShotTool::Line => "Line",
             ShotTool::Arrow => "Arrow",
             ShotTool::Circle => "Circle",
-            ShotTool::Marker => "Marker",
+            ShotTool::Marker => "Highlighter",
             ShotTool::Text => "Text",
             ShotTool::Counter => "Counter",
             _ => self.raw_value(),
@@ -345,10 +348,10 @@ impl ShotTool {
             ShotTool::Pencil => "Set the Pencil as the paint tool (P)",
             ShotTool::Line => "Set the Line as the paint tool (D)",
             ShotTool::Arrow => "Set the Arrow as the paint tool (A)",
-            ShotTool::Selection => "Rectangle outline (R)",
+            ShotTool::Selection => "Rectangle outline — drag handles to resize (R)",
             ShotTool::Rectangle => "Filled rectangle — covers what is under it (F)",
             ShotTool::Circle => "Set the Circle as the paint tool (C)",
-            ShotTool::Marker => "Set the Marker as the paint tool (M)",
+            ShotTool::Marker => "Highlighter — drag freehand, Shift for straight line (H)",
             ShotTool::Text => "Add text to your capture (T)",
             ShotTool::Counter => "Numbered markers 1, 2, 3",
             ShotTool::Pixelate => "Set Pixelate as the paint tool (B)",
@@ -857,7 +860,14 @@ impl ShotDocument {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, o)| o.hit(p, 4.0))
+            .find(|(_, o)| {
+                let slop = match o.tool {
+                    ShotTool::Selection | ShotTool::Circle => 8.0,
+                    ShotTool::Line | ShotTool::Arrow | ShotTool::Marker => 6.0,
+                    _ => 4.0,
+                };
+                o.hit(p, slop)
+            })
             .map(|(i, _)| i)
     }
 
@@ -1874,6 +1884,8 @@ pub struct ShotState {
     pub sizes: HashMap<String, i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "markerColor")]
+    pub marker_color: Option<String>,
     #[serde(default)]
     pub style: ShotTextStyle,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastRegion")]
@@ -1889,6 +1901,7 @@ impl Default for ShotState {
         ShotState {
             sizes: HashMap::new(),
             color: None,
+            marker_color: None,
             style: ShotTextStyle::default(),
             last_region: None,
             grid_size: 10,

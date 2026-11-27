@@ -11,21 +11,18 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasteTarget {
     Outlook,
-    Webex,
 }
 
 impl PasteTarget {
     pub fn title(self) -> &'static str {
         match self {
             PasteTarget::Outlook => "Outlook",
-            PasteTarget::Webex => "Webex",
         }
     }
 
     pub fn key(self) -> &'static str {
         match self {
             PasteTarget::Outlook => "outlook",
-            PasteTarget::Webex => "webex",
         }
     }
 }
@@ -35,7 +32,6 @@ pub enum PaneMode {
     Diff,
     Markdown,
     Outlook,
-    Webex,
 }
 
 impl PaneMode {
@@ -44,7 +40,6 @@ impl PaneMode {
             PaneMode::Diff => "diff",
             PaneMode::Markdown => "markdown",
             PaneMode::Outlook => "outlook",
-            PaneMode::Webex => "webex",
         }
     }
 
@@ -60,7 +55,6 @@ impl PaneMode {
     pub fn target(self) -> Option<PasteTarget> {
         match self {
             PaneMode::Outlook => Some(PasteTarget::Outlook),
-            PaneMode::Webex => Some(PasteTarget::Webex),
             _ => None,
         }
     }
@@ -72,7 +66,6 @@ impl PaneMode {
         }
         out.push(PaneMode::Markdown);
         out.push(PaneMode::Outlook);
-        out.push(PaneMode::Webex);
         out
     }
 }
@@ -579,10 +572,10 @@ mod tests {
         assert_eq!(PaneMode::Outlook.target(), Some(PasteTarget::Outlook));
         assert_eq!(PaneMode::Markdown.target(), None);
         let all = PaneMode::all(true);
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 3);
         assert_eq!(all[0], PaneMode::Diff);
-        assert_eq!(PaneMode::all(false), vec![PaneMode::Markdown, PaneMode::Outlook, PaneMode::Webex]);
-        assert_eq!(PasteTarget::Webex.key(), "webex");
+        assert_eq!(PaneMode::all(false), vec![PaneMode::Markdown, PaneMode::Outlook]);
+        assert_eq!(PasteTarget::Outlook.key(), "outlook");
     }
 
     #[test]

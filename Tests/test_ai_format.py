@@ -159,10 +159,9 @@ class CodeGuardRules(unittest.TestCase):
 
 
 class RichTextRules(unittest.TestCase):
-    def test_webex_tables_become_text(self):
+    def test_outlook_keeps_tables(self):
         md = "| a | b |\n| --- | --- |\n| 1 | 2 |"
         self.assertEqual(ai.markdown_for(md, "outlook"), md)
-        self.assertNotIn("| a |", ai.markdown_for(md, "webex"))
 
     @unittest.skipUnless(os.access(PANDOC, os.X_OK), "pandoc missing")
     def test_warning_alert_styled_inline(self):

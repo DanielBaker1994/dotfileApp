@@ -125,6 +125,12 @@ pub fn is_live() -> bool {
     appkit::is_live()
 }
 
+/// Close the preview popup if it is open (main thread).
+#[cfg(target_os = "macos")]
+pub fn close() {
+    appkit::close();
+}
+
 // ---------------------------------------------------------------------------
 // The live window (macOS)
 // ---------------------------------------------------------------------------

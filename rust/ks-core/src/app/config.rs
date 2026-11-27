@@ -907,7 +907,7 @@ pub fn config_value_problem(section: &str, key: &str, value: &str) -> Option<Str
                     }
                 }
             }
-            "ui-color" | "contrast-color" | "draw-color" => {
+            "ui-color" | "contrast-color" | "draw-color" | "highlighter-color" => {
                 if value.to_lowercase() == "theme" && key == "ui-color" {
                     return None;
                 }

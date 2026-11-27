@@ -7,11 +7,7 @@
 
 Config = `[notifications]` in commands.toml (read with jira_config.read_section,
 same line rules as the app). Per source NAME in `sources`: NAME-enabled,
-NAME-app (bundle id), NAME-count (dock = Dock badge, window = the app's own
-window via the NAME_unread AX helper — Webex draws no Dock badge), NAME-tag,
-NAME-api. @mentions = the API
-source (webex only for now), shown until the badge drops to 0 or the API says
-the space was read. State: ~/.cache/notifications/state.json, log
+NAME-app (bundle id), NAME-tag. State: ~/.cache/notifications/state.json, log
 logs/YYYY_MM_DD/notifications-poll.log.
 --json prints {"sources": [{name, app, tag, count, mentions, warn}]}: only the
 sources with something to show unless hide-when-zero = false.
@@ -128,33 +124,9 @@ def dock_badges():
     return out
 
 
-def parse_window(text: str):
-    """webex_unread helper output → (count, [space titles])."""
-    count, spaces = 0, []
-    for line in text.splitlines():
-        kind, _, val = line.partition("\t")
-        if kind == "count":
-            val = val.strip()
-            count = int(val) if val.isdigit() else "•" if val else 0
-        elif kind == "space" and val.strip():
-            spaces.append(val.strip())
-    return count, spaces
-
-
-def window_unread(cfg: dict, name: str):
-    """(count, [space titles]) the app's own window shows (`NAME-count =
-    "window"`: Webex draws no Dock badge), None when it can't be read."""
-    if cfg.get(f"{name}-count", "dock") != "window":
-        return None
-    text = helper(f"{name}_unread", cfg[f"{name}-app"])
-    return parse_window(text) if text is not None else None
-
-
 def unread(cfg: dict, name: str, dock: dict | None):
-    """(count, spaces): the app window when configured and readable, else the
-    Dock badge."""
-    win = window_unread(cfg, name)
-    return win if win is not None else (badge(cfg[f"{name}-app"], dock), [])
+    """(count, spaces): the Dock badge (falling back to lsappinfo)."""
+    return (badge(cfg[f"{name}-app"], dock), [])
 
 
 def badge(bundle: str, dock: dict | None = None):
@@ -204,12 +176,6 @@ def run_poll(cfg: dict) -> dict:
             if s not in API_SOURCES or not jira_config.truthy(cfg.get(f"{s}-api", "false")):
                 st.pop(s, None)
                 continue
-            import webex_api  # the only API source so far (API_SOURCES)
-            res = webex_api.poll(int(cfg["webex-rooms"]), float(cfg["mention-max-age-hours"]))
-            res["at"] = time.time()
-            if not res["ok"]:
-                log(f"{s}: {res['error']}")
-            st[s] = res
         st["at"] = time.time()
         save_state(st)
     return st

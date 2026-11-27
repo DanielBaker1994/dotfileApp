@@ -431,6 +431,9 @@ mod appkit {
         back_to: RefCell<Option<(String, Option<i32>)>>,
         /// When our key monitor last saw Esc go down.
         last_esc: Cell<Option<Instant>>,
+        /// Guard against re-entrant AppKit resign/close callbacks while
+        /// transitioning between mutually exclusive overlays (Hyper+X ↔ Hyper+S).
+        transitioning: Cell<bool>,
     }
 
     impl QuickUi {
@@ -553,6 +556,127 @@ mod appkit {
             self.palette.try_borrow().map(|p| p.as_ref().is_some_and(|x| x.is_visible())).unwrap_or(false)
         }
 
+        fn is_screenshot_active(&self) -> bool {
+            self.shot
+                .try_lock()
+                .map(|c| !c.is_idle() || c.has_recent_open())
+                .unwrap_or(true)
+        }
+
+        fn any_secondary_popup_visible(&self) -> bool {
+            let files = self
+                .files_win
+                .try_borrow()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|w| w.panel.as_ref()).map(|p| p.isVisible()))
+                .unwrap_or(false);
+            let paths = self
+                .paths_win
+                .try_borrow()
+                .ok()
+                .and_then(|g| g.as_ref().map(|w| w.is_window_visible()))
+                .unwrap_or(false);
+            let tools = self
+                .tools
+                .try_borrow()
+                .map(|t| t.values().any(|p| p.is_shown()))
+                .unwrap_or(false);
+            files || paths || tools
+        }
+
+        /// Cleanly dismiss any active Hyper+X screenshot overlay / Recents grid /
+        /// pending capture before presenting another popup so the level-1000
+        /// overlay can never cover or trap keyboard focus.
+        fn dismiss_screenshot(&self) -> bool {
+            if let Ok(mut c) = self.shot.try_lock() {
+                if !c.is_idle() || c.has_recent_open() {
+                    c.abort_session();
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn hide_all_tools(&self) {
+            if let Ok(mut tools) = self.tools.try_borrow_mut() {
+                for panel in tools.values_mut() {
+                    if panel.is_shown() {
+                        panel.hide();
+                    }
+                }
+            }
+            if let Ok(mut opened) = self.opened_at.try_borrow_mut() {
+                opened.clear();
+            }
+        }
+
+        /// Dismiss stacked popups before entering Hyper+X screenshot mode so
+        /// floating windows never linger behind the overlay or steal focus on resign.
+        fn dismiss_popups_for_screenshot(&self) {
+            if self.transitioning.replace(true) {
+                return;
+            }
+            self.palette_return.set(None);
+            self.pick_return.set(None);
+            if let Ok(mut b) = self.back_to.try_borrow_mut() {
+                *b = None;
+            }
+            crate::views::file_popup::close();
+            if let Ok(mut p) = self.palette.try_borrow_mut() {
+                if let Some(panel) = p.as_mut() {
+                    if panel.is_visible() {
+                        panel.hide_panel();
+                    }
+                }
+            }
+            if let Ok(g) = self.files_win.try_borrow() {
+                if let Some(p) = g.as_ref().and_then(|w| w.panel.as_ref()) {
+                    if p.isVisible() {
+                        p.orderOut(None);
+                    }
+                }
+            }
+            if let Ok(mut g) = self.paths_win.try_borrow_mut() {
+                if let Some(w) = g.as_mut() {
+                    if w.is_window_visible() {
+                        w.hide_window();
+                    }
+                }
+            }
+            self.hide_all_tools();
+            self.transitioning.set(false);
+            self.publish_state();
+        }
+
+        /// Dismiss screenshot overlay and any conflicting popups before showing
+        /// the Hyper+S palette (keeps `palette_return` intact for Esc hand-back).
+        fn dismiss_for_palette(&self) {
+            if self.transitioning.replace(true) {
+                return;
+            }
+            if let Ok(mut b) = self.back_to.try_borrow_mut() {
+                *b = None;
+            }
+            self.dismiss_screenshot();
+            crate::views::file_popup::close();
+            if let Ok(g) = self.files_win.try_borrow() {
+                if let Some(p) = g.as_ref().and_then(|w| w.panel.as_ref()) {
+                    if p.isVisible() {
+                        p.orderOut(None);
+                    }
+                }
+            }
+            if let Ok(mut g) = self.paths_win.try_borrow_mut() {
+                if let Some(w) = g.as_mut() {
+                    if w.is_window_visible() {
+                        w.hide_window();
+                    }
+                }
+            }
+            self.hide_all_tools();
+            self.transitioning.set(false);
+        }
+
         // -- commands -------------------------------------------------------
 
         fn run(&self, cmd: QuickCmd) {
@@ -591,6 +715,9 @@ mod appkit {
                 log("screenshot: [screenshot] is not enabled");
                 return;
             }
+            // Clear any open palette / tools / preview popups so nothing stacks
+            // behind the level-1000 overlay or triggers a focus hand-back race.
+            self.dismiss_popups_for_screenshot();
             // Never swap the config under a live capture session.
             if let Ok(mut c) = self.shot.try_lock() {
                 if c.is_idle() {
@@ -598,6 +725,7 @@ mod appkit {
                 }
             }
             crate::views::screenshot::run_screenshot_message(self.shot.clone(), words, reply);
+            self.publish_state();
         }
 
         fn pane_shot(&self, words: Vec<String>, reply: Option<Reply>) {
@@ -626,8 +754,21 @@ mod appkit {
 
         fn show_palette(&self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
+            // Capture the frontmost app BEFORE dismissing any stacked overlays
+            // (keep any remembered return pid if we were already frontmost).
+            let own = std::process::id() as i32;
+            let front = crate::platform::frontmost_app()
+                .map(|a| a.pid)
+                .filter(|p| *p != own)
+                .or_else(|| self.palette_return.get())
+                .or_else(|| self.pick_return.get().map(|(pid, _)| pid));
+            // Abort any live Hyper+X overlay and hide conflicting popups first
+            // so the palette never renders behind a level-1000 screenshot panel.
+            self.dismiss_for_palette();
             let text = self.refresh_config();
-            let mut panel = self.palette.borrow_mut().take().unwrap_or_else(PalettePanel::new);
+            let Ok(mut slot) = self.palette.try_borrow_mut() else { return };
+            let mut panel = slot.take().unwrap_or_else(PalettePanel::new);
+            drop(slot);
             panel.set_rows(palette_rows(&text));
             panel.set_callbacks(
                 Box::new(|action: PaletteAction| {
@@ -639,11 +780,21 @@ mod appkit {
                     with_ui(|ui| ui.run_pick(action));
                 }),
                 Box::new(|| {
-                    // Esc / click-off inside the palette.
+                    // Esc / click-off inside the palette. Ignore if we are
+                    // transitioning to another overlay (e.g. Hyper+X) so we
+                    // never hand focus away from our own overlay.
                     with_ui(|ui| {
+                        if ui.transitioning.get() || ui.is_screenshot_active() {
+                            return;
+                        }
                         ui.hand_back();
                     });
-                    defer(|ui| ui.cancel_palette());
+                    defer(|ui| {
+                        if ui.transitioning.get() || ui.is_screenshot_active() {
+                            return;
+                        }
+                        ui.cancel_palette();
+                    });
                 }),
             );
             // Centre on the screen under the mouse.
@@ -653,15 +804,16 @@ mod appkit {
                 .map(|s| s.visible)
                 .map(|v| NSRect::new(NSPoint::new(v.x, v.y), NSSize::new(v.w, v.h)))
                 .unwrap_or_else(|| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1440.0, 900.0)));
+            self.transitioning.set(true);
             panel.present(
                 mtm,
                 Some(SwitchFrame::new(host.origin.x, host.origin.y, host.size.width, host.size.height)),
             );
-            *self.palette.borrow_mut() = Some(panel);
+            self.transitioning.set(false);
+            if let Ok(mut slot) = self.palette.try_borrow_mut() {
+                *slot = Some(panel);
+            }
             crate::app::logging::log_hotkey_shown(None);
-            // The app Hyper+S was pressed over, for the cancel hand-back.
-            let own = std::process::id() as i32;
-            let front = crate::platform::frontmost_app().map(|a| a.pid).filter(|p| *p != own);
             self.palette_return.set(front);
             self.publish_state();
         }
@@ -702,9 +854,13 @@ mod appkit {
 
         /// Esc on an empty query / the toggle verb while it is up.
         fn cancel_palette(&self) {
+            if self.transitioning.get() || self.is_screenshot_active() {
+                self.hide_palette_panel();
+                return;
+            }
             let handed = self.hand_back();
             self.hide_palette_panel();
-            if !handed {
+            if !handed && !self.any_secondary_popup_visible() {
                 if let Some(mtm) = MainThreadMarker::new() {
                     NSApplication::sharedApplication(mtm).deactivate();
                 }
@@ -744,14 +900,19 @@ mod appkit {
         /// comes back to the palette.
         fn set_back_to(&self, surface: &str) {
             let pid = self.pick_return.get().map(|(pid, _)| pid);
-            *self.back_to.borrow_mut() = Some((surface.to_string(), pid));
+            if let Ok(mut b) = self.back_to.try_borrow_mut() {
+                *b = Some((surface.to_string(), pid));
+            }
         }
 
         /// `surface` just closed. If a palette pick opened it and Esc closed it,
         /// show the palette again (the previous view) instead of leaving.
         fn surface_closed(&self, surface: &str, by_esc: bool) {
+            if self.transitioning.get() || self.is_screenshot_active() {
+                return;
+            }
             let pid = {
-                let mut b = self.back_to.borrow_mut();
+                let Ok(mut b) = self.back_to.try_borrow_mut() else { return };
                 match b.as_ref() {
                     Some((s, _)) if s == surface => b.take().and_then(|(_, pid)| pid),
                     _ => return,
@@ -799,7 +960,9 @@ mod appkit {
                 panel.show(mtm);
                 tools.insert(kind.name().to_string(), panel);
             }
-            self.opened_at.borrow_mut().insert(kind.name().to_string(), Instant::now());
+            if let Ok(mut opened) = self.opened_at.try_borrow_mut() {
+                opened.insert(kind.name().to_string(), Instant::now());
+            }
             self.publish_state();
             self.ensure_poll();
         }
@@ -852,10 +1015,13 @@ mod appkit {
             // guess: by this tick the close had handed focus back and the
             // current event was no longer that Esc, so the palette stayed shut.
             let esc_recent = self.last_esc.get().is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+            let changed = !closed.is_empty();
             for (name, by_esc) in closed {
                 self.surface_closed(&name, by_esc || esc_recent);
             }
-            self.publish_state();
+            if changed {
+                self.publish_state();
+            }
             any
         }
 
@@ -879,7 +1045,8 @@ mod appkit {
             let section = crate::app::sections::parse_sections(&text).get("files").cloned().unwrap_or_default();
             // The agent runs its own Recent engine so the list is live without the main app.
             crate::views::files::start_recent(&section);
-            let mut win = self.files_win.borrow_mut().take().unwrap_or_else(|| {
+            let Ok(mut slot) = self.files_win.try_borrow_mut() else { return };
+            let mut win = slot.take().unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
                 let mut browser = FileBrowser::new(&home);
                 browser.configure(&section);
@@ -890,6 +1057,7 @@ mod appkit {
                 }
                 FilesWin { browser, panel: None }
             });
+            drop(slot);
             win.browser.show_virtual(0);
             win.browser.sync_view();
             // Half the size of the full-screen app window, centred on the screen under the mouse.
@@ -943,7 +1111,9 @@ mod appkit {
                 // panel with the sheet still attached.
                 panel.set_on_resign(Box::new(|| {
                     defer(|ui| {
-                        if crate::views::file_popup::is_live()
+                        if ui.transitioning.get()
+                            || ui.is_screenshot_active()
+                            || crate::views::file_popup::is_live()
                             || ui.files_window().is_some_and(|p| p.attachedSheet().is_some())
                         {
                             return;
@@ -963,7 +1133,9 @@ mod appkit {
                     panel.makeFirstResponder(Some(r));
                 }
             }
-            *self.files_win.borrow_mut() = Some(win);
+            if let Ok(mut slot) = self.files_win.try_borrow_mut() {
+                *slot = Some(win);
+            }
             self.publish_state();
         }
 
@@ -1262,11 +1434,11 @@ mod appkit {
         fn show_paths(&self) {
             let Some(mtm) = MainThreadMarker::new() else { return };
             self.refresh_config();
-            let mut win = self
-                .paths_win
-                .borrow_mut()
+            let Ok(mut slot) = self.paths_win.try_borrow_mut() else { return };
+            let mut win = slot
                 .take()
                 .unwrap_or_else(|| PathsWindow::new(PathsReturn::File));
+            drop(slot);
             win.set_items(Self::shelf_entries());
             win.show();
             win.build(mtm);
@@ -1278,7 +1450,10 @@ mod appkit {
             if let Some(panel) = &win.window {
                 panel.set_on_resign(Box::new(|| {
                     defer(|ui| {
-                        if crate::views::file_popup::is_live() {
+                        if ui.transitioning.get()
+                            || ui.is_screenshot_active()
+                            || crate::views::file_popup::is_live()
+                        {
                             return;
                         }
                         ui.paths_surface(|w| w.hide_window());
@@ -1287,7 +1462,9 @@ mod appkit {
                     });
                 }));
             }
-            *self.paths_win.borrow_mut() = Some(win);
+            if let Ok(mut slot) = self.paths_win.try_borrow_mut() {
+                *slot = Some(win);
+            }
             self.publish_state();
         }
 
@@ -1695,6 +1872,7 @@ mod appkit {
             monitor: RefCell::new(None),
             back_to: RefCell::new(None),
             last_esc: Cell::new(None),
+            transitioning: Cell::new(false),
         });
         QUICK.with(|q| *q.borrow_mut() = Some(ui.clone()));
 

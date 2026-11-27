@@ -260,28 +260,71 @@ mod appkit {
         unsafe { NSString::from_str(s).drawAtPoint_withAttributes(NSPoint::new(x, y), Some(&a)) };
     }
 
+    fn measure_with_attrs(
+        s: &str,
+        a: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    ) -> (Retained<NSString>, f64, f64) {
+        let ns = NSString::from_str(s);
+        let sz = unsafe { ns.sizeWithAttributes(Some(a)) };
+        (ns, sz.width, sz.height)
+    }
+
+    fn truncate_with_attrs(
+        s: &str,
+        max_w: f64,
+        a: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    ) -> (Retained<NSString>, f64, f64) {
+        if max_w <= 0.0 {
+            return (NSString::from_str(""), 0.0, 0.0);
+        }
+        let (ns, w, h) = measure_with_attrs(s, a);
+        if w <= max_w {
+            return (ns, w, h);
+        }
+        let mut offsets: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+        offsets.push(s.len());
+        let (mut lo, mut hi) = (0usize, offsets.len() - 1);
+        let mut buf = String::with_capacity(s.len() + 3);
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            buf.clear();
+            buf.push_str(&s[..offsets[mid]]);
+            buf.push('…');
+            let (_, tw, _) = measure_with_attrs(&buf, a);
+            if tw <= max_w {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        buf.clear();
+        buf.push_str(&s[..offsets[lo]]);
+        buf.push('…');
+        measure_with_attrs(&buf, a)
+    }
+
     /// Draw `s` vertically centered in `r`, left-aligned at `r.x`, truncated
     /// with "…" to `r.width`. Returns the drawn width.
     pub fn draw_text_left(s: &str, r: Rect, font: &NSFont, color: Rgba) -> f64 {
-        let text = truncate_to(s, r.width, font);
-        let (w, h) = text_size(&text, font);
-        draw_text(&text, r.x, r.mid_y() - h / 2.0, font, color);
+        let a = attrs(font, color);
+        let (ns, w, h) = truncate_with_attrs(s, r.width, &a);
+        unsafe { ns.drawAtPoint_withAttributes(NSPoint::new(r.x, r.mid_y() - h / 2.0), Some(&a)) };
         w
     }
 
     /// Right-aligned variant of `draw_text_left`.
     pub fn draw_text_right(s: &str, r: Rect, font: &NSFont, color: Rgba) -> f64 {
-        let text = truncate_to(s, r.width, font);
-        let (w, h) = text_size(&text, font);
-        draw_text(&text, r.max_x() - w, r.mid_y() - h / 2.0, font, color);
+        let a = attrs(font, color);
+        let (ns, w, h) = truncate_with_attrs(s, r.width, &a);
+        unsafe { ns.drawAtPoint_withAttributes(NSPoint::new(r.max_x() - w, r.mid_y() - h / 2.0), Some(&a)) };
         w
     }
 
     /// Centered in `r`.
     pub fn draw_text_centered(s: &str, r: Rect, font: &NSFont, color: Rgba) {
-        let text = truncate_to(s, r.width, font);
-        let (w, h) = text_size(&text, font);
-        draw_text(&text, r.mid_x() - w / 2.0, r.mid_y() - h / 2.0, font, color);
+        let a = attrs(font, color);
+        let (ns, w, h) = truncate_with_attrs(s, r.width, &a);
+        unsafe { ns.drawAtPoint_withAttributes(NSPoint::new(r.mid_x() - w / 2.0, r.mid_y() - h / 2.0), Some(&a)) };
     }
 
     /// Tail-truncate with "…" until it fits `max_w` (by measured width).
@@ -289,21 +332,9 @@ mod appkit {
         if max_w <= 0.0 {
             return String::new();
         }
-        if text_size(s, font).0 <= max_w {
-            return s.to_string();
-        }
-        let chars: Vec<char> = s.chars().collect();
-        let (mut lo, mut hi) = (0usize, chars.len());
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            let t: String = chars[..mid].iter().collect::<String>() + "…";
-            if text_size(&t, font).0 <= max_w {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        chars[..lo].iter().collect::<String>() + "…"
+        let a = attrs(font, Rgba::new(0.0, 0.0, 0.0, 1.0));
+        let (ns, _, _) = truncate_with_attrs(s, max_w, &a);
+        ns.to_string()
     }
 
     pub fn fill_rect(r: Rect, c: Rgba) {

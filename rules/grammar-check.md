@@ -28,7 +28,7 @@ output: diff
 greedy: true
 guardrails: permissive-content-transformations
 use-case: general
-placeholder: Type or paste a message for Outlook or Webex — Ctrl+Enter checks it, then formats it
+placeholder: Type or paste a message for Outlook — Ctrl+Enter checks it, then formats it
 prompt: Proofread this draft:
 csv-tables: true
 # grammar only here; the layout is markdown-format.md's job

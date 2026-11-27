@@ -621,6 +621,115 @@
      "name": "a.txt -> renamed.txt"
     }
    ]
+  },
+  {
+   "id": "hyperx-then-hypers-race",
+   "from": "popup-stack-guard",
+   "about": "Hyper+X followed immediately by Hyper+S (and rapid alternating Hyper+X / Hyper+S) dismisses the level-1000 overlay cleanly without hanging or trapping focus",
+   "steps": [
+    {
+     "press": "hyper+x"
+    },
+    {
+     "wait": 0.25
+    },
+    {
+     "press": "hyper+s"
+    },
+    {
+     "check": [
+      {
+       "state": "screenshotBusy",
+       "equals": false
+      },
+      {
+       "state": "live.palette.shown",
+       "equals": true
+      }
+     ],
+     "name": "Hyper+S dismissed Hyper+X overlay cleanly",
+     "settle": 0.4
+    },
+    {
+     "type": "pretty"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.query",
+       "equals": "pretty"
+      }
+     ],
+     "name": "palette owns keyboard after dismissing Hyper+X"
+    },
+    {
+     "press": "hyper+x"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.shown",
+       "equals": false
+      },
+      {
+       "state": "screenshotBusy",
+       "equals": true
+      }
+     ],
+     "name": "Hyper+X dismissed palette cleanly",
+     "settle": 0.5
+    },
+    {
+     "press": "hyper+s"
+    },
+    {
+     "wait": 0.15
+    },
+    {
+     "press": "hyper+x"
+    },
+    {
+     "wait": 0.15
+    },
+    {
+     "press": "hyper+s"
+    },
+    {
+     "check": [
+      {
+       "state": "screenshotBusy",
+       "equals": false
+      },
+      {
+       "state": "live.palette.shown",
+       "equals": true
+      }
+     ],
+     "name": "rapid Hyper+X/Hyper+S alternating never hangs",
+     "settle": 0.5
+    },
+    {
+     "key": "esc"
+    },
+    {
+     "check": [
+      {
+       "state": "live.palette.shown",
+       "equals": false
+      },
+      {
+       "state": "screenshotBusy",
+       "equals": false
+      },
+      {
+       "state": "live.frontmostBundle",
+       "equals": "com.apple.TextEdit"
+      }
+     ],
+     "name": "Esc closes cleanly and hands focus back to TextEdit",
+     "settle": 0.5
+    }
+   ]
   }
  ]
 }

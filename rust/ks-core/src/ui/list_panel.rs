@@ -103,14 +103,24 @@ mod appkit {
             }
 
             #[unsafe(method(drawRect:))]
-            fn draw_rect(&self, _d: NSRect) {
-                let w = self.bounds().size.width;
+            fn draw_rect(&self, dirty: NSRect) {
+                let bounds = self.bounds();
+                let w = bounds.size.width;
                 let rh = self.ivars().row_h.get();
+                let count = self.ivars().count.get();
+                if rh <= 0.0 || count == 0 {
+                    return;
+                }
                 let sel = self.ivars().selection.get();
                 let hov = self.ivars().hover.get();
                 let top = self.ivars().top.get();
+                let vis_start = (dirty.origin.y / rh).floor().max(0.0) as usize;
+                let vis_end = (((dirty.origin.y + dirty.size.height) / rh).ceil().max(0.0) as usize)
+                    .min((bounds.size.height / rh).ceil().max(1.0) as usize);
+                let first = (top + vis_start).min(count);
+                let last = (top + vis_end).min(count);
                 if let Some(d) = self.ivars().drawer.borrow().as_ref() {
-                    for i in top..self.ivars().count.get() {
+                    for i in first..last {
                         d(row_rect(i - top, rh, w), i, i == sel, hov == Some(i));
                     }
                 }

@@ -163,75 +163,96 @@ impl FuzzyIndex {
 
 /// Approximation of Foundation's `localizedStandardCompare` (Finder-style,
 /// case-insensitive, number-aware, lowercase before uppercase on a tie).
+/// Zero heap allocations per comparison.
 pub fn localized_standard_compare(a: &str, b: &str) -> Ordering {
-    let ac: Vec<char> = a.chars().collect();
-    let bc: Vec<char> = b.chars().collect();
-    let primary = natural_ci(&ac, &bc);
+    let primary = natural_ci(a, b);
     if primary != Ordering::Equal {
         return primary;
     }
-    case_tiebreak(&ac, &bc)
+    case_tiebreak(a, b)
 }
 
-fn natural_ci(a: &[char], b: &[char]) -> Ordering {
+fn natural_ci(a: &str, b: &str) -> Ordering {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
     let mut i = 0usize;
     let mut j = 0usize;
-    while i < a.len() && j < b.len() {
-        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+    while i < ab.len() && j < bb.len() {
+        if ab[i].is_ascii_digit() && bb[j].is_ascii_digit() {
             let si = i;
             let sj = j;
-            while i < a.len() && a[i].is_ascii_digit() {
+            while i < ab.len() && ab[i].is_ascii_digit() {
                 i += 1;
             }
-            while j < b.len() && b[j].is_ascii_digit() {
+            while j < bb.len() && bb[j].is_ascii_digit() {
                 j += 1;
             }
-            let c = cmp_numeric(&a[si..i], &b[sj..j]);
+            let c = cmp_numeric(&ab[si..i], &bb[sj..j]);
             if c != Ordering::Equal {
                 return c;
             }
             continue;
         }
-        let la = a[i].to_lowercase().next().unwrap_or(a[i]);
-        let lb = b[j].to_lowercase().next().unwrap_or(b[j]);
+        // Fast path for ASCII characters (the common case for filenames).
+        if ab[i] < 0x80 && bb[j] < 0x80 {
+            let la = ab[i].to_ascii_lowercase();
+            let lb = bb[j].to_ascii_lowercase();
+            if la != lb {
+                return la.cmp(&lb);
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+        let ca = a[i..].chars().next().unwrap();
+        let cb = b[j..].chars().next().unwrap();
+        let la = ca.to_lowercase().next().unwrap_or(ca);
+        let lb = cb.to_lowercase().next().unwrap_or(cb);
         let c = la.cmp(&lb);
         if c != Ordering::Equal {
             return c;
         }
-        i += 1;
-        j += 1;
+        i += ca.len_utf8();
+        j += cb.len_utf8();
     }
-    (a.len() - i).cmp(&(b.len() - j))
+    (ab.len() - i).cmp(&(bb.len() - j))
 }
 
-fn cmp_numeric(a: &[char], b: &[char]) -> Ordering {
-    let ta: Vec<char> = a.iter().copied().skip_while(|c| *c == '0').collect();
-    let tb: Vec<char> = b.iter().copied().skip_while(|c| *c == '0').collect();
+fn cmp_numeric(a: &[u8], b: &[u8]) -> Ordering {
+    let skip_a = a.iter().position(|&c| c != b'0').unwrap_or(a.len());
+    let skip_b = b.iter().position(|&c| c != b'0').unwrap_or(b.len());
+    let ta = &a[skip_a..];
+    let tb = &b[skip_b..];
     if ta.len() != tb.len() {
         return ta.len().cmp(&tb.len());
     }
-    ta.cmp(&tb)
+    ta.cmp(tb)
 }
 
-fn case_tiebreak(a: &[char], b: &[char]) -> Ordering {
-    let n = a.len().min(b.len());
-    for k in 0..n {
-        let ca = a[k];
-        let cb = b[k];
-        if ca == cb {
-            continue;
-        }
-        let ua = ca.is_uppercase();
-        let ub = cb.is_uppercase();
-        if ua != ub {
-            return if ua { Ordering::Greater } else { Ordering::Less };
-        }
-        let c = ca.cmp(&cb);
-        if c != Ordering::Equal {
-            return c;
+fn case_tiebreak(a: &str, b: &str) -> Ordering {
+    let mut ac = a.chars();
+    let mut bc = b.chars();
+    loop {
+        match (ac.next(), bc.next()) {
+            (Some(ca), Some(cb)) => {
+                if ca == cb {
+                    continue;
+                }
+                let ua = ca.is_uppercase();
+                let ub = cb.is_uppercase();
+                if ua != ub {
+                    return if ua { Ordering::Greater } else { Ordering::Less };
+                }
+                let c = ca.cmp(&cb);
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
         }
     }
-    a.len().cmp(&b.len())
 }
 
 #[cfg(test)]

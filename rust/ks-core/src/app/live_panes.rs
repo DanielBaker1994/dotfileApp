@@ -189,7 +189,9 @@ impl LiveNav {
         let cur = current(w, list);
         let show = w.isKeyWindow() && w.attachedSheet().is_none() && vis.len() > 1 && cur.is_some();
         if !show {
-            ring.setHidden(true);
+            if !ring.isHidden() {
+                ring.setHidden(true);
+            }
             self.ring_state = None;
             return;
         }
@@ -208,7 +210,9 @@ impl LiveNav {
             ring.setFrame(f);
         }
         ring.apply(self.style);
-        ring.setHidden(false);
+        if ring.isHidden() {
+            ring.setHidden(false);
+        }
         self.ring_state = Some((cur.id.clone(), boxed(top_down(wr, w))));
     }
 

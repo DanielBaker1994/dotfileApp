@@ -975,8 +975,10 @@ mod appkit {
         }
 
         pub fn set_mode(&self, mode: VimMode) {
-            self.ivars().mode.set(mode);
-            self.setNeedsDisplay(true);
+            if self.ivars().mode.get() != mode {
+                self.ivars().mode.set(mode);
+                self.setNeedsDisplay(true);
+            }
         }
 
         /// `VimModeBadge.size(_:)` (measures the mode text with the chip font).

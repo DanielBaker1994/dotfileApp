@@ -724,7 +724,7 @@ pub fn strip_ansi(s: &str) -> String {
 /// the transparent-background look.
 pub const PREVIEW_DIM: &str = "#88919e";
 
-/// `previewPage(_:_:)` — the fragment inside the Outlook / Webex paste chrome.
+/// `previewPage(_:_:)` — the fragment inside the Outlook paste chrome.
 pub fn preview_page(fragment: &str, target: PasteTarget) -> String {
     let dim = PREVIEW_DIM;
     let (note, card, who) = match target {
@@ -732,11 +732,6 @@ pub fn preview_page(fragment: &str, target: PasteTarget) -> String {
             "Pastes as rich text: tables, code and lists keep their formatting.",
             "background:#ffffff;border-radius:6px;padding:16px 18px;box-shadow:0 1px 3px rgba(0,0,0,.35)",
             "",
-        ),
-        PasteTarget::Webex => (
-            "Webex has no tables: they paste as aligned text. Markdown also works if you paste as plain text.",
-            "background:#f4f5f7;border-radius:14px;padding:12px 14px;box-shadow:0 1px 3px rgba(0,0,0,.35)",
-            "<div style=\"font:600 12px -apple-system;color:#555;margin-bottom:6px\">You \u{00b7} now</div>",
         ),
     };
     format!(
@@ -1553,7 +1548,7 @@ mod tests {
         m.rules = vec![AIRule::new("/tmp/r.md", "r")]; // plain → no Diff
         assert_eq!(
             m.modes(),
-            vec![PaneMode::Markdown, PaneMode::Outlook, PaneMode::Webex],
+            vec![PaneMode::Markdown, PaneMode::Outlook],
             "plain rules drop Diff"
         );
         m.set_mode(PaneMode::Diff);
@@ -1561,9 +1556,7 @@ mod tests {
         m.set_mode(PaneMode::Outlook);
         assert_eq!(m.mode, PaneMode::Outlook);
         assert_eq!(m.target, PasteTarget::Outlook);
-        m.set_mode(PaneMode::Webex);
-        assert_eq!(m.target, PasteTarget::Webex);
-        assert_eq!(m.copy_title(), "\u{29c9} Copy for Webex");
+        assert_eq!(m.copy_title(), "\u{29c9} Copy for Outlook");
 
         // a diff rule keeps Diff and lets it be selected.
         let mut diff = AIRule::new("/tmp/d.md", "d");
@@ -1729,12 +1722,6 @@ mod tests {
         assert!(o.contains("background:#ffffff"), "outlook card");
         assert!(o.contains("Pastes as rich text"));
         assert!(!o.contains("You \u{00b7} now"), "no chat header for Outlook");
-
-        let w = preview_page("<p>hi</p>", PasteTarget::Webex);
-        assert!(w.contains("WEBEX \u{00b7} AS IT WILL PASTE"));
-        assert!(w.contains("background:#f4f5f7"), "webex card");
-        assert!(w.contains("You \u{00b7} now"));
-        assert!(w.contains("Webex has no tables"));
     }
 
     #[test]

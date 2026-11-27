@@ -403,6 +403,14 @@ impl ShotOCR {
         // for the Neural Engine and can take many seconds — on main it froze
         // the freshly launched window (2026-11-25 stall sample).
         let _ = std::thread::Builder::new().name("ks-ocr-warmup".into()).spawn(move || {
+            // Actually drop to QOS_CLASS_BACKGROUND (0x09) so macOS runs the
+            // Vision model compilation on efficiency cores instead of P-cores.
+            extern "C" {
+                fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+            }
+            unsafe {
+                let _ = pthread_set_qos_class_self_np(0x09, 0);
+            }
             let ms = ShotOCR::warm_up(&cfg);
             crate::app::logging::ws_log(&format!("screenshot: OCR warm-up {ms} ms (background)"));
             // `auto`: now load `.accurate` (~43 s once per process, on this

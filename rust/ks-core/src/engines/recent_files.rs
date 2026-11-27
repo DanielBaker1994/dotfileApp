@@ -778,6 +778,8 @@ pub struct RecentFiles {
     departed: HashMap<u64, Departed>,
     home: String,
     store: String,
+    last_saved_at: f64,
+    dirty_store: bool,
     #[cfg(target_os = "macos")]
     stream: Option<StreamHandle>,
     /// Bumped by `stop`; a background seed whose generation is stale is dropped.
@@ -800,6 +802,8 @@ impl RecentFiles {
             departed: HashMap::new(),
             home: home.to_string(),
             store: store.to_string(),
+            last_saved_at: 0.0,
+            dirty_store: false,
             #[cfg(target_os = "macos")]
             stream: None,
             #[cfg(target_os = "macos")]
@@ -892,7 +896,33 @@ impl RecentFiles {
     }
 
     /// `URL(...).nameKey == lastPathComponent` — the case-only-rename check.
+    /// On macOS uses `O_EVTONLY` + `F_GETPATH` (O(1) exact on-disk casing)
+    /// instead of scanning the entire parent directory with `read_dir`.
     pub fn present(p: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            const O_EVTONLY: libc::c_int = 0x8000;
+            let Ok(cpath) = CString::new(p) else {
+                return false;
+            };
+            let fd = unsafe { libc::open(cpath.as_ptr(), O_EVTONLY | libc::O_SYMLINK) };
+            if fd < 0 {
+                return false;
+            }
+            let mut buf = [0u8; libc::PATH_MAX as usize];
+            let rc = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+            unsafe { libc::close(fd) };
+            if rc == 0 {
+                let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                let real = std::str::from_utf8(&buf[..nul]).ok();
+                let want = Path::new(p).file_name().and_then(|n| n.to_str());
+                let got = real.and_then(|r| Path::new(r).file_name().and_then(|n| n.to_str()));
+                if let (Some(w), Some(g)) = (want, got) {
+                    return w == g;
+                }
+                return true;
+            }
+        }
         if !Path::new(p).exists() {
             return false;
         }
@@ -987,7 +1017,9 @@ impl RecentFiles {
                 .cloned()
                 .unwrap_or(Item { at: t, source: None });
             item.at = t;
-            if created || renamed || item.source.is_none() {
+            // Quarantine / WhereFroms xattrs are set at creation or download
+            // rename; skip redundant getxattr syscalls on plain edits.
+            if created || renamed {
                 if let Some(o) = Self::origin(&p) {
                     item.source = Some(o);
                 }
@@ -1134,6 +1166,29 @@ impl RecentFiles {
         self.trim();
     }
 
+    fn save_snapshot(&mut self) {
+        let arr: Vec<Value> = self
+            .snapshot
+            .iter()
+            .take(self.limit)
+            .map(|e| {
+                let mut o = json!({"path": e.path, "at": e.at});
+                if let Some(s) = &e.source {
+                    o["source"] = json!(s);
+                }
+                o
+            })
+            .collect();
+        if let Some(dir) = Path::new(&self.store).parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(data) = serde_json::to_vec(&Value::Array(arr)) {
+            let _ = fs::write(&self.store, data);
+            self.last_saved_at = now();
+            self.dirty_store = false;
+        }
+    }
+
     fn publish(&mut self) {
         let home = self.home.clone();
         let everywhere = self.everywhere;
@@ -1149,7 +1204,12 @@ impl RecentFiles {
                 source: i.source,
             })
             .collect();
-        self.save();
+        self.dirty_store = true;
+        // Debounce disk writes during live FSEvents bursts (flushed on stop/drop).
+        let t = now();
+        if self.last_saved_at == 0.0 || t - self.last_saved_at >= 15.0 {
+            self.save_snapshot();
+        }
     }
 
     pub fn canonical(p: &str) -> String {
@@ -1263,7 +1323,7 @@ impl RecentFiles {
                 &ctx,
                 paths,
                 K_FSEVENT_STREAM_EVENT_ID_SINCE_NOW,
-                1.0,
+                2.0,
                 create_flags(),
             );
             CFRelease(paths);
@@ -1281,6 +1341,9 @@ impl RecentFiles {
     pub fn stop(&mut self) {
         self.enabled = false;
         self.seed_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.dirty_store {
+            self.save_snapshot();
+        }
         if let Some(h) = self.stream.take() {
             unsafe {
                 FSEventStreamStop(h.stream);

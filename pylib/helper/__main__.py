@@ -54,6 +54,7 @@ def _serve(stream) -> int:
             if request.get("method") == "shutdown":
                 shutdown = request
                 break
+            pending = [f for f in pending if not f.done()]
             pending.append(pool.submit(_answer, request))
         # EOF or shutdown: every accepted request still gets its reply.
         for fut in pending:

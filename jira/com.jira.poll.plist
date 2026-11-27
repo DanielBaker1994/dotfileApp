@@ -26,5 +26,9 @@
     <integer>60</integer>
     <key>RunAtLoad</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
 </dict>
 </plist>

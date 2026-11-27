@@ -320,8 +320,10 @@ mod appkit {
 
         /// `apply(color:width:)`.
         pub fn apply(&self, style: RingStyle) {
-            self.ivars().style.set(style);
-            self.setNeedsDisplay(true);
+            if self.ivars().style.get() != style {
+                self.ivars().style.set(style);
+                self.setNeedsDisplay(true);
+            }
         }
 
         /// Mark the ring for redraw (`drawRect:` paints it).

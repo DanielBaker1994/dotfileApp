@@ -74,24 +74,10 @@ pub fn run_process_deadline(
         b
     });
 
-    let start = Instant::now();
     let mut timed_out = false;
-    let status = loop {
-        match child.try_wait()? {
-            Some(st) => break st,
-            None => {
-                if let Some(d) = timeout {
-                    if start.elapsed() >= d {
-                        let _ = child.kill();
-                        timed_out = true;
-                        break child.wait().unwrap_or_else(|_| {
-                            std::process::ExitStatus::default()
-                        });
-                    }
-                }
-                thread::sleep(std::time::Duration::from_millis(60));
-            }
-        }
+    let status = match timeout {
+        None => child.wait()?,
+        Some(limit) => wait_with_timeout(&mut child, limit, &mut timed_out)?,
     };
     let mut out = out_h.join().unwrap_or_default();
     let err = err_h.join().unwrap_or_default();
@@ -108,6 +94,68 @@ pub fn run_process_deadline(
         out: String::from_utf8_lossy(&out).into_owned(),
         err: if merge_stderr { String::new() } else { err_str },
     })
+}
+
+/// Wait for `child` up to `limit` without polling: uses `kqueue` `EVFILT_PROC`
+/// (`NOTE_EXIT`) on macOS for 0 wakeups and 0 ms exit-detection latency.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    limit: std::time::Duration,
+    timed_out: &mut bool,
+) -> std::io::Result<std::process::ExitStatus> {
+    if let Some(st) = child.try_wait()? {
+        return Ok(st);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let kq = unsafe { libc::kqueue() };
+        if kq >= 0 {
+            let pid = child.id() as usize;
+            let kev = libc::kevent {
+                ident: pid,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ONESHOT,
+                fflags: libc::NOTE_EXIT,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            let ts = libc::timespec {
+                tv_sec: limit.as_secs() as libc::time_t,
+                tv_nsec: limit.subsec_nanos() as libc::c_long,
+            };
+            let mut out: libc::kevent = unsafe { std::mem::zeroed() };
+            let n = unsafe { libc::kevent(kq, &kev, 1, &mut out, 1, &ts) };
+            unsafe { libc::close(kq) };
+            if n == 0 {
+                // Deadline expired before child exited.
+                if let Some(st) = child.try_wait()? {
+                    return Ok(st);
+                }
+                let _ = child.kill();
+                *timed_out = true;
+                return Ok(child.wait().unwrap_or_else(|_| std::process::ExitStatus::default()));
+            }
+            // Either NOTE_EXIT fired or ESRCH (already exited): reap immediately.
+            if let Some(st) = child.try_wait()? {
+                return Ok(st);
+            }
+            // Rare EINTR / race: fall through to bounded wait below.
+        }
+    }
+    let start = Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(st) => return Ok(st),
+            None => {
+                if start.elapsed() >= limit {
+                    let _ = child.kill();
+                    *timed_out = true;
+                    return Ok(child.wait().unwrap_or_else(|_| std::process::ExitStatus::default()));
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

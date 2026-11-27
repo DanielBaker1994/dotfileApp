@@ -109,12 +109,34 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Main-thread stall watchdog (macOS). Every 500ms a background thread asks
-/// the main queue to bump a counter; if the main thread has not answered for
-/// 1s it logs "MAIN THREAD STALLED", runs `/usr/bin/sample` on ourselves into
-/// `logs/YYYY_MM_DD/stall-<unix>.txt` (shows exactly what the main thread is
-/// blocked on), and logs when it recovers and how long it was stuck. This is
-/// what a "menu-bar icon does nothing" report looks like from the inside.
+/// Active gate for the main-thread stall watchdog: when the app has no visible
+/// UI, the watchdog parks on this `Condvar` (0 wakeups/sec) so macOS App Nap
+/// and deep CPU idle work normally.
+#[cfg(target_os = "macos")]
+static WATCHDOG_GATE: OnceLock<(Mutex<bool>, std::sync::Condvar)> = OnceLock::new();
+
+/// Pause (`false`) or resume (`true`) the main-thread stall watchdog.
+#[cfg(target_os = "macos")]
+pub fn set_watchdog_active(active: bool) {
+    let (mu, cv) = WATCHDOG_GATE.get_or_init(|| (Mutex::new(true), std::sync::Condvar::new()));
+    let mut g = match mu.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if *g != active {
+        *g = active;
+        if active {
+            cv.notify_all();
+        }
+    }
+}
+
+/// Main-thread stall watchdog (macOS). While UI is active, every 500ms a
+/// background thread asks the main queue to bump a counter; if the main thread
+/// has not answered for 1s it logs "MAIN THREAD STALLED", runs `/usr/bin/sample`
+/// on ourselves into `logs/YYYY_MM_DD/stall-<unix>.txt` (shows exactly what the
+/// main thread is blocked on), and logs when it recovers and how long it was
+/// stuck. When all windows/panels are hidden, the thread parks completely.
 #[cfg(target_os = "macos")]
 pub fn start_main_thread_watchdog() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,9 +145,23 @@ pub fn start_main_thread_watchdog() {
     let acked = Arc::new(AtomicU64::new(0));
     let a2 = acked.clone();
     let _ = std::thread::Builder::new().name("main-watchdog".into()).spawn(move || {
+        let (mu, cv) = WATCHDOG_GATE.get_or_init(|| (Mutex::new(true), std::sync::Condvar::new()));
         let mut seq = 0u64;
         let mut stalled_since: Option<Instant> = None;
         loop {
+            {
+                let mut active = match mu.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                while !*active {
+                    stalled_since = None;
+                    active = match cv.wait(active) {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                }
+            }
             seq += 1;
             let sent = Instant::now();
             let ack = a2.clone();
