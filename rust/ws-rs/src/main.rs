@@ -165,7 +165,7 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         // (`show` presents the palette only — the shared window stays hidden,
         // mirroring Swift's `showOnLaunch`.)
         if let Some(m) = mode {
-            controller.launch_with_prep(&m, None);
+            controller.toggle_command(&m);
         } else {
             controller.open(app::host::DEFAULT_VIEW);
         }

@@ -3,7 +3,7 @@
 # (settings_hub/). `ws-settings --help`; Hyper+/ runs
 # `ws-settings open` (the picker in a floating Ghostty window).
 #
-# Needs python ≥ 3.11 (tomllib). AeroSpace / Ghostty start this with a bare
+# Needs python ≥ 3.11 (tomllib). Ghostty starts this with a bare
 # PATH where `python3` is the Command Line Tools' 3.9, so look further.
 set -u
 here="$(cd "$(dirname "$0")/.." && pwd)"     # NOT resolved: the home's link in app mode

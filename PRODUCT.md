@@ -15,7 +15,7 @@ desktop (AppKit, Human Interface Guidelines for macOS), never web or mobile.
 ## Users
 
 - **Primary: the owner.** A developer who works all day in a tiling-window
-  setup (AeroSpace, borders, Ghostty, herdr, nvim) and wants a command
+  setup (a tiling window manager, borders, Ghostty, herdr, nvim) and wants a command
   palette, screenshots, recent files and small text tools a hotkey away, with
   files, Jira, Confluence and an AI writing helper one step further. They
   choose what gets built, based on what they use every day.
@@ -36,8 +36,7 @@ the sockets. Write Bansho in user-facing text and kitchen-sink for code,
 paths and commands.
 
 Bansho puts the tools a keyboard-driven developer reaches for all day
-behind two hotkeys. Hyper+S opens a palette (tools and AeroSpace workspaces in
-one list); Hyper+X takes a screenshot. Both must feel instant and never move
+behind two hotkeys. Hyper+S opens a palette of tools; Hyper+X takes a screenshot. Both must feel instant and never move
 the user's focus. Success: the owner reaches for it before any separate app
 (Raycast-style launchers, Flameshot, Finder's Recents, a JSON formatter,
 browser Jira or Confluence) because it is faster, never loses focus or
@@ -53,13 +52,13 @@ In priority order:
    and focus behaviour here come before anything else.
 2. **Keyboard speed and reliability.** Esc, edit shortcuts and focus hand-back
    behave the same way in every panel and view.
-3. **Native to a tiling workflow.** Built around AeroSpace (workspace list
-   with app icons in the palette, workspace placement), never fighting its
-   layout.
+3. **At home in a tiling workflow, tied to none.** No window-manager
+   dependency (AeroSpace support was removed in Nov 2026): it never moves or
+   lays out windows, so any tiling manager can place it.
 4. **One shared window for the bigger tools.** Files, Jira, Confluence and AI
    are views of one window (Ctrl+Tab and header icons switch them; Ctrl+B W
    is the view switcher). It has no hotkey of its own: it is reached from the
-   menu-bar item, AeroSpace workspace 2, or a "reveal" from another tool.
+   menu-bar item, the palette, or a "reveal" from another tool.
 
 ## Operating Context
 
@@ -76,22 +75,20 @@ In priority order:
   (everyone else; `./ws dmg` notarizes unless `--no-notarize`). The hotkeys
   come with the app (the quick agent's login item), so a DMG install needs
   no hotkey daemon; "Hyper" itself is a Karabiner caps-lock mapping, or set
-  `quick-hotkey-*` to plain combos. AeroSpace is still used for the
-  palette's workspace rows and window placement.
+  `quick-hotkey-*` to plain combos.
 
 ## Capabilities and Constraints
 
 - **Quick agent (Hyper+S / Hyper+X):** the palette (`[app] palette`: Find
-  Recent Files, Create File, Text to Table, Pretty Print, Find Window PID,
-  then the AeroSpace workspaces); the screenshot overlay and editor (OCR Copy
+  Recent Files, Create File, Text to Table, Pretty Print, Find Window PID); the screenshot overlay and editor (OCR Copy
   Text, merge several pictures); Find Recent Files (a file browser with the
   same actions as the main Files view).
 - **Main app:** the shared window's views (Files with Recent / Arrived, Jira
   lists / detail / releases / config, Confluence search, AI), health checks,
   setup, pane-shot.
 - Palette panels and tool panels never activate the app or bring the shared
-  window with them. AeroSpace decides float or tile; the app never changes
-  the layout.
+  window with them. The window manager decides float or tile; the app
+  never changes the layout.
 - One feature, every surface: a feature reaches both the quick agent and the
   main app (and every entry into a tool) through one implementation in
   `ks-core`, never a copy (`rule.md` rule 7).

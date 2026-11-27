@@ -11,7 +11,7 @@ ws_step() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ws_die()  { printf '\033[31mws: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ws_python: print a python >= 3.11 (WS_PYTHON, brew, then PATH); exit 1 if none.
-# GUI/AeroSpace launchers start with a bare PATH where python3 is the CLT 3.9.
+# GUI launchers start with a bare PATH where python3 is the CLT 3.9.
 ws_python() {
     local c
     for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
@@ -402,7 +402,6 @@ ws_cmd_install()   { exec "$WS_ROOT/INSTALL.sh" "$@"; }
 ws_cmd_uninstall() { exec "$WS_ROOT/UNINSTALL.sh" "$@"; }
 ws_cmd_check()     { exec "$WS_ROOT/bin/preflight.sh" "$@"; }
 ws_cmd_links()     { exec "$WS_ROOT/symlinks.sh" "$@"; }
-ws_cmd_monitors()  { exec "$WS_ROOT/bin/aerospace-monitors.sh" "$@"; }
 ws_cmd_home()      { exec "$WS_ROOT/bin/setup-home.sh" "$@"; }
 ws_cmd_doctor()    { exec "$WS_ROOT/jira/jira-doctor.sh" "$@"; }
 

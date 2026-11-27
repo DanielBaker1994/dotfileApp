@@ -146,7 +146,7 @@ python3 Tests/run_flows.py --list | --feature files --repeat 3 | --replay $OUT/f
 
 # GUI cleanup (VERBATIM; run even after a failure):
 osascript -e 'tell application "System Events" to key up {command, control, option, shift}'
-bin/ks-mcp-sandbox.sh stop || true ; aerospace enable on 2>/dev/null || true
+bin/ks-mcp-sandbox.sh stop || true
 ```
 
 Disk truth: Files root `$SBX_HOME/files/` (with the `cfg-sandbox` fixture). Check with `ls`, `cat`,

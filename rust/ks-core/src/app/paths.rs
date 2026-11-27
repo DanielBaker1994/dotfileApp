@@ -12,8 +12,6 @@ pub const COMMANDS_CONF_NAME: &str = "commands.toml";
 pub const NOTES_SOCKET_NAME: &str = "ws-notes.sock";
 /// The quick agent's socket (`kitchen-sink quick`): Hyper+S / Hyper+X.
 pub const QUICK_SOCKET_NAME: &str = "ks-quick.sock";
-pub const FOCUS_FILE_NAME: &str = "kitchen-sink-focus";
-pub const FOCUS_BRIDGE_NAME: &str = "ws-aerospace-focus";
 pub const SWITCHER_WINDOW_NAME: &str = "kitchen-sink";
 
 /// `popupTmpDir()` — `$TMPDIR`, else `/tmp/`, always with a trailing slash.
@@ -78,8 +76,6 @@ pub struct Paths {
     pub user_dir: String,
     pub tmp_dir: String,
     pub notes_socket_name: String,
-    pub focus_file_name: String,
-    pub focus_bridge_name: String,
     pub switcher_window_name: String,
 }
 
@@ -136,8 +132,6 @@ impl Paths {
             user_dir,
             tmp_dir: popup_tmp_dir(tmpdir),
             notes_socket_name: NOTES_SOCKET_NAME.to_string(),
-            focus_file_name: FOCUS_FILE_NAME.to_string(),
-            focus_bridge_name: FOCUS_BRIDGE_NAME.to_string(),
             switcher_window_name: SWITCHER_WINDOW_NAME.to_string(),
         }
     }
@@ -179,10 +173,6 @@ impl Paths {
         self.tmp_dir.clone()
     }
 
-    pub fn focus_file_path(&self) -> String {
-        format!("{}{}", self.tmp_dir, self.focus_file_name)
-    }
-
     pub fn notes_socket_path(&self) -> String {
         format!("{}{}", self.tmp_dir, self.notes_socket_name)
     }
@@ -195,10 +185,6 @@ impl Paths {
 
     pub fn quick_lock_path(&self) -> String {
         format!("{}.lock", self.quick_socket_path())
-    }
-
-    pub fn focus_bridge_path(&self) -> String {
-        format!("{}{}", self.tmp_dir, self.focus_bridge_name)
     }
 
     /// The date-based log directory: `<user_dir>/logs/YYYY_MM_DD`.
@@ -396,12 +382,10 @@ mod tests {
         let bin = root.join("kitchen-sink");
         fs::write(&bin, "").unwrap();
         let p = Paths::resolve_at(bin.to_str().unwrap(), None, Some("/var/x"), Some("/Users/x"));
-        assert_eq!(p.focus_file_path(), "/var/x/kitchen-sink-focus");
         assert_eq!(p.notes_socket_path(), "/var/x/ws-notes.sock");
         assert_eq!(p.quick_socket_path(), "/var/x/ks-quick.sock");
         assert_eq!(p.quick_lock_path(), "/var/x/ks-quick.sock.lock");
         assert_ne!(p.quick_socket_path(), p.notes_socket_path());
-        assert_eq!(p.focus_bridge_path(), "/var/x/ws-aerospace-focus");
     }
 
     #[test]

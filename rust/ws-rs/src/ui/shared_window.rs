@@ -12,7 +12,6 @@
 //! turn later" behavior, `take` / `give`). Focus-loss observation, the header
 //! decoration wiring and sheet handling land in a later cut.
 
-use crate::app::hotkey::{eval_true_args, AeroCall, AeroIpc};
 use crate::app::registry::{nav, RectI, SlotMember, SlotView};
 use serde_json::{json, Value};
 use std::rc::Rc;
@@ -29,8 +28,6 @@ use std::cell::RefCell;
 // Nav ids + the Esc-close view set (mirrors `SharedWindow.nav*` / `escViews`).
 // ---------------------------------------------------------------------------
 
-/// `PopupChrome.workspaceBase` — workspace-switch header buttons start here.
-pub const WORKSPACE_BASE: i64 = 1000;
 
 // ---------------------------------------------------------------------------
 // Pure geometry (mirrors `SharedWindow.frame` / `screen(of:)` / `place`).

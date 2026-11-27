@@ -15,7 +15,6 @@ BIN="${WS_BIN:-$APP/Contents/MacOS/$APP_NAME}"
 # LaunchServices `open` calls below launch the same app the ping uses.
 case "$BIN" in *.app/Contents/MacOS/*) APP="${BIN%/Contents/MacOS/*}" ;; esac
 TMP="${TMPDIR:-/tmp}"
-FOCUS_FILE="$TMP/kitchen-sink-focus"
 MODE="${1:-}"
 
 if [ "$MODE" = "jira-poll" ]; then
@@ -55,7 +54,7 @@ build() {
 # running. On a running agent a press is one socket write. With no agent
 # answering, start it through LaunchServices (TCC) with the press as its first
 # action — no lock (the agent's own lock makes a second `open -n` hand its
-# action over and exit), no aerospace query. The main app is not involved.
+# action over and exit). The main app is not involved.
 if [ "${WS_BUILD_ONLY:-}" != "1" ]; then
     case "$MODE" in
     "")
@@ -99,12 +98,6 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
-LINE=$(aerospace list-windows --focused --format '%{window-id} %{app-pid} %{workspace}')
-read -r WID APID CUR <<<"$LINE"
-if [ -n "$WID" ]; then
-    echo "$WID $APID" >"$FOCUS_FILE"
-fi
-
 if [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ]; then
     build
 fi
@@ -125,20 +118,7 @@ case "$MODE" in quick)
 esac
 
 case "$MODE" in window|jira|files|confluence|ai)
-    LOG "== invoke MODE=$MODE focused=[$LINE] =="
-    # files, jira and output windows are all views of ONE shared
-    # window: move ours (not the Hyper+S palette, titled like the app) onto
-    # the CURRENT workspace — only the ones on another workspace, and no
-    # wait: aerospace answers once the move is done. (A warm daemon's
-    # hotkey path does this itself; see hotkeyPrep.)
-    if [ -n "$CUR" ]; then
-        aerospace list-windows --all --format '%{window-id}|%{app-name}|%{window-title}|%{workspace}' 2>/dev/null \
-            | awk -F'|' -v c="$CUR" '$2=="kitchen-sink" && $3!="kitchen-sink" && $4!=c {print $1}' \
-            | while read -r W; do
-                LOG "move $W -> $CUR"
-                aerospace move-node-to-workspace --window-id "$W" "$CUR" >/dev/null 2>&1
-            done
-    fi
+    LOG "== invoke MODE=$MODE =="
     # ping the running daemon; launch a command-first daemon if there is none
     if WS_PING_ONLY=1 "$BIN" "$MODE" >/dev/null 2>&1; then
         LOG "daemon ping: delivered"

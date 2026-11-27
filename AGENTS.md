@@ -8,7 +8,7 @@ deep-detail doc is in git history (`git log -- AGENT_CONTEXT.md`).
 ## What this is (overview)
 
 kitchen-sink is a single-instance macOS app — **Rust + AppKit via objc2**
-(`rust/`, cargo workspace) — that runs as a hotkey-driven daemon: AeroSpace / CLI
+(`rust/`, cargo workspace) — that runs as a hotkey-driven daemon: hotkeys / CLI
 launches talk to it over a Unix socket (`$TMPDIR/ws-notes.sock`, lock file beside
 it), and one **shared window** hosts the views — files, jira, confluence,
 AI — plus tool panels (screenshot, paths, prettyprint,
@@ -76,14 +76,13 @@ in Nov 2026 by owner decision.
 ./ws links [check|fix]      # ~/.config symlinks
 ./ws home app|repo|stack|status
 ./ws fake confluence|jira [start|stop|status]
-./ws monitors main|inverse|toggle|status
 ```
 
 **Build — `bin/build-app.sh`** (`./ws build` wraps it, ensures the signing
 identity, then relaunches via `bin/kitchen_sink.sh window`):
 `cargo build --release -p ws-rs -p ws-helpers` in `rust/` with
 `CARGO_TARGET_DIR=.build/rust-target`; output is the repo-root
-`kitchen-sink.app` (the path AeroSpace, `kitchen_sink.sh` and the TCC grants
+`kitchen-sink.app` (the path the login item, `kitchen_sink.sh` and the TCC grants
 use). `--dist` →
 `.build/dist/kitchen-sink.app` with resources per `install.conf` `RESOURCE_*`,
 a rewritten `commands.default.toml` and the AX helpers in
@@ -170,10 +169,8 @@ An agent can drive and verify the app over the socket — no computer control:
   `bin/ks-ocr <png>` turns a capture into JSON text lines (+ a blank-pane check) for non-vision agents.
 - **`bin/ks-mcp-sandbox.sh start --gui`** (verified 2026-10-12): launches the real windowed app,
   isolated like the headless sandbox, via `open -n -g --env … kitchen-sink.app --args show`
-  (LaunchServices, so the bundle's TCC grants apply). **It runs `aerospace enable off` for the
-  duration** (the `on-window-detected` rule moves/tiles the shared window and breaks capture and
-  geometry checks); `stop` runs `aerospace enable on` (marker file `.build/mcp-sandbox/aerospace-disabled`).
-  If a run dies uncleanly, run `stop` or `aerospace enable on`. Proven path: `do:open:files` returns
+  (LaunchServices, so the bundle's TCC grants apply). The app no longer depends on AeroSpace;
+  if you run it as your window manager it may still tile the sandbox window. Proven path: `do:open:files` returns
   real state (windows, `views.*.shown`), and `pane-shot` (raw socket or `ks_raw`) writes a real PNG
   of a live window (path under `/private/tmp`; Read it to see the pane).
   **The GUI sandbox pops UI onto the owner's screen:** `open -g` does not stop the app activating
@@ -226,7 +223,7 @@ gitignored.
     screens, capture, settings).
   - `app/` — `quick.rs` (the quick agent), `cli.rs` (client side), `socket.rs`
     (server, `Reply`, `DaemonLock`), `config.rs`, `paths.rs`, `pathfmt.rs`,
-    `logging.rs`, `hotkey.rs` (AeroSpace), `menu.rs`, `process_run.rs`,
+    `logging.rs`, `hotkey.rs` (main hotkey modes), `menu.rs`, `process_run.rs`,
     `python_helper.rs`, `registry.rs` (`SlotView`, `Registry`, `PaletteCommand`:
     plain data types the screenshot view registers `do:` hooks into),
     `sections.rs` (pure `commands.toml` scans), `find_window.rs`, and
@@ -302,10 +299,9 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
 `bin/` (build/test/install tooling; `lib.sh` for `ws_*` helpers;
 `preflight.sh`, `grant-permissions.sh`, `setup-home.sh`, `symlinks.sh` at
 root); `Tests/` (Python tests,
-`test_install.sh`); `config/` (launchd plist, `paths.ignore`; `CONFIG_DIRS` is empty — **aerospace.toml,
-bordersrc, `stack_border.sh` and `no_stray_workspaces.sh` live in `~/.dotfiles`**
-(`aerospace/`, `borders/`), linked by `~/.dotfiles/symlinks.sh`; the config calls
-kitchen-sink scripts through the guard `~/.dotfiles/aerospace/bin/ks`, plus `paths.ignore`); `rules/` (AI rule markdown),
+`test_install.sh`); `config/` (launchd plist, `paths.ignore`; `CONFIG_DIRS` is empty — the
+owner's window-manager setup (aerospace.toml, bordersrc, `monitors.sh`) lives in `~/.dotfiles` and
+kitchen-sink does not depend on it); `rules/` (AI rule markdown),
 `templates/`, `samples/`,
 `.claude/skills/` (repo skills incl.
 `ui-check`; `.agents/` is gitignored).
@@ -374,11 +370,10 @@ panel), `rail:<view>[:on|off|toggle]` (the sidebar rail — Ctrl+B B on the
 socket; files, jira, confluence, ai). Replies > 8 KB are fine
 (accepted sockets are blocking).
 
-**Hotkey fast path.** Messages in `hotkey::HOTKEY_MODES` (`window`, `jira`,
-`files`, `confluence`, `ai`) run `hotkey_prep`
-(AeroSpace IPC: focused window → focus file, focused workspace/screen, move
-stray windows) before the toggle. Tool-panel hotkeys (Hyper+X screenshot) are
-not in that list. `[screenshot] text-column-gap` (× line height; 0 = off) makes
+**No window-manager dependency.** AeroSpace was removed (Nov 2026, owner
+decision): no workspace rows, no header workspace strip, no focus bridge, no
+pre-toggle IPC. `hotkey::HOTKEY_MODES` (`window`, `jira`, `files`,
+`confluence`, `ai`) are just the main socket's view-toggle messages. `[screenshot] text-column-gap` (× line height; 0 = off) makes
 Copy Text join wide-gapped blocks on a row with a tab so tables keep columns.
 **Hyper+S / Hyper+X live in the quick agent** (below), not in the main
 daemon; the main daemon keeps `show` / `do:` / `screenshot` on its own socket
@@ -388,15 +383,12 @@ for in-window use and tests. The rules in this paragraph apply to both.
 panels that take the keyboard without activating the app; only a pick of
 "Kitchen Sink" or a view activates (via the view's `present`). Never add
 `activate_app` to a popup path: an active kitchen-sink with no window up lets
-macOS raise the shared window and AeroSpace jumps to its workspace. As a
+macOS raise the shared window (and a tiling window manager follows it). As a
 backstop the palette remembers the frontmost app (`PALETTE_RETURN`) and hands
 focus back on cancel / popup picks (`palette_hand_back`, `pick_keeps_app`).
-The Hyper+S palette is **one list**: the `[app] palette` commands
+The Hyper+S palette is **one list** of the `[app] palette` commands
 (`hyper_palette`; shipped: Find Recent Files, Create File, Text to Table, Pretty
-Print), then the AeroSpace workspaces with their app icons (cached, refreshed
-off-main). No side-by-side panes, no Tab pane switch. Ctrl+B W's `/` commands
-keep the full `in-palette` list. `bin/kitchen_sink.sh` toggles a running
-daemon before its lock / aerospace query, so the press costs one socket write.
+Print, Find Window). Ctrl+B W's `/` commands keep the full `in-palette` list.
 
 ### Quick agent (Hyper+S / Hyper+X)
 
@@ -450,13 +442,13 @@ main-queue dispatch; the only timer is a 30 ms poll while a tool panel is open.
   `resident`, starts a fresh one), `bin/quick-agent.sh uninstall` to stop for good. Logs go to the usual
   `logs/YYYY_MM_DD/daemon.log` (`quick: …`, `hotkey: toggle recv->shown Nms`).
 - **Picks**: agent-owned commands open locally (`quick::route_command`);
-  workspaces via AeroSpace IPC; everything else (views, "Bansho"/`window`,
+  everything else (views, "Bansho"/`window`,
   jira-config, health) is forwarded to `ws-notes.sock`
   (`quick::forward_to_main`; `jira-config` → `jira-dashboard`), cold-starting the main app through `bin/kitchen_sink.sh <mode>` when
   nothing answers. Screenshot / paths "reveal in Files" open the agent's own
   Find Recent Files panel at that
   folder with the files selected (`hooks::set_reveal_hook` → `show_files_at`),
-  never the main app (AeroSpace pins its window to workspace 2).
+  never the main app (slow to cold-start, and its window is big).
 - **Pictures → screenshot editor**: in Find Recent Files and the main Files
   view, right-click a selection whose files are *all* pictures (judged by
   magic bytes, `engines::image_files`, never the extension) offers "Open in
@@ -568,7 +560,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
 - **Add a keyboard shortcut:** in-window → `route_key_event` /
   `ui::popup::route_key` (respect rule 1) + a `[shortcuts]` row. Global
   Hyper+KEY → an `[app] quick-hotkey-<name>` key + a bind in
-  `quick::install_hotkeys` (the agent registers it; never an AeroSpace
+  `quick::install_hotkeys` (the agent registers it; never a window-manager
   binding), plus `commands.toml [shortcuts]` and docs.
 - **Add a view:** extend `SlotView` + nav ids, `content_for`, the registry
   (`app/registry.rs`), and the `[section]` + `enabled` gate.
@@ -596,8 +588,7 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
   memoize failures.
 - **Swift `canBecomeKey` is the ObjC selector `canBecomeKeyWindow`** (same for
   Main) — override the ObjC name in `define_class!`, or the panel never takes key.
-- **AeroSpace** (`on-window-detected` moves the shared window to workspace 2)
-  shapes every focus/show test; JankyBorders skips `NSPanel`s.
+- JankyBorders skips `NSPanel`s.
 - **Config writes can silently no-op** if the Python `config.setting` call
   times out under helper load. In repo mode you are editing this checkout's
   `commands.toml` — UI tests snapshot/restore it; don't leave it dirty.
@@ -609,9 +600,8 @@ with `bin/make-menubar-icon.py`, which also makes `app_icon.png`; shipped via `R
 
 ## Known gaps (full list: `BACKLOG.md`)
 
-- Hide-on-focus-loss: the setting is reported, but the Swift focus bridge
-  (`ws-aerospace-focus` watcher) is not ported.
-- AeroSpace re-show differs from Swift ("no jump back" in the focus suite).
+- Hide-on-focus-loss: the setting is reported; the AeroSpace focus bridge it
+  used is gone with AeroSpace.
 - Vim search highlight (`VimMatchOverlay`/`hlsearch`): rows are ported for the
   sidebar, files, Jira and Confluence lists; text (`NSTextView` temporary
   background) and web (`CSS.highlights`) targets are still unported.

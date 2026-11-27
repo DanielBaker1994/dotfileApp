@@ -11,8 +11,7 @@
 //! 30 ms poll that exists while a tool panel is open.
 //!
 //! Palette picks: the tools it owns (Find Recent Files, Create File, Text to
-//! Table, Pretty Print, Find Window) open locally, workspaces go through
-//! AeroSpace IPC, everything else is forwarded to the main daemon's socket
+//! Table, Pretty Print, Find Window) open locally, everything else is forwarded to the main daemon's socket
 //! (cold-starting it through `bin/kitchen_sink.sh` when nothing answers).
 //!
 //! The pure half (verbs, pick routing, palette rows, the socket handler) is
@@ -349,7 +348,7 @@ mod appkit {
     use crate::views::paths::{PathsEvent, PathsWindow, ReturnAction as PathsReturn};
     use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
     use crate::views::switcher::{
-        cached_workspaces, refresh_workspaces_in_background, PaletteAction, PalettePanel, SwitchFrame, WorkspaceRow,
+        PaletteAction, PalettePanel, SwitchFrame,
     };
     use crate::views::tools::{ToolKind, ToolPanel};
     use objc2::MainThreadMarker;
@@ -599,10 +598,7 @@ mod appkit {
             let Some(mtm) = MainThreadMarker::new() else { return };
             let text = self.refresh_config();
             let mut panel = self.palette.borrow_mut().take().unwrap_or_else(PalettePanel::new);
-            // `aerospace` can stall for seconds: paint the cached rows and
-            // refresh off-main.
-            panel.set_rows(palette_rows(&text), cached_workspaces());
-            refresh_workspaces_in_background(|fresh| defer(move |ui| ui.refresh_palette_workspaces(fresh)));
+            panel.set_rows(palette_rows(&text));
             panel.set_callbacks(
                 Box::new(|action: PaletteAction| {
                     // Runs before the click path orders the palette out.
@@ -640,14 +636,6 @@ mod appkit {
             self.publish_state();
         }
 
-        fn refresh_palette_workspaces(&self, rows: Vec<WorkspaceRow>) {
-            if let Ok(mut p) = self.palette.try_borrow_mut() {
-                if let Some(panel) = p.as_mut().filter(|x| x.is_visible()) {
-                    panel.refresh_workspaces(rows);
-                }
-            }
-        }
-
         /// Re-activate the app Hyper+S was pressed over, *before* the palette
         /// is ordered out (else macOS activates us and raises something).
         fn hand_back(&self) -> bool {
@@ -662,10 +650,8 @@ mod appkit {
         }
 
         fn pick_focus(&self, action: &PaletteAction) {
-            let keeps = match action {
-                PaletteAction::Command(id) => pick_keeps_app(id),
-                PaletteAction::Workspace(_) => false,
-            };
+            let PaletteAction::Command(id) = action;
+            let keeps = pick_keeps_app(id);
             if keeps {
                 if let Some(pid) = self.palette_return.take() {
                     self.pick_return.set(Some((pid, Instant::now())));
@@ -697,7 +683,6 @@ mod appkit {
 
         fn run_pick(&self, action: PaletteAction) {
             match action {
-                PaletteAction::Workspace(id) => switch_workspace(&id),
                 PaletteAction::Command(id) => match route_command(&id) {
                     PickRoute::Paths => {
                         self.set_back_to("files");
@@ -1621,15 +1606,6 @@ mod appkit {
             if keep {
                 schedule_poll();
             }
-        });
-    }
-
-    /// `switchWorkspace(cell:)` — `aerospace workspace <id>` off-main.
-    fn switch_workspace(id: &str) {
-        let id = id.to_string();
-        std::thread::spawn(move || {
-            let ipc = crate::app::hotkey::AeroIpc::discover();
-            let _ = crate::app::hotkey::AeroCall::call(&ipc, &["workspace".to_string(), id]);
         });
     }
 

@@ -22,7 +22,6 @@ ws — kitchen-sink entry point
   ws check [--json]                 preflight this Mac
   ws permissions grant|fix          macOS privacy permissions
   ws links [check|fix]              validate / repair config symlinks
-  ws monitors main|inverse|toggle|status
                                     which screen owns which workspaces
   ws fake confluence|jira [start|stop|status]
                                     fake Confluence / Jira fixtures
@@ -47,7 +46,6 @@ ws_menu() {
         printf '   7) check         preflight this Mac\n'
         printf '   8) permissions   grant / fix macOS permissions\n'
         printf '   9) links         validate / repair config symlinks\n'
-        printf '  10) monitors      which screen owns which workspaces\n'
         printf '  11) fake          fake Confluence / Jira fixtures\n'
         printf '  12) home          the ~/.config/kitchen-sink home\n'
         printf '  13) uninstall     remove everything\n'
@@ -64,7 +62,6 @@ ws_menu() {
             7)  ws_cmd_check ;;
             8)  read -r -p 'grant or fix? [grant] ' a; ws_cmd_permissions "${a:-grant}" ;;
             9)  ws_cmd_links ;;
-            10) read -r -p 'main|inverse|toggle|status [status] ' a; ws_cmd_monitors "${a:-status}" ;;
             11) read -r -p 'confluence|jira [confluence] ' a; ws_cmd_fake "${a:-confluence}" ;;
             12) read -r -p 'app|repo|stack|status [status] ' a; ws_cmd_home "${a:-status}" ;;
             13) ws_cmd_uninstall ;;
@@ -91,7 +88,6 @@ case "$cmd" in
     check)          ws_cmd_check "$@" ;;
     permissions)    ws_cmd_permissions "$@" ;;
     links)          ws_cmd_links "$@" ;;
-    monitors)       ws_cmd_monitors "$@" ;;
     fake)           ws_cmd_fake "$@" ;;
     home)           ws_cmd_home "$@" ;;
     *)              ws_die "unknown command '$cmd' (try: ws help)" ;;

@@ -166,7 +166,7 @@ if command -v brew >/dev/null 2>&1; then
     CASKS=" $(brew list --cask -1 2>/dev/null | tr '\n' ' ') "
 else
     add brew stack warn 0 "Homebrew" "not installed" \
-        "Needed for the hotkeys and window borders (AeroSpace, borders). Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
+        "Needed for the window borders (borders) and the build tools. Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
     FORMULAE=" "; CASKS=" "
 fi
 for f in $BREW_FORMULAE; do

@@ -173,7 +173,6 @@ cmd_stack() {
             brew services start "$svc" || { printf 'setup-home: brew services start %s failed\n' "$svc" >&2; rc=1; }
         done
     fi
-    command -v aerospace >/dev/null 2>&1 && aerospace reload-config
     [ "$rc" = 0 ] || return "$rc"
     say "result=ok"
 }

@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 
 use crate::app::config::{self, AppSettings, HeaderStyle};
-use crate::app::hotkey::{self, HotkeyPrep};
+use crate::app::hotkey;
 use crate::app::paths::Paths;
 #[allow(unused_imports)]
 pub(crate) use ks_core::app::find_window::{run_find_window, ToastFn};
@@ -265,8 +265,6 @@ struct ControllerInner {
     ever_presented: bool,
     visible: bool,
     palette_visible: bool,
-    target_screen: Option<i32>,
-    aerospace_cache_cleared: bool,
     members: HashMap<SlotView, MemberState>,
     panes: Vec<PaneSpec>,
     pane_nav: PaneNav,
@@ -396,8 +394,6 @@ impl ControllerInner {
         self.current = None;
         self.return_wid = None;
         self.return_pid = None;
-        self.target_screen = None;
-        self.aerospace_cache_cleared = false;
         self.logs.push(format!("shared window: hidden — {reason}"));
         self.ui_push(UiCommand::Hide);
     }
@@ -712,8 +708,6 @@ impl SwitcherController {
             ever_presented: false,
             visible: false,
             palette_visible: false,
-            target_screen: None,
-            aerospace_cache_cleared: false,
             members: HashMap::new(),
             panes: Vec::new(),
             pane_nav: PaneNav::new(),
@@ -1404,35 +1398,11 @@ impl SwitcherController {
             }
             nav::HOME => inner.home(),
             nav::BACK => inner.back(false),
-            id if id >= crate::ui::shared_window::WORKSPACE_BASE => {
-                inner
-                    .logs
-                    .push(format!("switchWorkspace: cell {} not modeled yet", id));
-            }
             _ => {}
         }
     }
 
     // -- hotkey prep / reload ----------------------------------------------
-
-    /// `applyHotkeyPrep(_:)`.
-    pub fn apply_hotkey_prep(&self, prep: &HotkeyPrep) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.target_screen = prep.screen;
-        inner.aerospace_cache_cleared = prep.cache_cleared;
-    }
-
-    /// `SwitcherController.hotkeyPrep()` against the discovered AeroSpace CLI.
-    pub fn hotkey_prep(&self) -> HotkeyPrep {
-        let paths = Paths::from_env();
-        let settings = self.inner.lock().unwrap().settings.clone();
-        let ipc = hotkey::AeroIpc::discover();
-        hotkey::hotkey_prep(
-            &ipc,
-            &paths.focus_file_path(),
-            &settings.switcher_window_name,
-        )
-    }
 
     /// `reloadConfig()`: re-read `[app]`, the esc-close map and the section
     /// count; return the `reload` reply (`ok` / `commands` / `usingBackup` /
@@ -1635,23 +1605,6 @@ impl SwitcherController {
         }
     }
 
-    /// `launch(message)`: hotkey modes run `hotkeyPrep` first, then
-    /// `toggleCommand` (mirrors `startCommandServer`'s fall-through branch).
-    pub fn launch_with_prep(&self, message: &str, prep: Option<HotkeyPrep>) {
-        if let Some(p) = prep {
-            self.apply_hotkey_prep(&p);
-        }
-        self.toggle_command(message);
-    }
-
-    /// `switchWorkspace(cell:)` — `aerospace workspace <key>` off-main.
-    pub fn switch_workspace(&self, id: &str) {
-        let id = id.to_string();
-        std::thread::spawn(move || {
-            let ipc = hotkey::AeroIpc::discover();
-            let _ = hotkey::AeroCall::call(&ipc, &["workspace".to_string(), id]);
-        });
-    }
 
     /// Swift `toggleCommand`'s tool-panel half: hide when the panel is shown
     /// and key, else raise it (`openTool`).
@@ -2723,79 +2676,6 @@ impl FocusWatch {
     }
 }
 
-/// `focusBridgeChanged(_:)`'s decision: the bridge file names our shown
-/// shared window (`raw` = AeroSpace's focused window id), it was written
-/// within the last second, and the user did not just click another app.
-/// One AeroSpace workspace for the header strip (`WorkspaceInfo`).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct StripWorkspace {
-    pub id: String,
-    /// `(app name, bundle id, window title)` per window.
-    pub apps: Vec<(String, String, String)>,
-    pub focused: bool,
-}
-
-/// `gatherWorkspaces()` (with bundle ids) filtered like `refreshWorkspaceStrip`
-/// (only workspaces with windows, plus the focused one), numeric ids first.
-pub(crate) fn gather_strip_with(call: &dyn Fn(&[String]) -> Option<String>) -> Vec<StripWorkspace> {
-    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let order: Vec<String> = call(&args(&["list-workspaces", "--all"]))
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if order.is_empty() {
-        return Vec::new();
-    }
-    let focused = call(&args(&["list-workspaces", "--focused"]))
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let mut rows: Vec<StripWorkspace> = order
-        .iter()
-        .map(|id| StripWorkspace { id: id.clone(), apps: Vec::new(), focused: *id == focused })
-        .collect();
-    let wins = call(&args(&[
-        "list-windows",
-        "--all",
-        "--format",
-        "%{app-name}|%{app-bundle-id}|%{window-title}|%{workspace}",
-    ]))
-    .unwrap_or_default();
-    for line in wins.lines() {
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let ws = parts[parts.len() - 1];
-        let title = parts[2..parts.len() - 1].join("|");
-        if let Some(row) = rows.iter_mut().find(|w| w.id == ws) {
-            row.apps.push((parts[0].to_string(), parts[1].to_string(), title));
-        }
-    }
-    rows.sort_by(|a, b| match (a.id.parse::<i64>(), b.id.parse::<i64>()) {
-        (Ok(x), Ok(y)) => x.cmp(&y),
-        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
-        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
-        (Err(_), Err(_)) => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
-    });
-    rows.retain(|w| !w.apps.is_empty() || w.focused);
-    rows
-}
-
-pub(crate) fn focus_bridge_should_activate(
-    raw: &str,
-    our_wid: i64,
-    age: f64,
-    clicked_away: bool,
-) -> bool {
-    let Ok(id) = raw.trim().parse::<i64>() else {
-        return false;
-    };
-    our_wid != 0 && id == our_wid && !clicked_away && age < 1.0
-}
-
 /// Live AppKit focus, read on main for each `state` (see `daemon_ui::live_focus`).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LiveFocus {
@@ -2930,14 +2810,7 @@ impl CommandHandler for SwitcherController {
             }
             return;
         }
-        let prep = if self.inner.lock().unwrap().settings.shared_window
-            && hotkey::is_hotkey_mode(message)
-        {
-            Some(self.hotkey_prep())
-        } else {
-            None
-        };
-        self.launch_with_prep(message, prep);
+        self.toggle_command(message);
     }
 }
 
@@ -2983,7 +2856,7 @@ mod daemon_ui {
     use crate::ui::theme::{set_current_header_style, HeaderStyle as ThemeHeaderStyle, PopupColors};
     use crate::views::paths::{PathsWindow, ReturnAction as PathsReturn};
     use crate::views::switcher::{
-        gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
+        PaletteAction, PalettePanel, SwitchFrame, SwitchView,
         ViewSwitcherPanel,
     };
     use crate::views::tools::{ToolKind, ToolPanel};
@@ -3029,13 +2902,11 @@ mod daemon_ui {
     /// Picks that are *meant* to bring kitchen-sink forward: "Bansho"
     /// and the shared window's views. Every other pick — every popup (tool
     /// panels, terminal, paths, screenshot, the finders), all
-    /// non-activating and taking the keyboard without activating us — and
-    /// workspaces leave the user's app focused.
+    /// non-activating and taking the keyboard without activating us —
+    /// leave the user's app focused.
     fn pick_keeps_app(action: &PaletteAction) -> bool {
-        match action {
-            PaletteAction::Command(name) => ks_core::app::quick::pick_keeps_app(name),
-            PaletteAction::Workspace(_) => false,
-        }
+        let PaletteAction::Command(name) = action;
+        ks_core::app::quick::pick_keeps_app(name)
     }
 
     /// Re-activate the app Hyper+S was pressed over, *before* the palette is
@@ -3518,16 +3389,8 @@ mod daemon_ui {
     }
 
     pub struct DaemonUiIvars {
-        /// Header workspace strip: the background gather's latest result,
-        /// whether one is running, when it last ran, the drawn signature and
-        /// the per-app icon cache (`refreshWorkspaceStrip`, `iconCache`).
-        strip_result: Arc<std::sync::Mutex<Option<Vec<super::StripWorkspace>>>>,
-        strip_busy: Arc<std::sync::atomic::AtomicBool>,
-        strip_last: Cell<f64>,
         files_recent_at: Cell<f64>,
         jira_refresh_at: Cell<f64>,
-        strip_sig: RefCell<String>,
-        icon_cache: RefCell<HashMap<String, Retained<objc2_app_kit::NSImage>>>,
         controller: Arc<SwitcherController>,
         queue: UiQueue,
         /// The `do:` main-hop jobs (`SwitcherController::run_on_main`).
@@ -3551,13 +3414,8 @@ mod daemon_ui {
         last_files_check: Cell<f64>,
         files_dir_stamp: RefCell<Option<(String, std::time::SystemTime)>>,
         /// The polled didResignKey/didBecomeKey observers
-        /// (`SharedWindow.checkFocusLoss`, `startFocusBridge`).
+        /// (`SharedWindow.checkFocusLoss`).
         focus_watch: RefCell<super::FocusWatch>,
-        /// `$TMPDIR/<[app] focus-bridge>` — AeroSpace's `on-focus-changed`
-        /// writes the focused window id here (`watchFocusBridge`).
-        bridge_path: String,
-        /// The bridge file's last seen mtime (`bridgeMtime`).
-        bridge_mtime: Cell<Option<std::time::SystemTime>>,
         /// `lastOtherAppClick` (epoch seconds), fed by a global
         /// left-mouse-down monitor.
         last_other_click: Rc<Cell<f64>>,
@@ -3632,15 +3490,6 @@ mod daemon_ui {
             h::set_popup_file_actions_hook(|path, sheet| popup_file_menu_actions(path, sheet));
             h::set_popup_rename_hook(|path, name| popup_rename_commit(path, name));
         }
-        let bridge_path = format!(
-            "{}{}",
-            crate::app::paths::Paths::from_env().popup_tmp_dir(),
-            controller.settings().focus_bridge_name
-        );
-        // `watchFocusBridge` creates the file so AeroSpace's writes land.
-        if !std::path::Path::new(&bridge_path).exists() {
-            let _ = std::fs::write(&bridge_path, "");
-        }
         // Held for the delayed `prewarm()` (the `controller` itself moves into
         // the UI ivars below).
         let shot_prewarm = controller.screenshot_controller();
@@ -3658,13 +3507,8 @@ mod daemon_ui {
             controller.install_waker(Arc::new(move || w.wake()));
         }
         let this = DaemonUi::alloc(mtm).set_ivars(DaemonUiIvars {
-            strip_result: Arc::new(std::sync::Mutex::new(None)),
-            strip_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            strip_last: Cell::new(0.0),
             files_recent_at: Cell::new(0.0),
             jira_refresh_at: Cell::new(0.0),
-            strip_sig: RefCell::new(String::new()),
-            icon_cache: RefCell::new(HashMap::new()),
             controller,
             queue,
             main_queue,
@@ -3679,8 +3523,6 @@ mod daemon_ui {
             last_files_check: Cell::new(0.0),
             files_dir_stamp: RefCell::new(None),
             focus_watch: RefCell::new(super::FocusWatch::default()),
-            bridge_path,
-            bridge_mtime: Cell::new(None),
             last_other_click: Rc::new(Cell::new(0.0)),
             click_monitor: RefCell::new(None),
             live_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
@@ -4016,7 +3858,6 @@ mod daemon_ui {
             self.poll_files_dir();
             self.watch_focus();
             self.live_pane_refresh();
-            self.refresh_workspace_strip();
             self.refresh_files_recent();
             self.refresh_jira();
             self.poll_conf_hits();
@@ -4096,113 +3937,8 @@ mod daemon_ui {
 
         /// The polled focus observers: `SharedWindow`'s didResignKey →
         /// `focusLossDelay` → `checkFocusLoss` (hide with `[app]
-        /// hide-on-focus-loss`, refocus after a swap steal), the "became key
-        /// while inactive" self-activation, and `watchFocusBridge` (AeroSpace
-        /// focused our window → activate).
-        /// `refreshWorkspaceStrip()`: every 6 s while the window is up, gather
-        /// AeroSpace off-main, then build the header cells (≤3 app icons, "+N",
-        /// focused) on main and redraw only when the signature changed.
-        fn refresh_workspace_strip(&self) {
-            use std::sync::atomic::Ordering;
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            if let Some(fresh) = self.ivars().strip_result.lock().unwrap().take() {
-                let sig = fresh
-                    .iter()
-                    .map(|w| format!("{}|{}|{}", w.id, w.apps.len(), w.focused))
-                    .collect::<Vec<_>>()
-                    .join(";");
-                if *self.ivars().strip_sig.borrow() != sig {
-                    *self.ivars().strip_sig.borrow_mut() = sig;
-                    let cells: Vec<crate::ui::chrome::WorkspaceCell> = fresh
-                        .iter()
-                        .map(|w| crate::ui::chrome::WorkspaceCell {
-                            key: w.id.clone(),
-                            icons: w.apps.iter().take(3).map(|a| self.app_icon(a)).collect(),
-                            extra: (w.apps.len() > 3).then(|| format!("+{}", w.apps.len() - 3)),
-                            unread: String::new(),
-                            focused: w.focused,
-                        })
-                        .collect();
-                    crate::ui::chrome::set_workspace_cells(mtm, cells);
-                }
-            }
-            let visible = self
-                .ivars()
-                .state
-                .borrow()
-                .as_ref()
-                .is_some_and(|st| st.window.isVisible());
-            let now = now_secs();
-            if !visible || now - self.ivars().strip_last.get() < 6.0 {
-                return;
-            }
-            if self.ivars().strip_busy.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            self.ivars().strip_last.set(now);
-            let out = self.ivars().strip_result.clone();
-            let busy = self.ivars().strip_busy.clone();
-            std::thread::spawn(move || {
-                let ipc = crate::app::hotkey::AeroIpc::discover();
-                let rows = super::gather_strip_with(&|args| {
-                    crate::app::hotkey::AeroCall::call(&ipc, args)
-                });
-                if !rows.is_empty() {
-                    *out.lock().unwrap() = Some(rows);
-                }
-                busy.store(false, Ordering::SeqCst);
-            });
-        }
-
-        /// `iconForApp(_:)` (cached): the bundle's icon, else `/Applications/<name>.app`.
-        fn app_icon(&self, app: &(String, String, String)) -> Retained<objc2_app_kit::NSImage> {
-            use objc2_app_kit::NSWorkspace;
-            let key = if app.1.is_empty() { app.0.clone() } else { app.1.clone() };
-            if let Some(img) = self.ivars().icon_cache.borrow().get(&key) {
-                return img.clone();
-            }
-            // Our own app: the shipped icon, not a stale `kitchen-sink.app` copy
-            // (old sink icon) that LaunchServices resolves the bundle id to.
-            if app.1 == "dev.danielbaker.kitchen-sink" || matches!(app.0.to_lowercase().as_str(), "bansho" | "kitchen-sink") {
-                let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
-                if let Some(img) = crate::ui::style::image_file(&format!("{assets}/app_icon.png")) {
-                    self.ivars().icon_cache.borrow_mut().insert(key, img.clone());
-                    return img;
-                }
-            }
-            let ws = NSWorkspace::sharedWorkspace();
-            let mut path: Option<String> = None;
-            if !app.1.is_empty() {
-                if let Some(url) =
-                    ws.URLForApplicationWithBundleIdentifier(&NSString::from_str(&app.1))
-                {
-                    path = url.path().map(|p| p.to_string());
-                }
-            }
-            if path.is_none() {
-                for dir in ["/Applications", "/System/Applications", "/Applications/Utilities"] {
-                    let p = format!("{dir}/{}.app", app.0);
-                    if std::path::Path::new(&p).exists() {
-                        path = Some(p);
-                        break;
-                    }
-                }
-            }
-            let img = match path {
-                Some(p) => ws.iconForFile(&NSString::from_str(&p)),
-                None => crate::ui::style::glyph_icon(
-                    "app.dashed",
-                    "?",
-                    crate::ui::theme::PopupColors::default().dim,
-                    32.0,
-                ),
-            };
-            self.ivars().icon_cache.borrow_mut().insert(key, img.clone());
-            img
-        }
-
+        /// hide-on-focus-loss`, refocus after a swap steal) and the "became
+        /// key while inactive" self-activation.
         fn watch_focus(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -4210,7 +3946,7 @@ mod daemon_ui {
             let now = now_secs();
             let clicked_away = now - self.ivars().last_other_click.get() < 1.0;
             let app = NSApplication::sharedApplication(mtm);
-            let (sample, wid) = {
+            let sample = {
                 let state = self.ivars().state.borrow();
                 let Some(st) = state.as_ref() else {
                     return;
@@ -4231,7 +3967,7 @@ mod daemon_ui {
                     app_active: app.isActive(),
                     clicked_away,
                 };
-                (sample, wid)
+                sample
             };
             let controller = self.ivars().controller.clone();
             let (hide_on_loss, delay) = controller.focus_loss_settings();
@@ -4257,36 +3993,9 @@ mod daemon_ui {
                     controller.log(if action == super::FocusAction::Refocus {
                         "shared window: focus stolen right after a view swap — refocused"
                     } else {
-                        "our window became key while inactive (aerospace focus) — self-activated"
+                        "our window became key while inactive — self-activated"
                     });
                 }
-            }
-            if !sample.shown {
-                return;
-            }
-            // `focusBridgeChanged`: act once per new mtime.
-            let Ok(meta) = std::fs::metadata(&self.ivars().bridge_path) else {
-                return;
-            };
-            let Ok(mtime) = meta.modified() else {
-                return;
-            };
-            if self.ivars().bridge_mtime.get() == Some(mtime) {
-                return;
-            }
-            self.ivars().bridge_mtime.set(Some(mtime));
-            let age = std::time::SystemTime::now()
-                .duration_since(mtime)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let raw = std::fs::read_to_string(&self.ivars().bridge_path).unwrap_or_default();
-            if super::focus_bridge_should_activate(&raw, wid, age, clicked_away) {
-                activate_app(mtm);
-                if let Some(st) = self.ivars().state.borrow().as_ref() {
-                    st.window.orderFrontRegardless();
-                    st.window.makeKeyAndOrderFront(None);
-                }
-                controller.log(&format!("aerospace focused our window {wid} — self-activated"));
             }
         }
 
@@ -4342,16 +4051,6 @@ mod daemon_ui {
             }
         }
 
-        /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
-        fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
-            let Ok(mut panels) = self.ivars().panels.try_borrow_mut() else { return };
-            if let Some(p) = panels.palette.as_mut() {
-                if p.is_visible() {
-                    p.refresh_workspaces(workspaces);
-                }
-            }
-        }
-
         /// `showViewSwitcher()` — show the Hyper+S palette.
         fn show_palette(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -4365,12 +4064,7 @@ mod daemon_ui {
                 .palette
                 .take()
                 .unwrap_or_else(PalettePanel::new);
-            // The `aerospace` CLI can stall for seconds, so never wait on it
-            // here: paint with the last known rows and refresh off-main.
-            panel.set_rows(controller.hyper_palette_commands(), crate::views::switcher::cached_workspaces());
-            crate::views::switcher::refresh_workspaces_in_background(|fresh| {
-                on_ui(move |ui| ui.refresh_palette_workspaces(fresh))
-            });
+            panel.set_rows(controller.hyper_palette_commands());
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -4386,10 +4080,8 @@ mod daemon_ui {
                             ui.hide_palette_panel();
                             ui.end_palette(false);
                         });
-                        match action {
-                            PaletteAction::Command(name) => c.run_palette_command(&name),
-                            PaletteAction::Workspace(id) => c.switch_workspace(&id),
-                        }
+                        let PaletteAction::Command(name) = action;
+                        c.run_palette_command(&name);
                         c.set_palette_visible(false);
                     }
                 }),
@@ -5436,14 +5128,8 @@ return Some(true)
                         p.hide_panel();
                     }
                     self.end_palette(false);
-                    match action {
-                        PaletteAction::Command(name) => {
-                            self.ivars().controller.run_palette_command(&name)
-                        }
-                        PaletteAction::Workspace(id) => {
-                            self.ivars().controller.switch_workspace(&id)
-                        }
-                    }
+                    let PaletteAction::Command(name) = action;
+                    self.ivars().controller.run_palette_command(&name);
                     self.ivars().controller.set_palette_visible(false);
                     true
                 }
@@ -10132,12 +9818,6 @@ return Some(true)
                             ch.set_icon_menu_open(false);
                         }
                     }
-                    id if id >= crate::ui::chrome::WORKSPACE_BASE => {
-                        let cell = (id - crate::ui::chrome::WORKSPACE_BASE) as usize;
-                        if let Some(key) = crate::ui::chrome::workspace_cell_key(cell) {
-                            controller.switch_workspace(&key);
-                        }
-                    }
                     id => controller.nav_clicked(id as i64),
                 }));
             }
@@ -11078,20 +10758,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_hotkey_prep_sets_target_screen() {
-        let c = controller();
-        let prep = HotkeyPrep {
-            log: String::new(),
-            workspace: "2".into(),
-            screen: Some(1),
-            cache_cleared: true,
-        };
-        c.apply_hotkey_prep(&prep);
-        c.launch_with_prep("ai", Some(prep));
-        assert_eq!(c.current(), Some(SlotView::Ai));
-    }
-
-    #[test]
     fn controller_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<SwitcherController>();
@@ -11199,16 +10865,6 @@ mod tests {
         w.note_present(0.9);
         s.clicked_away = false;
         assert_eq!(w.tick(s, true, 0.3), FocusAction::None);
-    }
-
-    #[test]
-    fn focus_bridge_decision() {
-        assert!(focus_bridge_should_activate("4512\n", 4512, 0.2, false));
-        assert!(!focus_bridge_should_activate("4512", 4513, 0.2, false));
-        assert!(!focus_bridge_should_activate("4512", 4512, 1.5, false));
-        assert!(!focus_bridge_should_activate("4512", 4512, 0.2, true));
-        assert!(!focus_bridge_should_activate("", 0, 0.0, false));
-        assert!(!focus_bridge_should_activate("x", 4512, 0.0, false));
     }
 
     #[test]

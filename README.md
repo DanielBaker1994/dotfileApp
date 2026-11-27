@@ -1,6 +1,6 @@
-# kitchen-sink
+# Bansho (kitchen-sink)
 
-A macOS app: AeroSpace switcher popup + files / Jira / Confluence / AI views,
+A macOS app: a Hyper+S command palette and Hyper+X screenshots, plus files / Jira / Confluence / AI views,
 with a borders focused-window outline. Native AppKit app written in Rust
 (objc2; `rust/`), no runtime dependencies beyond what the installer brings.
 
@@ -30,7 +30,7 @@ Open `kitchen-sink-<version>.dmg`, drag the app to **Applications**,
 open it. The first run shows **Setup & Health Check**: what this Mac has and
 what is missing (no Apple on-device model → the AI view is off, everything
 else works). Files, Jira, Confluence and AI work straight away; the
-Hyper hotkeys and window borders (AeroSpace, borders — Homebrew) are one optional button in that window. Your settings live in
+Window borders (borders — Homebrew) are one optional button in that window; the Hyper hotkeys come with the app. Your settings live in
 `~/.config/kitchen-sink` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
 
@@ -75,11 +75,11 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 | Thing | Where |
 | --- | --- |
-| Switcher popup | Hyper+S — workspaces (app icons per workspace), a command grid, and a status row (unread · CPU · RAM · battery · clock); type to narrow all of it |
+| Command palette | Hyper+S — the tools (Find Recent Files, Create File, Text to Table, Pretty Print, Find Window); type to narrow |
 | Every shortcut + setting (search, edit, rebind, clash report) | Hyper+/ — `bin/ws-settings` (`--help`: keys, settings, set, undo, bind, conflicts, export md, doctor) |
 | Jira / Health windows | menu-bar **wrench** icon |
 | Window borders | borders (brew service) |
-| Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.toml [jira] columns` |
+| Jira window | the palette or the menu bar — spreadsheet table, columns from `commands.toml [jira] columns` |
 | AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook/Webex); right pane = Diff / Markdown / Outlook / Webex preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
 | Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window**; the Jira view's **Tickets \| Config** pill → **Config** shows the poll jobs, schedules, Force Poll and Setup… |
 | Jira poll agent | launchd `com.jira.poll` (60s tick; `jira_poll.py` runs only due endpoints) |

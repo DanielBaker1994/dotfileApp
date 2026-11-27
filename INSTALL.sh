@@ -89,7 +89,7 @@ printf "${CYAN}
 │            kitchen-sink — one-command install          │
 └──────────────────────────────────────────────────────────────┘
 ${RESET}"
-printf "${DIM}This script installs a macOS app that gives you a file browser, a Jira\nissue browser, Confluence / AI views, and a switcher popup —\nplus AeroSpace and window borders.${RESET}\n"
+printf "${DIM}This script installs a macOS app that gives you a file browser, a Jira\nissue browser, Confluence / AI views, and a switcher popup —\nplus window borders.${RESET}\n"
 
 STEP="checking your Mac"
 step "0/6 checking your Mac"
@@ -195,11 +195,9 @@ printf "\n${GREEN}════════════════════�
 printf "${GREEN}  INSTALL COMPLETE${RESET}\n"
 printf "${GREEN}══════════════════════════════════════════════════════════════${RESET}\n"
 printf "${DIM}One-time manual steps (cannot be automated by macOS):${RESET}\n"
-printf "  1. Hyper key: the hotkeys are Hyper+S / N / T, Hyper = ctrl+alt+cmd+shift\n"
-printf "     (map a key to it with the tool you already use).\n"
-printf "  2. AeroSpace: allow Accessibility access when prompted, then run:\n"
-printf "       aerospace reload-config\n"
-printf "  3. Jira (optional): menu bar wrench → Enable Jira (asks for site +\n"
+printf "  1. Hyper key: the hotkeys are Hyper+S / X / /, Hyper = ctrl+alt+cmd+shift\n"
+printf "     (map a key to it with the tool you already use, or set [app] quick-hotkey-*).\n"
+printf "  2. Jira (optional): menu bar wrench → Enable Jira (asks for site +\n"
 printf "     token), then the Jira window's Tickets|Config pill → Config. Poll jobs = the \"endpoints\"\n"
 printf "     list in ~/.config/kitchen-sink-local/jira/config.json (one job → one JSON file → one\n"
 printf "     Jira window tab, written to ~/.cache/kitchen-sink/jira_json/).\n"

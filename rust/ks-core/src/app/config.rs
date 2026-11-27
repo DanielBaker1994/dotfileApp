@@ -195,8 +195,6 @@ pub struct AppSettings {
     pub app_icon_name: String,
     pub files_icon_name: String,
     pub notes_socket_name: String,
-    pub focus_file_name: String,
-    pub focus_bridge_name: String,
     pub switcher_window_name: String,
     pub hide_on_focus_loss: bool,
     pub focus_loss_delay: f64,
@@ -237,8 +235,6 @@ impl Default for AppSettings {
             app_icon_name: "app_icon.png".to_string(),
             files_icon_name: String::new(),
             notes_socket_name: "ws-notes.sock".to_string(),
-            focus_file_name: "kitchen-sink-focus".to_string(),
-            focus_bridge_name: "ws-aerospace-focus".to_string(),
             switcher_window_name: "kitchen-sink".to_string(),
             hide_on_focus_loss: true,
             focus_loss_delay: 0.3,
@@ -306,16 +302,6 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     if let Some(v) = strv("notes-socket") {
         if !v.is_empty() {
             settings.notes_socket_name = v;
-        }
-    }
-    if let Some(v) = strv("focus-file") {
-        if !v.is_empty() {
-            settings.focus_file_name = v;
-        }
-    }
-    if let Some(v) = strv("focus-bridge") {
-        if !v.is_empty() {
-            settings.focus_bridge_name = v;
         }
     }
     if let Some(v) = strv("switcher-name") {
@@ -1662,8 +1648,6 @@ mod tests {
         assert_eq!(s.app_icon_name, "app_icon.png");
         assert_eq!(s.files_icon_name, "");
         assert_eq!(s.notes_socket_name, "ws-notes.sock");
-        assert_eq!(s.focus_file_name, "kitchen-sink-focus");
-        assert_eq!(s.focus_bridge_name, "ws-aerospace-focus");
         assert_eq!(s.switcher_window_name, "kitchen-sink");
         assert!(s.hide_on_focus_loss);
         assert_eq!(s.focus_loss_delay, 0.3);

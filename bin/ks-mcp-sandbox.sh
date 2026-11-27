@@ -13,10 +13,7 @@
 #
 # `start --gui` launches the real windowed app instead (isolated the same way,
 # via `open -n -g` so LaunchServices applies the bundle's TCC grants) so
-# `pane-shot` / `screenshot` have real windows to capture. AeroSpace is turned
-# OFF for the run (its on-window-detected rule moves/tiles the shared window and
-# breaks capture + geometry checks) and turned back ON by `stop`. This affects
-# the owner's whole session while the sandbox GUI is up — stop it when done.
+# `pane-shot` / `screenshot` have real windows to capture. Stop it when done.
 #
 # Live-safety rules (AGENTS.md): never `./ws build` (it pkills the live app),
 # never `pkill`; the sandbox daemon is killed only by its pidfile or by the pid
@@ -35,7 +32,6 @@ PIDFILE="$SANDBOX/pid"
 # binary (signed with the same identity, so TCC grants apply) to GUI-test code
 # newer than the live app's last `./ws build`.
 APP="${KS_MCP_SANDBOX_APP:-$ROOT/kitchen-sink.app}"
-AERO_MARK="$SANDBOX/aerospace-disabled"
 # The app's HOME is this short alias of $SANDBOX/home, so unix-socket paths
 # under it stay well inside the 103-byte AF_UNIX limit.
 HOME_ALIAS="/tmp/ksb-$(printf '%s' "$SANDBOX" | shasum | cut -c1-8)"
@@ -86,21 +82,6 @@ socket_answers() {
         *'"pid"'*) return 0 ;;
     esac
     return 1
-}
-
-aerospace_off() {
-    command -v aerospace >/dev/null 2>&1 || return 0
-    if aerospace enable off >/dev/null 2>&1; then
-        : > "$AERO_MARK"
-        echo "AeroSpace disabled for the sandbox GUI (restored by 'stop')"
-    fi
-}
-
-aerospace_restore() {
-    [ -f "$AERO_MARK" ] || return 0
-    aerospace enable on >/dev/null 2>&1 || true
-    rm -f "$AERO_MARK"
-    echo "AeroSpace re-enabled"
 }
 
 cmd_start() {
@@ -174,7 +155,6 @@ cmd_start() {
     [ -n "${WS_PYTHON:-}" ] && envs+=("WS_PYTHON=$WS_PYTHON")
     if [ "$gui" = 1 ]; then
         [ -d "$APP" ] || die "missing $APP (run ./ws build once)"
-        aerospace_off
         local oargs=() e
         for e in "${envs[@]}"; do oargs+=(--env "$e"); done
         open -n -g --stdout "$LOG" --stderr "$LOG" "${oargs[@]}" "$APP" ${mode:+--args "$mode"}
@@ -205,7 +185,6 @@ cmd_start() {
     if [ -n "$pid" ] && is_ours "$pid"; then
         kill -TERM "$pid" 2>/dev/null || true
     fi
-    aerospace_restore
     die "sandbox daemon did not come up"
 }
 
@@ -228,7 +207,6 @@ cmd_stop() {
         fi
     fi
     rm -f "$PIDFILE" "$SOCK" "$SOCK.lock"
-    aerospace_restore
     if [ -n "$pid" ]; then
         echo "stopped (pid $pid)"
     else

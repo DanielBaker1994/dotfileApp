@@ -10,7 +10,7 @@
 # --read-only or KS_MCP_READ_ONLY=1 (hides ks_do, restricts ks_raw).
 # For a disposable daemon: bin/ks-mcp-sandbox.sh start && export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)
 #
-# Needs python ≥ 3.11 (the repo baseline). AeroSpace / GUI launchers start with
+# Needs python ≥ 3.11 (the repo baseline). GUI launchers start with
 # a bare PATH where `python3` may be the CLT 3.9, so look further.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"

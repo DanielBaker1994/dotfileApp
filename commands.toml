@@ -15,7 +15,6 @@ terminal-font-size = 30
 
 font-install-casks = "JetBrains Mono Nerd Font|font-jetbrains-mono-nerd-font|nerd, Fira Code Nerd Font|font-fira-code-nerd-font|nerd, Iosevka Term Nerd Font|font-iosevka-term-nerd-font|nerd, IBM Plex Mono|font-ibm-plex-mono|mono, Cascadia Code|font-cascadia-code|mono, Inter|font-inter|sans, Source Serif 4|font-source-serif-4|serif"
 
-aerospace-cli = "/opt/homebrew/bin/aerospace, /usr/local/bin/aerospace, aerospace"
 
 app-dirs = "/Applications, /Applications/Utilities, /System/Applications, /System/Applications/Utilities, /System/Library/CoreServices, ~/Applications"
 
@@ -26,16 +25,13 @@ ai-icon = ""
 files-icon = ""
 
 notes-socket = "ws-notes.sock"
-focus-file = "kitchen-sink-focus"
-focus-bridge = "ws-aerospace-focus"
 switcher-name = "kitchen-sink"
 
 palette-first = "paths, filefast, text-table, prettyprint"
-# The Hyper+S palette: these commands, in this order, then your AeroSpace
-# workspaces + their apps — one list. Empty = every in-palette command.
+# The Hyper+S palette: these commands, in this order. Empty = every in-palette command.
 palette = "paths, filefast, text-table, prettyprint, find-window"
-# System-wide hotkeys the quick agent registers itself (no AeroSpace / shell
-# in the path). hyper = cmd+ctrl+opt+shift; e.g. "hyper+s", "cmd+shift+f5".
+# System-wide hotkeys the quick agent registers itself (no window manager or
+# shell in the path). hyper = cmd+ctrl+opt+shift; e.g. "hyper+s", "cmd+shift+f5".
 # Empty = that hotkey off. Read at agent start (`kitchen-sink quick-quit` applies a change).
 quick-hotkey-palette = "hyper+s"
 quick-hotkey-screenshot = "hyper+x"

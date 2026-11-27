@@ -244,54 +244,10 @@ pub fn header_background_ops(
     }
 }
 
-/// `PopupChrome.workspaceBase` — header ids at/above this are workspace cells.
-pub const WORKSPACE_BASE: i32 = 1000;
 /// Header click id for the ✕ glyph.
 pub const HEADER_CLOSE_ID: i32 = -1;
 /// Header click id for the app-icon menu button.
 pub const HEADER_ICON_ID: i32 = -2;
-/// `wsCellH`.
-pub const WS_CELL_HEIGHT: f64 = 24.0;
-
-/// One workspace strip cell's width (`wsCellRects` widths): key + icons
-/// (+ "+N" extra) (+ unread badge).
-pub fn ws_cell_width(icons: usize, extra: bool, unread: bool) -> f64 {
-    let mut w = 10.0 + 9.0 + 6.0 + icons as f64 * 19.0 + 4.0;
-    if extra {
-        w += 18.0;
-    }
-    if unread {
-        w += 22.0;
-    }
-    w
-}
-
-/// `wsCellRects()`: right-aligned cells ending at `ws_right - 3`, dropping
-/// leading cells until the strip clears `min_x`. Dropped cells are `None`.
-pub fn ws_cell_rects(widths: &[f64], min_x: f64, ws_right: f64, header_h: f64) -> Vec<Option<Rect>> {
-    if widths.is_empty() || header_h <= 0.0 || ws_right <= 0.0 {
-        return Vec::new();
-    }
-    let total = |f: usize| -> f64 {
-        widths[f..].iter().sum::<f64>() + (widths.len() - f).saturating_sub(1) as f64 * 2.0
-    };
-    let mut first = 0;
-    while first < widths.len() && ws_right - 3.0 - total(first) < min_x {
-        first += 1;
-    }
-    if first >= widths.len() {
-        return Vec::new();
-    }
-    let mut x = ws_right - 3.0 - total(first);
-    let y = (header_h - WS_CELL_HEIGHT) / 2.0;
-    let mut out: Vec<Option<Rect>> = vec![None; first];
-    for w in &widths[first..] {
-        out.push(Some(Rect::new(x, y, *w, WS_CELL_HEIGHT)));
-        x += w + 2.0;
-    }
-    out
-}
-
 /// A nav icon model (`navIcons` entries); the image is optional so the model
 /// stays usable in tests.
 #[cfg(target_os = "macos")]
@@ -333,7 +289,7 @@ impl Default for ChromeConfig {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::{set_workspace_cells, workspace_cell_key, PopupChrome, WorkspaceCell};
+pub use appkit::PopupChrome;
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -351,31 +307,6 @@ mod appkit {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use crate::ui::style;
-
-    /// `PopupChrome.WorkspaceCell`.
-    #[derive(Clone)]
-    pub struct WorkspaceCell {
-        pub key: String,
-        pub icons: Vec<Retained<NSImage>>,
-        pub extra: Option<String>,
-        pub unread: String,
-        pub focused: bool,
-    }
-
-    thread_local! {
-        /// `PopupChrome.workspaceCells` (static, shared by every chrome).
-        static WORKSPACE_CELLS: RefCell<Vec<WorkspaceCell>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// Replace the strip cells and redraw every chrome (main thread).
-    pub fn set_workspace_cells(mtm: MainThreadMarker, cells: Vec<WorkspaceCell>) {
-        WORKSPACE_CELLS.with(|c| *c.borrow_mut() = cells);
-        PopupChrome::redraw_all(mtm);
-    }
-
-    pub fn workspace_cell_key(index: usize) -> Option<String> {
-        WORKSPACE_CELLS.with(|c| c.borrow().get(index).map(|w| w.key.clone()))
-    }
 
     use crate::ui::view_base::{self, as_any};
 
@@ -470,7 +401,6 @@ mod appkit {
                 let bar_w = self.draw_header_segs(bounds.size.width);
                 if !self.ivars().nav_icons.borrow().is_empty() {
                     self.draw_nav_icons();
-                    self.draw_workspace_cells(bounds.size.width - 10.0 - bar_w);
                 }
                 self.draw_meta(bounds.size.width - bar_w - 20.0);
             }
@@ -701,7 +631,7 @@ mod appkit {
             x.stroke();
         }
 
-        /// Route header clicks (nav ids, `WORKSPACE_BASE + i`, the close /
+        /// Route header clicks (nav ids, the close /
         /// icon ids) to `cb` (Swift `onHeaderButton`).
         pub fn set_on_click(&self, cb: Box<dyn Fn(i32)>) {
             *self.ivars().on_click.borrow_mut() = Some(cb);
@@ -730,32 +660,7 @@ mod appkit {
                     return Some(n.id);
                 }
             }
-            if !icons.is_empty() {
-                let w = self.bounds().size.width - 10.0;
-                for (i, r) in self.ws_rects(w).iter().enumerate() {
-                    if let Some(r) = r {
-                        if r.contains(x, y) {
-                            return Some(WORKSPACE_BASE + i as i32);
-                        }
-                    }
-                }
-            }
             None
-        }
-
-        fn ws_rects(&self, ws_right: f64) -> Vec<Option<Rect>> {
-            let n = self.ivars().nav_icons.borrow().len();
-            if n == 0 {
-                return Vec::new();
-            }
-            let widths: Vec<f64> = WORKSPACE_CELLS.with(|c| {
-                c.borrow()
-                    .iter()
-                    .map(|w| ws_cell_width(w.icons.len(), w.extra.is_some(), !w.unread.is_empty()))
-                    .collect()
-            });
-            let min_x = self.nav_rect(n - 1).max_x() + 24.0;
-            ws_cell_rects(&widths, min_x, ws_right, self.ivars().drag_header_height.get())
         }
 
         /// Show the dim header hint (`footerText`).
@@ -971,77 +876,6 @@ mod appkit {
                 *self.ivars().tip_owners.borrow_mut() = owners;
                 *self.ivars().tip_rects.borrow_mut() = tips;
             }
-        }
-
-        /// `drawWorkspaceCells()` — the AeroSpace strip at the header's right.
-        fn draw_workspace_cells(&self, ws_right: f64) {
-            let c = self.ivars().config.colors;
-            let rects = self.ws_rects(ws_right);
-            let Some(first_shown) = rects.iter().position(|r| r.is_some()) else {
-                return;
-            };
-            let (Some(first), Some(Some(last))) = (rects[first_shown], rects.last()) else {
-                return;
-            };
-            style::capsule_track(
-                Rect::new(
-                    first.x - 3.0,
-                    first.y - 3.0,
-                    last.max_x() - first.x + 6.0,
-                    first.height + 6.0,
-                ),
-                &c,
-            );
-            let hovered = self.ivars().hovered.get();
-            let key_font = style::system_font(11.0, style::Weight::Bold);
-            let extra_font = style::system_font(10.0, style::Weight::Regular);
-            let badge_font = style::system_font(9.5, style::Weight::Semibold);
-            WORKSPACE_CELLS.with(|cells| {
-                for (i, cell) in cells.borrow().iter().enumerate() {
-                    let Some(Some(r)) = rects.get(i).copied() else {
-                        continue;
-                    };
-                    let id = WORKSPACE_BASE + i as i32;
-                    let hov = hovered == Some(id);
-                    style::capsule_chip(r, &c, cell.focused, hov);
-                    let (_, kh) = style::text_size(&cell.key, &key_font);
-                    style::draw_text(
-                        &cell.key,
-                        r.x + 10.0,
-                        r.mid_y() - kh / 2.0,
-                        &key_font,
-                        if cell.focused { c.text } else { c.dim },
-                    );
-                    let mut x = r.x + 10.0 + 9.0 + 6.0;
-                    for img in &cell.icons {
-                        style::draw_image(
-                            img,
-                            Rect::new(x, r.mid_y() - 8.0, 16.0, 16.0),
-                            if cell.focused || hov { 1.0 } else { 0.8 },
-                        );
-                        x += 19.0;
-                    }
-                    if let Some(extra) = &cell.extra {
-                        let (_, eh) = style::text_size(extra, &extra_font);
-                        style::draw_text(extra, x, r.mid_y() - eh / 2.0, &extra_font, c.dim);
-                        x += 18.0;
-                    }
-                    if !cell.unread.is_empty() {
-                        let (bw0, bh) = style::text_size(&cell.unread, &badge_font);
-                        let bw = (bw0 + 9.0).max(15.0);
-                        let br = Rect::new(x, r.mid_y() - 7.5, bw, 15.0);
-                        style::fill_rounded(br, 7.5, c.tone(PopupTone::Danger));
-                        style::draw_text(
-                            &cell.unread,
-                            br.mid_x() - bw0 / 2.0,
-                            br.mid_y() - bh / 2.0,
-                            &badge_font,
-                            Rgba::new(1.0, 1.0, 1.0, 1.0),
-                        );
-                    }
-                    self.ivars().extra_button_rects.borrow_mut().insert(id, r);
-                }
-            });
         }
 
         /// `PopupChrome.redrawAll()`.
