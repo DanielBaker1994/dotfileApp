@@ -486,41 +486,26 @@ fn encode_shot_image(image: &objc2_core_graphics::CGImage) -> Option<ShotImage> 
 pub const DEFAULT_USER_COLORS: &str =
     "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080";
 
-/// Every overlay shortcut, in one table: `(config key, key label, default
-/// text, on the help card)`. The help card (shown until a selection exists)
-/// takes the `true` rows; Cmd+/ shows them all. Each text is overridable with
-/// its `[screenshot] help-*` key (rule 3).
-pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 23] = [
-    ("help-mouse", "Mouse", "Select an area \u{b7} W snaps to a window", true),
-    ("help-copy", "\u{2318}C / Return", "Copy to clipboard", true),
-    ("help-save", "\u{2318}S", "Save to a file", true),
-    ("help-pin", "\u{2318}P", "Pin on screen", true),
-    ("help-copy-text", "Tab", "Copy text mode", true),
-    ("help-record", "V", "Record the selection (Hyper+X stops)", true),
-    ("help-last-region", "L", "Select the last area again", true),
-    ("help-recent", "\u{2318}R", "Recent screenshots", true),
-    ("help-space", "Space", "Tool settings", true),
-    ("help-shortcuts", "\u{2318}/", "All shortcuts", true),
-    ("help-esc", "Esc", "Exit", true),
-    ("help-tools", "P D A R F C H T B I", "Pencil, line, arrow, rectangle, filled, circle, highlighter, text, pixelate, invert", false),
-    ("help-retake", "\u{2318}T", "Retake after the delay (menus, hovers)", false),
-    ("help-copy-text-now", "\u{21e7}\u{2318}C", "Copy the text in the selection", false),
-    ("help-wheel", "Wheel / [ ]", "Change tool or font size", false),
+/// Obscure / non-obvious overlay shortcuts, in one table: `(config key, key
+/// label, default text, on the help card)`. Everyday shortcuts (drag, Cmd/Ctrl+C,
+/// Esc, Undo, Delete) are intentionally omitted so the card stays small and
+/// useful. Each text is overridable with its `[screenshot] help-*` key (rule 3).
+pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 10] = [
+    ("help-copy-text", "Tab", "Switch Copy Text / Screenshot / Recents", true),
+    ("help-window", "W", "Snap selection to window under cursor", true),
+    ("help-last-region", "L", "Re-select last capture area", true),
+    ("help-record", "V", "Record selection as video (Hyper+X stops)", true),
+    ("help-retake", "\u{2318}T", "Delayed retake (menus, hovers)", true),
+    ("help-grab", "G / \u{21e7}G", "Pick screen colour (\u{21e7}G copies hex)", true),
+    ("help-pin", "\u{2318}P", "Pin selection floating on desktop", true),
+    ("help-space", "Space", "Tool settings & layers", true),
+    ("help-copy-text-now", "\u{21e7}\u{2318}C", "OCR text inside current selection", false),
     ("help-text-style", "\u{2318}B / \u{2318}I / \u{2318}\u{00b1}", "Bold, italic, or resize text while typing", false),
-    ("help-right-click", "Right Click", "Colour wheel", false),
-    ("help-grab", "G / \u{21e7}G", "Pick a colour from the screen (\u{21e7}G also copies its hex)", false),
-    ("help-arrows", "Arrows", "Move the selection (\u{21e7} resizes)", false),
-    ("help-move", "\u{2318}M", "Move mode", false),
-    ("help-undo", "\u{2318}Z / \u{21e7}\u{2318}Z", "Undo / redo", false),
-    ("help-select-all", "\u{2318}A", "Select the whole screen", false),
-    ("help-delete", "Delete", "Delete the selected drawing", false),
 ];
 
-pub const HELP_TEXT_KEYS: [(&str, &str, &str); 4] = [
-    ("help-text", "Mouse", "Drag over text to copy it"),
-    ("help-text-mode", "Tab", "Back to screenshot mode"),
+pub const HELP_TEXT_KEYS: [(&str, &str, &str); 2] = [
+    ("help-text-mode", "Tab", "Switch to Screenshot / Recents"),
     ("help-recent", "\u{2318}R", "Recent screenshots"),
-    ("help-esc", "Esc", "Exit"),
 ];
 
 /// `(label, text)` rows from [`SHORTCUT_KEYS`]: the help card's (`card_only`)
@@ -689,7 +674,7 @@ impl Default for ScreenshotConfig {
             buttons: ShotTool::ring("", false),
             button_size: 34.0,
             show_help: true,
-            help_opacity: 0.45,
+            help_opacity: 0.14,
             show_side_panel_button: true,
             side_panel_width: ShotSidePanel::WIDTH,
             panel_labels: PanelLabels::default(),
@@ -716,7 +701,7 @@ impl Default for ScreenshotConfig {
             counter_outline: true,
             insecure_pixelate: false,
             delay_ms: 0,
-            font: String::new(),
+            font: "JetBrains Mono".to_string(),
             copy_toast: "Capture saved to clipboard".to_string(),
             save_toast: "Capture saved as {}".to_string(),
             permission_toast: "Screen Recording permission needed \u{2014} opening Settings\u{2026}"
@@ -884,7 +869,11 @@ impl ScreenshotConfig {
         c.delay_ms = i("delay", 0, 0, 60_000);
         c.retake_delay_ms = i("retake-delay", 3, 1, 30) * 1000;
         c.text_menu_title = s("text-menu-title", &d.text_menu_title);
-        c.font = e.get("font").cloned().unwrap_or_default();
+        c.font = e
+            .get("font")
+            .map(|v| v.trim().trim_matches('"').trim_matches('\'').trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| d.font.clone());
         if let Some(v) = e.get("copy-toast") {
             c.copy_toast = v.clone();
         }
@@ -2291,6 +2280,9 @@ pub struct ShotSession {
     /// Dedicated colour for the Highlighter (`ShotTool::Marker`), defaulting
     /// to bright yellow (`cfg.highlighter_color`) independently of pen/shape colour.
     pub marker_color: ShotColor,
+    /// Highlighter translucency (`0.10…0.80`, default `0.38`), adjustable from
+    /// the quick-style bar slider or mouse scroll.
+    pub marker_opacity: f64,
     pub counter_offset: i64,
     pub side_panel_open: bool,
     pub grabbing: Option<ShotColor>,
@@ -2350,10 +2342,12 @@ impl ShotSession {
             .as_deref()
             .and_then(ShotColor::from_hex)
             .unwrap_or(cfg.highlighter_color);
+        let marker_opacity = state.marker_opacity.clamp(0.10, 0.80);
         let mut s = ShotSession {
             doc: ShotDocument::new(cfg.undo_limit.max(1) as usize),
             color,
             marker_color,
+            marker_opacity,
             text_mode: args.mode == ShotMode::Text
                 // A preset area (`--region`, `--last-region`, a Cmd+T retake)
                 // means editing a screenshot, not copying text.
@@ -2401,9 +2395,23 @@ impl ShotSession {
             merge: None,
             base_dirty: false,
         };
+        // Sanitize persisted text style: strip accidental quotes and never let
+        // one-off italic/underline/strikethrough flags poison future captures.
+        s.state.style.family = s
+            .state
+            .style
+            .family
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim()
+            .to_string();
         if s.state.style.family.is_empty() {
             s.state.style.family = s.cfg.font.clone();
         }
+        s.state.style.italic = false;
+        s.state.style.underline = false;
+        s.state.style.strike = false;
         s
     }
 
@@ -2657,6 +2665,9 @@ impl ShotSession {
             self.color
         };
         let mut o = ShotObject::new(t, vec![p, p], color, self.size(t));
+        if t == ShotTool::Marker {
+            o.opacity = self.marker_opacity;
+        }
         o.open_arrow = self.cfg.arrow_style == 1;
         o.reversed = self.cfg.reverse_arrow;
         o.outline = self.cfg.counter_outline;
@@ -3099,14 +3110,42 @@ impl ShotSession {
         self.tool.filter(|t| t.is_drawing())
     }
 
+    /// Current highlighter opacity (`0.10…0.80`): selected marker's, else default.
+    pub fn current_opacity(&self) -> f64 {
+        if let Some(i) = self.doc.selected {
+            if let Some(o) = self.doc.objects.get(i) {
+                if o.tool == ShotTool::Marker {
+                    return o.opacity.clamp(0.10, 0.80);
+                }
+            }
+        }
+        self.marker_opacity.clamp(0.10, 0.80)
+    }
+
+    pub fn set_opacity(&mut self, alpha: f64) {
+        let a = (alpha.clamp(0.10, 0.80) * 100.0).round() / 100.0;
+        self.marker_opacity = a;
+        self.state.marker_opacity = a;
+        self.save_state();
+        if let Some(i) = self.doc.selected {
+            if i < self.doc.objects.len() && self.doc.objects[i].tool == ShotTool::Marker {
+                self.doc.update(i, Some(&format!("op{i}")), |o| o.opacity = a);
+            }
+        }
+    }
+
+    pub fn change_opacity(&mut self, delta: f64) {
+        self.set_opacity(self.current_opacity() + delta);
+    }
+
     /// Human-readable size label for the quick-style bar (`16pt` for Text,
-    /// `3px` for stroke tools, `12px` for Highlighter).
+    /// `3px` for stroke tools, `25px` for Highlighter).
     pub fn quick_size_label(&self) -> Option<String> {
         let t = self.active_style_tool()?;
         let (v, _, _) = self.panel_size()?;
         let text = match t {
             ShotTool::Text => format!("{}pt", v + 8),
-            ShotTool::Marker => format!("{}px", v * 2 + 2),
+            ShotTool::Marker => format!("{}px", v * 3 + 10),
             ShotTool::Pixelate => format!("{}x", v),
             ShotTool::Counter => format!("#{}", v),
             _ => format!("{}px", v),
@@ -3127,7 +3166,7 @@ impl ShotSession {
         {
             return None;
         }
-        self.active_style_tool()?;
+        let target = self.active_style_tool()?;
         let sel = self.selection?;
         let disp = self.displays.get(d)?;
         let ring = ButtonRing::layout(sel, disp.bounds(), self.cfg.buttons.len(), self.cfg.button_size);
@@ -3140,6 +3179,7 @@ impl ShotSession {
             &ring.frames,
             &self.cfg.user_colors,
             self.text_section_shown(),
+            target == ShotTool::Marker,
         ))
     }
 
@@ -3174,10 +3214,23 @@ impl ShotSession {
                 let on = !self.panel_text_style().italic;
                 self.set_text_style(|st| st.italic = on);
             }
+            QuickBarHit::OpacitySlider => {
+                if let Some(track) = l.opacity_slider {
+                    self.set_opacity(ShotQuickBar::opacity_at(track, p.x));
+                }
+            }
             QuickBarHit::Body => {}
         }
         self.chrome_press = Some(ChromePress::QuickBar(hit));
         true
+    }
+
+    fn quick_bar_drag(&mut self, d: usize, p: Point, hit: QuickBarHit) {
+        if hit == QuickBarHit::OpacitySlider {
+            if let Some(track) = self.quick_bar_layout(d).and_then(|l| l.opacity_slider) {
+                self.set_opacity(ShotQuickBar::opacity_at(track, p.x));
+            }
+        }
     }
 
     /// Test/socket helper: click at `p` on the quick-style bar on the active display.
@@ -3227,7 +3280,7 @@ impl ShotSession {
     }
 
     /// A press inside the panel. Returns `false` when `p` is outside it.
-    fn panel_press(&mut self, d: usize, p: Point) -> bool {
+    fn panel_press(&mut self, d: usize, p: Point, click_count: i64) -> bool {
         let Some(l) = self.panel_layout(d) else { return false };
         let Some(hit) = ShotSidePanel::hit(&l, p) else {
             return false;
@@ -3283,14 +3336,21 @@ impl ShotSession {
             PanelHit::LayerRow(r) => {
                 self.commit_text();
                 let n = self.doc.objects.len();
-                self.doc.selected = (r < n).then(|| n - 1 - r);
-                // A text layer re-opens for editing, with its resize handles.
-                if let Some(i) = self.doc.selected {
-                    if self.doc.objects[i].tool == ShotTool::Text {
-                        let d = self.active.unwrap_or(0);
-                        let at = self.doc.objects[i].start();
-                        self.begin_text(d, at, Some(i));
+                let clicked = (r < n).then(|| n - 1 - r);
+                if click_count >= 2 {
+                    self.doc.selected = clicked;
+                    if let Some(i) = clicked {
+                        if self.doc.objects[i].tool == ShotTool::Text {
+                            let d = self.active.unwrap_or(0);
+                            let at = self.doc.objects[i].start();
+                            self.begin_text(d, at, Some(i));
+                        }
                     }
+                } else if clicked.is_some() && self.doc.selected == clicked {
+                    // Clicking an already-selected layer toggles it off.
+                    self.doc.selected = None;
+                } else {
+                    self.doc.selected = clicked;
                 }
             }
             PanelHit::LayerDelete => {
@@ -3419,8 +3479,11 @@ impl ShotSession {
     }
 
     /// `ShotSession.rightDown`: commit any text draft, then open the colour
-    /// wheel centred at the pointer.
+    /// wheel centred at the pointer (never over the open side panel).
     pub fn right_down(&mut self, d: usize, p: Point) {
+        if self.panel_layout(d).is_some_and(|l| l.panel.contains_point(p)) {
+            return;
+        }
         if self.editing.is_some() {
             self.commit_text();
         }
@@ -3571,6 +3634,10 @@ impl ShotSession {
         let ch = k.chars.map(|c| c.to_ascii_lowercase());
         let code = k.key_code;
         let is_esc = code == KEY_ESC;
+        // On macOS Control+C can produce `\x03` (ETX) instead of `'c'`; match
+        // the physical ANSI-C keycode (8) too so Ctrl+C works identically to Cmd+C.
+        let is_c = ch == Some('c') || ch == Some('\x03') || (code == 8 && (k.cmd || k.ctrl));
+        let is_p = ch == Some('p') || ch == Some('\x10') || (code == 35 && (k.cmd || k.ctrl));
         if self.hex_edit.is_some() {
             return self.hex_key(k, ch, code);
         }
@@ -3734,12 +3801,12 @@ impl ShotSession {
             self.cycle_stop(k.shift);
             return true;
         }
-        if k.cmd && k.shift && ch == Some('c') {
+        if (k.cmd || k.ctrl) && k.shift && is_c {
             self.finish(ShotOutcome::Text);
             return true;
         }
         if self.text_mode {
-            if (k.cmd || k.ctrl) && ch == Some('c') {
+            if (k.cmd || k.ctrl) && is_c {
                 self.finish(ShotOutcome::Text);
                 return true;
             }
@@ -3757,7 +3824,7 @@ impl ShotSession {
             }
             return true;
         }
-        if (k.cmd || k.ctrl) && ch == Some('c') && !k.shift {
+        if (k.cmd || k.ctrl) && is_c && !k.shift {
             self.finish(ShotOutcome::Copy);
             return true;
         }
@@ -3782,8 +3849,8 @@ impl ShotSession {
             }
             return true;
         }
-        // Cmd+P: pin the shot on the desktop (CleanShot / Shottr).
-        if k.cmd && !k.shift && ch == Some('p') {
+        // Cmd+P (or Ctrl+P): pin the shot floating on the desktop.
+        if (k.cmd || k.ctrl) && !k.shift && is_p {
             if self.selection.is_some() {
                 self.finish(ShotOutcome::Pin);
             }
@@ -4107,6 +4174,13 @@ impl ShotSession {
     // -- scroll / mouse (pure model; no AppKit invalidation) ---------------
 
     pub fn scroll(&mut self, delta_y: f64, precise: bool, cmd: bool) {
+        self.scroll_with_mods(delta_y, precise, cmd, false);
+    }
+
+    /// Scroll wheel handler: adjusts highlighter opacity when hovering over the
+    /// quick bar's opacity slider (or holding Shift/Option with Highlighter),
+    /// otherwise changes tool size.
+    pub fn scroll_with_mods(&mut self, delta_y: f64, precise: bool, cmd: bool, shift_or_opt: bool) {
         if precise && (now_millis() - self.last_wheel_ms < 200 || delta_y.abs() <= 0.5) {
             return;
         }
@@ -4115,6 +4189,16 @@ impl ShotSession {
         }
         self.last_wheel_ms = now_millis();
         let step = if delta_y > 0.0 { 1 } else { -1 };
+        let over_opacity = self.mouse.is_some_and(|(d, p)| {
+            self.quick_bar_layout(d).is_some_and(|l| {
+                l.opacity_slider.is_some_and(|r| r.inset(-4.0, -4.0).contains_point(p))
+                    || l.opacity_value.is_some_and(|r| r.contains_point(p))
+            })
+        });
+        if over_opacity || (shift_or_opt && self.active_style_tool() == Some(ShotTool::Marker)) {
+            self.change_opacity(step as f64 * 0.05);
+            return;
+        }
         if cmd && self.tool == Some(ShotTool::Counter) {
             let next = self.doc.next_counter_number(0);
             self.counter_offset = (-next + 1).max(998i64.min(self.counter_offset + step));
@@ -4178,7 +4262,7 @@ impl ShotSession {
                 self.chrome_press = Some(ChromePress::Tab);
                 return;
             }
-            if self.panel_press(d, p) {
+            if self.panel_press(d, p, click_count) {
                 return;
             }
             #[cfg(target_os = "macos")]
@@ -4330,15 +4414,23 @@ impl ShotSession {
         }
         self.doc.selected = None;
         if let Some(t) = self.tool {
-            if in_active && self.selection.is_some() {
-                if t == ShotTool::Text {
-                    // Swift: the first line is centred on the click.
-                    let lh = (self.new_object(ShotTool::Text, p).font_size() * 1.2).ceil();
-                    self.begin_text(d, Point::new(p.x, p.y - lh / 2.0 - crate::engines::screenshot_annotations::ShotText::PADDING), None);
+            if in_active {
+                if let Some(sel) = self.selection {
+                    // Only draw inside the selection (with a 6pt edge grace);
+                    // clicking outside the selection never creates invisible
+                    // off-screen items over the tool palette or margins.
+                    if !sel.inset(-6.0, -6.0).contains_point(p) {
+                        return;
+                    }
+                    if t == ShotTool::Text {
+                        // Swift: the first line is centred on the click.
+                        let lh = (self.new_object(ShotTool::Text, p).font_size() * 1.2).ceil();
+                        self.begin_text(d, Point::new(p.x, p.y - lh / 2.0 - crate::engines::screenshot_annotations::ShotText::PADDING), None);
+                        return;
+                    }
+                    self.drag = Drag::Drawing(self.new_object(t, p));
                     return;
                 }
-                self.drag = Drag::Drawing(self.new_object(t, p));
-                return;
             }
         }
         if in_active && self.tool.is_none() {
@@ -4357,6 +4449,10 @@ impl ShotSession {
         self.mouse = Some((d, p));
         if let Some(ChromePress::Panel(hit)) = self.chrome_press {
             self.panel_drag(d, p, hit);
+            return;
+        }
+        if let Some(ChromePress::QuickBar(hit)) = self.chrome_press {
+            self.quick_bar_drag(d, p, hit);
             return;
         }
         #[cfg(target_os = "macos")]
@@ -4978,13 +5074,12 @@ enum ChromePress {
     QuickBar(QuickBarHit),
 }
 
-/// Curated macOS font presets cycled by the Quick-Style Bar's font pill.
-pub const FONT_PRESETS: [(&str, &str); 5] = [
+/// Clean, modern macOS font presets cycled by the Quick-Style Bar's font pill.
+pub const FONT_PRESETS: [(&str, &str); 4] = [
+    ("JetBrains Mono", "Mono"),
+    ("Fira Code", "Fira"),
     ("", "Sans"),
-    ("Menlo", "Mono"),
-    ("Georgia", "Serif"),
     ("Avenir Next", "Clean"),
-    ("Marker Felt", "Hand"),
 ];
 
 /// Short display label for a font family name (used on the Quick-Style Bar pill).
@@ -5035,6 +5130,7 @@ pub enum QuickBarHit {
     FontCycle,
     Bold,
     Italic,
+    OpacitySlider,
     Body,
 }
 
@@ -5050,17 +5146,35 @@ pub struct QuickBarLayout {
     pub font: Option<Rect>,
     pub bold: Option<Rect>,
     pub italic: Option<Rect>,
+    pub opacity_value: Option<Rect>,
+    pub opacity_slider: Option<Rect>,
 }
 
 pub struct ShotQuickBar;
 
 impl ShotQuickBar {
     pub const HEIGHT: f64 = 34.0;
+    pub const OPACITY_MIN: f64 = 0.10;
+    pub const OPACITY_MAX: f64 = 0.80;
     const PAD_X: f64 = 10.0;
     const SWATCH: f64 = 18.0;
     const SWATCH_GAP: f64 = 6.0;
     const DIV_GAP: f64 = 12.0;
 
+    pub fn opacity_at(track: Rect, x: f64) -> f64 {
+        if track.w <= 0.0 {
+            return 0.38;
+        }
+        let t = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        Self::OPACITY_MIN + t * (Self::OPACITY_MAX - Self::OPACITY_MIN)
+    }
+
+    pub fn opacity_x(track: Rect, alpha: f64) -> f64 {
+        let t = ((alpha - Self::OPACITY_MIN) / (Self::OPACITY_MAX - Self::OPACITY_MIN)).clamp(0.0, 1.0);
+        track.x + t * track.w
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn layout(
         sel: Rect,
         bounds: Rect,
@@ -5069,6 +5183,7 @@ impl ShotQuickBar {
         ring_frames: &[Rect],
         colors: &[Option<ShotColor>],
         show_text: bool,
+        show_opacity: bool,
     ) -> QuickBarLayout {
         let concrete: Vec<ShotColor> = colors.iter().filter_map(|c| *c).collect();
         let has_picker = colors.iter().any(|c| c.is_none());
@@ -5088,11 +5203,15 @@ impl ShotQuickBar {
         if !concrete.is_empty() || has_picker {
             w += Self::DIV_GAP;
         }
-        // Size stepper: [-] [40pt label] [+]
+        // Size stepper: [-] [42pt label] [+]
         w += 22.0 + 42.0 + 22.0;
         if show_text {
             // Divider + Font pill + B + I
             w += Self::DIV_GAP + 58.0 + 4.0 + 24.0 + 4.0 + 24.0;
+        }
+        if show_opacity {
+            // Divider + [34pt %] + [64pt slider]
+            w += Self::DIV_GAP + 34.0 + 4.0 + 64.0;
         }
 
         let min_x = (side_panel_x + 8.0).max(bounds.x + 8.0);
@@ -5163,9 +5282,20 @@ impl ShotQuickBar {
             let b = Rect::new(x, cy - 11.0, 24.0, 22.0);
             x += 24.0 + 4.0;
             let it = Rect::new(x, cy - 11.0, 24.0, 22.0);
+            x += 24.0;
             (Some(f), Some(b), Some(it))
         } else {
             (None, None, None)
+        };
+
+        let (opacity_value, opacity_slider) = if show_opacity {
+            x += Self::DIV_GAP;
+            let ov = Rect::new(x, cy - 11.0, 34.0, 22.0);
+            x += 34.0 + 4.0;
+            let os = Rect::new(x, cy - 11.0, 64.0, 22.0);
+            (Some(ov), Some(os))
+        } else {
+            (None, None)
         };
 
         QuickBarLayout {
@@ -5178,6 +5308,8 @@ impl ShotQuickBar {
             font,
             bold,
             italic,
+            opacity_value,
+            opacity_slider,
         }
     }
 
@@ -5205,6 +5337,9 @@ impl ShotQuickBar {
         }
         if l.italic.is_some_and(|r| r.contains_point(p)) {
             return Some(QuickBarHit::Italic);
+        }
+        if l.opacity_slider.is_some_and(|r| r.inset(-3.0, -2.0).contains_point(p)) {
+            return Some(QuickBarHit::OpacitySlider);
         }
         Some(QuickBarHit::Body)
     }
@@ -5457,7 +5592,11 @@ impl ShotSidePanel {
         y += 36.0;
         let grab = at(p, y, iw, 28.0);
         y += 42.0;
-        let side = iw.min(200.0);
+        let side = if bounds.h < 840.0 {
+            iw.min(200.0).min((bounds.h - top - 560.0).max(110.0))
+        } else {
+            iw.min(200.0)
+        };
         let wheel = at((width - side) / 2.0, y, side, side);
         y += side + 14.0;
         let hex = at(p + (iw - 120.0) / 2.0, y, 120.0, 26.0);
@@ -5477,11 +5616,12 @@ impl ShotSidePanel {
         let aw = ((width - p - ax) / 3.0).floor();
         let aligns = [0.0, 1.0, 2.0].map(|i| at(ax + i * aw, y, aw - 2.0, 26.0));
         y += 40.0;
-        // Layers: the list fills the rest, buttons at the foot.
+        // Layers: the list fills the rest, buttons always fit inside the panel.
         let layers_label = at(p, y, iw, 18.0);
         y += 22.0;
-        let bottom = bounds.y + bounds.h - 16.0;
-        let list_h = (bottom - 34.0 - y).max(Self::LAYER_ROW * 3.0);
+        let bottom = bounds.y + bounds.h - 12.0;
+        let avail = (bottom - 34.0 - y).max(Self::LAYER_ROW * 2.0);
+        let list_h = avail.min((bottom - 34.0 - y).max(Self::LAYER_ROW));
         let layers = at(p, y, iw, list_h);
         y += list_h + 8.0;
         let layer_delete = at(p, y, 40.0, 26.0);
@@ -5869,8 +6009,24 @@ mod shot_cg {
         CGContext::stroke_path(Some(ctx));
     }
 
+    fn try_named_font(name: &str, size: f64) -> Option<Retained<CTFont>> {
+        let ns = NSString::from_str(name);
+        let f: Retained<CTFont> =
+            unsafe { CTFont::with_name(ffi_cast(&*ns), size, ptr::null()).into() };
+        let got = unsafe { f.family_name() }.to_string();
+        let want_lo = name.to_lowercase().replace('-', " ");
+        let got_lo = got.to_lowercase();
+        let want_base = want_lo.split_whitespace().next().unwrap_or("");
+        if !want_base.is_empty() && (got_lo.contains(want_base) || want_lo.contains(&got_lo)) {
+            Some(f)
+        } else {
+            None
+        }
+    }
+
     fn text_font(style: &ShotTextStyle, size: f64) -> Retained<CTFont> {
-        let mut f: Retained<CTFont> = if style.family.is_empty() {
+        let fam = style.family.trim().trim_matches('"').trim_matches('\'').trim();
+        let mut f: Retained<CTFont> = if fam.is_empty() {
             unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, size, None) }
                 .map(|f| f.into())
                 .unwrap_or_else(|| {
@@ -5878,8 +6034,40 @@ mod shot_cg {
                     unsafe { CTFont::with_name(ffi_cast(&*ns), size, ptr::null()).into() }
                 })
         } else {
-            let ns = NSString::from_str(&style.family);
-            unsafe { CTFont::with_name(ffi_cast(&*ns), size, ptr::null()).into() }
+            let candidates: Vec<&str> = match fam.to_lowercase().as_str() {
+                "jetbrains mono" | "jetbrainsmono" => vec![
+                    "JetBrains Mono",
+                    "JetBrainsMono-Regular",
+                    "JetBrainsMonoNF-Regular",
+                    "JetBrainsMonoNL-Regular",
+                    "Fira Code",
+                    "FiraCode-Regular",
+                    "SF Mono",
+                    "SFMono-Regular",
+                    "Menlo",
+                ],
+                "fira code" | "firacode" => vec![
+                    "Fira Code",
+                    "FiraCode-Regular",
+                    "FiraCodeNF-Regular",
+                    "JetBrains Mono",
+                    "SF Mono",
+                    "SFMono-Regular",
+                    "Menlo",
+                ],
+                _ => vec![fam, "SF Mono", "Menlo"],
+            };
+            candidates
+                .into_iter()
+                .find_map(|n| try_named_font(n, size))
+                .unwrap_or_else(|| {
+                    unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, size, None) }
+                        .map(|f| f.into())
+                        .unwrap_or_else(|| {
+                            let ns = NSString::from_str("Menlo");
+                            unsafe { CTFont::with_name(ffi_cast(&*ns), size, ptr::null()).into() }
+                        })
+                })
         };
         let mut traits = CTFontSymbolicTraits::empty();
         if style.bold {
@@ -6207,21 +6395,16 @@ mod shot_cg {
             ShotTool::Pencil => stroke_pts(ctx, &o.points, o.stroke_width()),
             ShotTool::Line => stroke_pts(ctx, &[o.start(), o.end()], 0.0),
             ShotTool::Marker => {
-                // Translucent normal-blend wash so the highlighter stays vivid
-                // and legible on BOTH light documents and dark terminals/IDEs.
+                // Broad chisel-tip highlighter mark: flat butt caps, bevelled
+                // corners, translucent normal-blend wash with adjustable opacity
+                // so it reads vividly on both light docs and dark terminals.
                 CGContext::set_blend_mode(Some(ctx), CGBlendMode::Normal);
-                let c = o.color.with_alpha(0.38);
+                let alpha = o.opacity.clamp(0.10, 0.85);
+                let c = o.color.with_alpha(alpha);
                 set_stroke(ctx, c);
                 set_fill(ctx, c);
-                CGContext::set_line_cap(
-                    Some(ctx),
-                    if o.points.len() <= 2 {
-                        CGLineCap::Square
-                    } else {
-                        CGLineCap::Round
-                    },
-                );
-                CGContext::set_line_join(Some(ctx), CGLineJoin::Round);
+                CGContext::set_line_cap(Some(ctx), CGLineCap::Butt);
+                CGContext::set_line_join(Some(ctx), CGLineJoin::Bevel);
                 stroke_pts(ctx, &o.points, o.stroke_width());
             }
             ShotTool::Arrow => {
@@ -6631,7 +6814,21 @@ mod overlay {
                         }
                     }
                 }
-                MousePhase::RightDown => session.right_down(d, p),
+                MousePhase::RightDown => {
+                    if let Some(l) = session.panel_layout(d) {
+                        if l.panel.contains_point(p) {
+                            if let Some(super::PanelHit::LayerRow(r)) = ShotSidePanel::hit(&l, p) {
+                                let n = session.doc.objects.len();
+                                if r < n {
+                                    let idx = n - 1 - r;
+                                    super::show_layer_context_menu(idx);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                    session.right_down(d, p);
+                }
                 MousePhase::RightDragged => session.right_dragged(d, p),
                 MousePhase::RightUp => session.right_up(d, p),
                 MousePhase::Down => session.mouse_down(d, p, click, shift, cmd),
@@ -6672,11 +6869,15 @@ mod overlay {
                 return;
             }
             session.mouse = Some((d, self.point(event)));
-            let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
-            session.scroll(
+            let mods = event.modifierFlags();
+            let cmd = mods.contains(NSEventModifierFlags::Command);
+            let shift_or_opt =
+                mods.contains(NSEventModifierFlags::Shift) || mods.contains(NSEventModifierFlags::Option);
+            session.scroll_with_mods(
                 event.scrollingDeltaY() as f64,
                 event.hasPreciseScrollingDeltas(),
                 cmd,
+                shift_or_opt,
             );
             self.setNeedsDisplay(true);
         }
@@ -6777,6 +6978,16 @@ mod overlay {
                     None => CGContext::fill_rect(Some(&ctx), cg_rect(full)),
                 }
                 set_stroke(&ctx, mode_color.with_alpha(0.6));
+                CGContext::set_line_width(Some(&ctx), 8.0);
+                CGContext::stroke_rect(
+                    Some(&ctx),
+                    cg_rect(Rect::new(4.0, 4.0, full.w - 8.0, full.h - 8.0)),
+                );
+            } else if mine.is_none() {
+                // Screenshot mode outer purple border (matches Copy Text's outer
+                // blue border so the mode stays obvious even when the center
+                // help card hides on hover).
+                set_stroke(&ctx, mode_color.with_alpha(0.55));
                 CGContext::set_line_width(Some(&ctx), 8.0);
                 CGContext::stroke_rect(
                     Some(&ctx),
@@ -7145,8 +7356,8 @@ mod overlay {
         draw_symbol("clock.arrow.circlepath", recent, 13.0, true, glyph);
     }
 
-    /// `ShotHelpCard`: a translucent centred rounded card of key/action rows.
-    /// Fades almost completely out when the pointer approaches it so it never
+    /// `ShotHelpCard`: a faint centred rounded card of obscure shortcuts.
+    /// Completely hides when the pointer moves over/near it so it never
     /// blocks an item the user is trying to select.
     fn draw_help_card(ctx: &CGContext, session: &ShotSession, full: Rect, d: usize) {
         let cfg = &session.cfg;
@@ -7168,8 +7379,10 @@ mod overlay {
         let near_pointer = session
             .mouse
             .is_some_and(|(md, mp)| md == d && card_rect.inset(-40.0, -40.0).contains_point(mp));
-        let fade = if near_pointer { 0.14 } else { 1.0 };
-        draw_rows_card(ctx, rows, ui, full, cfg.help_opacity, fade);
+        if near_pointer {
+            return;
+        }
+        draw_rows_card(ctx, rows, ui, full, cfg.help_opacity, 0.65);
     }
 
     fn rows_card_frame(rows: &[(String, String)], full: Rect) -> (super::Size, Point) {
@@ -7437,6 +7650,24 @@ mod overlay {
                 fill_round(ctx, r, 5.0, bg_c);
                 draw_text_centered(ctx, label, r, 12.0, ShotColor::WHITE, is_bold);
             }
+        }
+
+        // Highlighter opacity scrubber (click, drag, or scroll over slider).
+        if let (Some(ov), Some(os)) = (l.opacity_value, l.opacity_slider) {
+            let dx = (ov.x - 6.0).floor() + 0.5;
+            fill_rect(ctx, Rect::new(dx, l.bar.y + 8.0, 1.0, l.bar.h - 16.0), ShotColor::WHITE.with_alpha(0.22));
+            let alpha = session.current_opacity();
+            let pct = format!("{}%", (alpha * 100.0).round() as i64);
+            draw_text_centered(ctx, &pct, ov, 11.0, ShotColor::WHITE.with_alpha(0.9), true);
+            let track = Rect::new(os.x, os.mid_y() - 2.0, os.w, 4.0);
+            fill_round(ctx, track, 2.0, ShotColor::WHITE.with_alpha(0.22));
+            let tx = super::ShotQuickBar::opacity_x(os, alpha);
+            fill_round(ctx, Rect::new(track.x, track.y, (tx - track.x).max(2.0), track.h), 2.0, cur.with_alpha(0.85));
+            set_fill(ctx, ShotColor::WHITE);
+            CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(tx - 5.5, os.mid_y() - 5.5, 11.0, 11.0)));
+            set_stroke(ctx, ui);
+            CGContext::set_line_width(Some(ctx), 1.5);
+            CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(tx - 5.0, os.mid_y() - 5.0, 10.0, 10.0)));
         }
     }
 
@@ -8272,12 +8503,13 @@ mod pin_window {
             panel.setLevel(NSFloatingWindowLevel);
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
-            panel.setHasShadow(false);
+            panel.setHasShadow(true);
             panel.setHidesOnDeactivate(false);
             panel.setMovableByWindowBackground(false);
             panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
             panel.setCollectionBehavior(
-                NSWindowCollectionBehavior::FullScreenAuxiliary
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
                     | NSWindowCollectionBehavior::IgnoresCycle,
             );
             unsafe { panel.setReleasedWhenClosed(false) };
@@ -9029,6 +9261,111 @@ impl Drop for KeyMonitor {
 #[cfg(target_os = "macos")]
 static LIVE_CONTROLLER: std::sync::Mutex<Option<std::sync::Weak<Mutex<ScreenshotController>>>> =
     std::sync::Mutex::new(None);
+
+/// Right-click context menu for a row in the side panel's Layers list.
+#[cfg(target_os = "macos")]
+fn show_layer_context_menu(index: usize) {
+    use crate::ui::menu_kit::{popup, MenuEntry};
+    let weak = LIVE_CONTROLLER.lock().ok().and_then(|g| g.clone());
+    let Some(weak) = weak else { return };
+    let Some(ctrl) = weak.upgrade() else { return };
+    let (selected, is_text, len) = {
+        let Ok(c) = ctrl.try_lock() else { return };
+        let Some(s) = c.session.as_ref() else { return };
+        let Some(o) = s.doc.objects.get(index) else { return };
+        (s.doc.selected == Some(index), o.tool == ShotTool::Text, s.doc.objects.len())
+    };
+    let act = |f: fn(&mut ShotSession, usize)| -> Box<dyn Fn()> {
+        let w = weak.clone();
+        Box::new(move || {
+            if let Some(c) = w.upgrade() {
+                if let Ok(mut c) = c.lock() {
+                    if let Some(s) = c.session.as_mut() {
+                        if index < s.doc.objects.len() {
+                            f(s, index);
+                        }
+                    }
+                    c.redraw_overlays();
+                }
+            }
+        })
+    };
+    let mut entries: Vec<MenuEntry> = Vec::new();
+    entries.push(MenuEntry::item(
+        if selected { "Deselect" } else { "Select" },
+        act(|s, i| {
+            s.commit_text();
+            s.doc.selected = if s.doc.selected == Some(i) { None } else { Some(i) };
+        }),
+    ));
+    if is_text {
+        entries.push(MenuEntry::item(
+            "Edit Text",
+            act(|s, i| {
+                let d = s.active.unwrap_or(0);
+                let at = s.doc.objects[i].start();
+                s.begin_text(d, at, Some(i));
+            }),
+        ));
+    }
+    if index + 1 < len {
+        entries.push(MenuEntry::item(
+            "Bring Forward",
+            act(|s, i| {
+                s.doc.selected = Some(i);
+                s.move_layer(1);
+            }),
+        ));
+    }
+    if index > 0 {
+        entries.push(MenuEntry::item(
+            "Send Backward",
+            act(|s, i| {
+                s.doc.selected = Some(i);
+                s.move_layer(-1);
+            }),
+        ));
+    }
+    entries.push(MenuEntry::item(
+        "Duplicate",
+        act(|s, i| {
+            let copy = s.doc.objects[i].moved(12.0, 12.0);
+            let new_idx = s.doc.add(copy);
+            s.doc.selected = Some(new_idx);
+        }),
+    ));
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::item(
+        "Delete",
+        act(|s, i| {
+            if s.editing.as_ref().and_then(|e| e.index) == Some(i) {
+                s.editing = None;
+            }
+            s.doc.remove(i);
+        }),
+    ));
+    if len > 1 {
+        let w = weak.clone();
+        entries.push(MenuEntry::item(
+            "Clear All Annotations",
+            Box::new(move || {
+                if let Some(c) = w.upgrade() {
+                    if let Ok(mut c) = c.lock() {
+                        if let Some(s) = c.session.as_mut() {
+                            s.editing = None;
+                            while !s.doc.objects.is_empty() {
+                                s.doc.remove(s.doc.objects.len() - 1);
+                            }
+                        }
+                        c.redraw_overlays();
+                    }
+                }
+            }),
+        ));
+    }
+    let m = objc2_app_kit::NSEvent::mouseLocation();
+    popup(entries, None, m.x, m.y);
+}
 
 /// After the overlay view fed a mouse event into the session: complete a
 /// finished session / open the recents grid on the next main-queue turn
@@ -10869,6 +11206,11 @@ impl ScreenshotController {
             }
             ShotOutcome::Pin => {
                 self.pin(&img, global_frame, screen);
+                ScreenToast::show(
+                    &mut self.toast,
+                    "Pinned on screen \u{2014} drag to move, Esc or double-click to close",
+                    "pin.fill",
+                );
             }
             ShotOutcome::Accept => {
                 if let Some(p) = &args.path {
@@ -12337,8 +12679,12 @@ mod tests {
         let all = shortcut_rows(false, |_, d| d.to_string());
         assert!(card.len() < all.len());
         assert!(card.iter().all(|r| all.contains(r)));
-        for key in ["V", "L", "\u{2318}P", "\u{2318}R", "\u{2318}/"] {
+        for key in ["Tab", "W", "L", "V", "\u{2318}T", "\u{2318}P", "Space"] {
             assert!(card.iter().any(|(k, _)| k == key), "{key} is on the help card");
+        }
+        // Obvious everyday shortcuts stay off the help card.
+        for obvious in ["Mouse", "Esc", "Delete", "\u{2318}Z / \u{21e7}\u{2318}Z"] {
+            assert!(!card.iter().any(|(k, _)| k == obvious), "{obvious} stays off the help card");
         }
         let mut e = HashMap::new();
         e.insert("help-record".to_string(), "Film it".to_string());
@@ -13908,7 +14254,7 @@ mod tests {
         assert!(s.quick_bar_click(Point::new(qb.size_up.mid_x(), qb.size_up.mid_y())));
         assert_eq!(s.editing.as_ref().unwrap().object.size, s0 + 2);
         assert!(s.quick_bar_click(Point::new(qb.font.unwrap().mid_x(), qb.font.unwrap().mid_y())));
-        assert_eq!(s.editing.as_ref().unwrap().object.style.family, "Menlo");
+        assert_eq!(s.editing.as_ref().unwrap().object.style.family, "Fira Code");
         assert!(s.quick_bar_click(Point::new(qb.bold.unwrap().mid_x(), qb.bold.unwrap().mid_y())));
         assert!(s.editing.as_ref().unwrap().object.style.bold);
         assert!(s.quick_bar_click(Point::new(qb.italic.unwrap().mid_x(), qb.italic.unwrap().mid_y())));
@@ -14004,5 +14350,93 @@ mod tests {
         assert!(c.is_idle(), "abort clears pending capture and delay");
         assert_ne!(c.capture_gen, gen0, "capture_gen bumped so late capture drops");
         assert_ne!(c.delay_gen, dgen0, "delay_gen bumped so stale delay timer drops");
+    }
+
+    #[test]
+    fn ctrl_c_and_cmd_p_and_no_off_selection_draw_and_layer_controls() {
+        // 1. Ctrl+C (including ETX '\x03' + ANSI-C keycode 8) copies screenshot.
+        let mut s = session();
+        s.test_select(Rect::new(200.0, 150.0, 400.0, 300.0), Some(0));
+        assert!(s.handle_key(&KeyInput {
+            key_code: 8, chars: Some('\x03'), cmd: false, ctrl: true, shift: false, opt: false, esc_streak: 0,
+        }));
+        assert!(s.finished && s.outcome == Some(ShotOutcome::Copy));
+
+        // 2. Cmd+P pins the selection.
+        let mut s = session();
+        s.test_select(Rect::new(200.0, 150.0, 400.0, 300.0), Some(0));
+        assert!(s.handle_key(&KeyInput {
+            key_code: 35, chars: Some('p'), cmd: true, ctrl: false, shift: false, opt: false, esc_streak: 0,
+        }));
+        assert!(s.finished && s.outcome == Some(ShotOutcome::Pin));
+
+        // 3. Clicking outside the selection while a tool is armed never draws off-screen.
+        let mut s = session();
+        s.test_select(Rect::new(300.0, 200.0, 400.0, 300.0), Some(0));
+        s.set_tool(Some(ShotTool::Selection));
+        s.mouse_down(0, Point::new(50.0, 50.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(150.0, 120.0), false, false);
+        s.mouse_up(0, Point::new(150.0, 120.0), false, false);
+        assert_eq!(s.doc.objects.len(), 0, "clicks outside selection do not draw off-screen");
+
+        // 4. Side panel layers: click toggles select/deselect, right-click inside panel never opens wheel.
+        s.mouse_down(0, Point::new(320.0, 220.0), 1, false, false);
+        s.mouse_dragged(0, Point::new(420.0, 300.0), false, false);
+        s.mouse_up(0, Point::new(420.0, 300.0), false, false);
+        assert_eq!(s.doc.objects.len(), 1);
+        s.toggle_side_panel(Some(true));
+        let l = s.panel_layout(0).expect("panel layout");
+        let row0 = Point::new(l.layers.mid_x(), l.layers.y + 8.0);
+        // Right-click inside panel must NOT open the colour wheel.
+        s.right_down(0, row0);
+        assert!(s.wheel.is_none());
+        // Currently selected (auto-selected on draw): clicking row0 deselects, clicking again re-selects.
+        assert_eq!(s.doc.selected, Some(0));
+        s.mouse_down(0, row0, 1, false, false);
+        s.mouse_up(0, row0, false, false);
+        assert_eq!(s.doc.selected, None, "second click on layer row deselects");
+        s.mouse_down(0, row0, 1, false, false);
+        s.mouse_up(0, row0, false, false);
+        assert_eq!(s.doc.selected, Some(0), "clicking again selects");
+    }
+
+    #[test]
+    fn highlighter_opacity_slider_scroll_and_clean_default_font() {
+        // 1. Corrupted state file with quoted family + italic/strike sanitizes cleanly.
+        let p = temp_path("clean-style");
+        if let Some(dir) = std::path::Path::new(&p).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(
+            &p,
+            r#"{"style":{"family":"\"\"","bold":true,"italic":true,"underline":true,"strike":true,"align":0}}"#,
+        )
+        .unwrap();
+        let s = ShotSession::new(ScreenshotConfig::default(), ShotArgs::default(), &p);
+        assert_eq!(s.state.style.family, "JetBrains Mono");
+        assert!(!s.state.style.italic && !s.state.style.underline && !s.state.style.strike);
+        let _ = std::fs::remove_file(&p);
+
+        // 2. Highlighter quick-bar opacity slider & scroll control.
+        let mut cfg = ScreenshotConfig::default();
+        cfg.user_colors = vec![None, ShotColor::from_hex("#ffe600"), ShotColor::from_hex("#00ff00")];
+        let p2 = temp_path("hl-op");
+        let mut s = ShotSession::new(cfg, ShotArgs::default(), &p2);
+        s.add_display(ShotDisplay::new(1, Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0));
+        s.test_select(Rect::new(200.0, 200.0, 600.0, 400.0), Some(0));
+        s.set_tool(Some(ShotTool::Marker));
+        let qb = s.quick_bar_layout(0).expect("quick bar");
+        let slider = qb.opacity_slider.expect("opacity slider shown for Highlighter");
+        // Click far right of slider → ~0.80 opacity.
+        s.mouse_down(0, Point::new(slider.max_x() - 1.0, slider.mid_y()), 1, false, false);
+        s.mouse_up(0, Point::new(slider.max_x() - 1.0, slider.mid_y()), false, false);
+        assert!((s.current_opacity() - 0.80).abs() <= 0.03);
+        // Hover over slider and scroll down → drops by ~0.05.
+        s.mouse = Some((0, Point::new(slider.mid_x(), slider.mid_y())));
+        s.last_wheel_ms = 0;
+        let before = s.current_opacity();
+        s.scroll_with_mods(-1.0, false, false, false);
+        assert!(s.current_opacity() < before, "scroll over opacity slider lowers opacity");
+        let _ = std::fs::remove_file(&p2);
     }
 }

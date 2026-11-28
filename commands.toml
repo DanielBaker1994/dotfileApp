@@ -156,7 +156,7 @@ user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #00
 buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy"
 button-size = 0
 show-help = true
-help-opacity = 0.45
+help-opacity = 0.14
 show-side-panel-button = true
 side-panel-width = 250
 side-panel-size-label = "Active tool size:"
@@ -228,7 +228,7 @@ insecure-pixelate = false
 delay = 0
 # Cmd+T in the overlay: hide, wait this many seconds, capture the same area.
 retake-delay = 3
-font = ""
+font = "JetBrains Mono"
 copy-toast = "Capture saved to clipboard"
 save-toast = "Capture saved as {}"
 permission-toast = "Screen Recording permission needed — opening Settings…"

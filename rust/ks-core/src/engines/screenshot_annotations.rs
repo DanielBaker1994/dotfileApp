@@ -573,6 +573,8 @@ pub struct ShotObject {
     pub points: Vec<Point>,
     pub color: ShotColor,
     pub size: i64,
+    /// Stroke/fill opacity (`0.10…1.0`; Highlighter defaults to `0.38`).
+    pub opacity: f64,
     pub text: String,
     pub style: ShotTextStyle,
     pub number_offset: i64,
@@ -594,6 +596,7 @@ impl ShotObject {
             points,
             color,
             size,
+            opacity: if tool == ShotTool::Marker { 0.38 } else { 1.0 },
             text: String::new(),
             style: ShotTextStyle::default(),
             number_offset: 0,
@@ -618,7 +621,7 @@ impl ShotObject {
 
     pub fn stroke_width(&self) -> f64 {
         match self.tool {
-            ShotTool::Marker => (self.size * 2 + 2) as f64,
+            ShotTool::Marker => (self.size * 3 + 10) as f64,
             _ => (self.size.max(1)) as f64,
         }
     }
@@ -1878,6 +1881,10 @@ fn default_grid_size() -> i64 {
     10
 }
 
+fn default_marker_opacity() -> f64 {
+    0.38
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShotState {
     #[serde(default)]
@@ -1886,6 +1893,8 @@ pub struct ShotState {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "markerColor")]
     pub marker_color: Option<String>,
+    #[serde(default = "default_marker_opacity", rename = "markerOpacity")]
+    pub marker_opacity: f64,
     #[serde(default)]
     pub style: ShotTextStyle,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastRegion")]
@@ -1902,6 +1911,7 @@ impl Default for ShotState {
             sizes: HashMap::new(),
             color: None,
             marker_color: None,
+            marker_opacity: default_marker_opacity(),
             style: ShotTextStyle::default(),
             last_region: None,
             grid_size: 10,

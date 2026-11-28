@@ -1620,6 +1620,11 @@ mod appkit {
         // -- keys ---------------------------------------------------------------
 
         fn route_key_event(&self, event: &NSEvent) -> bool {
+            // While the Hyper+X screenshot overlay is up, let its own key
+            // monitor own every keystroke (Ctrl+C, Cmd+P, Esc, etc.).
+            if self.is_screenshot_active() {
+                return false;
+            }
             // Every Esc down, for "did Esc close that tool?" (`poll_tick`).
             if event.keyCode() == popup::KEY_ESC {
                 self.last_esc.set(Some(Instant::now()));
