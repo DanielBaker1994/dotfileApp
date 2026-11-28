@@ -196,10 +196,10 @@ impl ShotTool {
     ];
 
     /// Tools first (the ring fills the bottom edge left → right: most-used
-    /// T, R, A, Numbers on the left, Highlighter separate on the right), then
+    /// T, R, A, Highlighter, Numbers ...), then
     /// the actions, which wrap onto the top edge right → left: listed backwards
     /// so the top row reads Copy, Copy Text, Save, Undo, Redo, Move, Recent, Exit.
-    pub const DEFAULT_BUTTONS: &'static str = "text, selection, arrow, counter, pencil, line, rectangle, circle, pixelate, invert, marker, exit, recent, move, redo, undo, save, copy-text, copy";
+    pub const DEFAULT_BUTTONS: &'static str = "text, selection, arrow, marker, counter, pencil, line, rectangle, circle, pixelate, invert, exit, recent, move, redo, undo, save, copy-text, copy";
 
     pub fn raw_value(&self) -> &'static str {
         match self {
@@ -1982,6 +1982,7 @@ mod tests {
             Text,
             Selection,
             Arrow,
+            Marker,
             Counter,
             Pencil,
             Line,
@@ -1989,7 +1990,6 @@ mod tests {
             Circle,
             Pixelate,
             Invert,
-            Marker,
         ];
         assert_eq!(&r[..11], &expected[..]);
         assert!(!r.contains(&Pin), "pin removed from default ring");

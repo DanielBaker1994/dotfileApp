@@ -153,7 +153,7 @@ highlighter-color = "#ffe600"
 user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
 # Tools fill the bottom edge left to right (most-used on the left: T, R, A, 1;
 # highlighter separate on the right); actions wrap onto the top edge right to left.
-buttons = "text, selection, arrow, counter, pencil, line, rectangle, circle, pixelate, invert, marker, exit, recent, move, redo, undo, save, copy-text, copy"
+buttons = "text, selection, arrow, marker, counter, pencil, line, rectangle, circle, pixelate, invert, exit, recent, move, redo, undo, save, copy-text, copy"
 button-size = 0
 show-help = true
 help-opacity = 0.14
@@ -540,7 +540,7 @@ kitchen-sink = "*:app"
 "text-table: Cmd+Shift+Return" = "save the Markdown table as a .md file and copy it"
 "text-table: Esc" = "close and go back to the app you came from"
 "screenshot: Mouse drag" = "select an area (Shift = square); drag inside = move it"
-"screenshot: P D A S R C M T B I" = "pencil, line, arrow, rectangle, filled rectangle, circle, marker, text, pixelate, invert (again = off)"
+"screenshot: P D A M S R C T B I" = "pencil, line, arrow, marker, rectangle, filled rectangle, circle, text, pixelate, invert (again = off)"
 "screenshot: G" = "grab a color from the screen (Esc cancels)"
 "screenshot: Space" = "side panel (size, color, grid, text style, layers)"
 "screenshot: ← ↑ → ↓" = "move the selection 1 pt (Shift = resize, Cmd+Shift = from the center)"
