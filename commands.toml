@@ -151,9 +151,9 @@ contrast-opacity = 188
 draw-color = "#288000"
 highlighter-color = "#ffe600"
 user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
-# Tools fill the bottom edge left to right; the rest wraps onto the top edge
-# right to left, so actions are listed backwards (top row: Copy … Exit).
-buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy"
+# Tools fill the bottom edge left to right (most-used on the left: T, R, A, 1;
+# highlighter separate on the right); actions wrap onto the top edge right to left.
+buttons = "text, selection, arrow, counter, pencil, line, rectangle, circle, pixelate, invert, marker, exit, recent, move, redo, undo, save, copy-text, copy"
 button-size = 0
 show-help = true
 help-opacity = 0.14

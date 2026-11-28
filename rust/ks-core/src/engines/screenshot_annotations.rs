@@ -195,11 +195,11 @@ impl ShotTool {
         ShotTool::SizeDown,
     ];
 
-    /// Tools first (the ring fills the bottom edge left → right), then the
-    /// actions, which wrap onto the top edge right → left: listed backwards
-    /// so the top row reads Copy, Copy Text, Save, Pin, Undo, Redo, Move,
-    /// Recent, Exit.
-    pub const DEFAULT_BUTTONS: &'static str = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, exit, recent, move, redo, undo, pin, save, copy-text, copy";
+    /// Tools first (the ring fills the bottom edge left → right: most-used
+    /// T, R, A, Numbers on the left, Highlighter separate on the right), then
+    /// the actions, which wrap onto the top edge right → left: listed backwards
+    /// so the top row reads Copy, Copy Text, Save, Undo, Redo, Move, Recent, Exit.
+    pub const DEFAULT_BUTTONS: &'static str = "text, selection, arrow, counter, pencil, line, rectangle, circle, pixelate, invert, marker, exit, recent, move, redo, undo, save, copy-text, copy";
 
     pub fn raw_value(&self) -> &'static str {
         match self {
@@ -1976,22 +1976,23 @@ mod tests {
     #[test]
     fn ring_defaults_and_tools() {
         let r = ShotTool::ring("", true);
-        assert_eq!(r.len(), 21, "default ring = 20 buttons + the size badge");
+        assert_eq!(r.len(), 20, "default ring = 19 buttons + the size badge");
         assert_eq!(r.iter().position(|t| *t == Size), Some(11), "badge after last drawing tool");
         let expected = vec![
+            Text,
+            Selection,
+            Arrow,
+            Counter,
             Pencil,
             Line,
-            Arrow,
-            Selection,
             Rectangle,
             Circle,
-            Marker,
-            Text,
-            Counter,
             Pixelate,
             Invert,
+            Marker,
         ];
         assert_eq!(&r[..11], &expected[..]);
+        assert!(!r.contains(&Pin), "pin removed from default ring");
         assert!(!ShotTool::ring("", false).contains(&Size));
         assert!(!r.contains(&Accept));
         assert!(!r.contains(&SizeUp));

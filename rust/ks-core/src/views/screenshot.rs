@@ -488,24 +488,21 @@ pub const DEFAULT_USER_COLORS: &str =
 
 /// Obscure / non-obvious overlay shortcuts, in one table: `(config key, key
 /// label, default text, on the help card)`. Everyday shortcuts (drag, Cmd/Ctrl+C,
-/// Esc, Undo, Delete) are intentionally omitted so the card stays small and
+/// Esc, Tab, Undo, Delete) are intentionally omitted so the card stays small and
 /// useful. Each text is overridable with its `[screenshot] help-*` key (rule 3).
-pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 10] = [
-    ("help-copy-text", "Tab", "Switch Copy Text / Screenshot / Recents", true),
+pub const SHORTCUT_KEYS: [(&str, &str, &str, bool); 8] = [
     ("help-window", "W", "Snap selection to window under cursor", true),
     ("help-last-region", "L", "Re-select last capture area", true),
     ("help-record", "V", "Record selection as video (Hyper+X stops)", true),
     ("help-retake", "\u{2318}T", "Delayed retake (menus, hovers)", true),
     ("help-grab", "G / \u{21e7}G", "Pick screen colour (\u{21e7}G copies hex)", true),
-    ("help-pin", "\u{2318}P", "Pin selection floating on desktop", true),
     ("help-space", "Space", "Tool settings & layers", true),
     ("help-copy-text-now", "\u{21e7}\u{2318}C", "OCR text inside current selection", false),
     ("help-text-style", "\u{2318}B / \u{2318}I / \u{2318}\u{00b1}", "Bold, italic, or resize text while typing", false),
 ];
 
-pub const HELP_TEXT_KEYS: [(&str, &str, &str); 2] = [
-    ("help-text-mode", "Tab", "Switch to Screenshot / Recents"),
-    ("help-recent", "\u{2318}R", "Recent screenshots"),
+pub const HELP_TEXT_KEYS: [(&str, &str, &str); 1] = [
+    ("help-text", "Copy Text", "Drag over any text to copy it"),
 ];
 
 /// `(label, text)` rows from [`SHORTCUT_KEYS`]: the help card's (`card_only`)
@@ -3637,7 +3634,6 @@ impl ShotSession {
         // On macOS Control+C can produce `\x03` (ETX) instead of `'c'`; match
         // the physical ANSI-C keycode (8) too so Ctrl+C works identically to Cmd+C.
         let is_c = ch == Some('c') || ch == Some('\x03') || (code == 8 && (k.cmd || k.ctrl));
-        let is_p = ch == Some('p') || ch == Some('\x10') || (code == 35 && (k.cmd || k.ctrl));
         if self.hex_edit.is_some() {
             return self.hex_key(k, ch, code);
         }
@@ -3846,13 +3842,6 @@ impl ShotSession {
             if self.selection.is_some() {
                 self.retake_requested = true;
                 self.finish(ShotOutcome::Abort);
-            }
-            return true;
-        }
-        // Cmd+P (or Ctrl+P): pin the shot floating on the desktop.
-        if (k.cmd || k.ctrl) && !k.shift && is_p {
-            if self.selection.is_some() {
-                self.finish(ShotOutcome::Pin);
             }
             return true;
         }
@@ -7481,7 +7470,10 @@ mod overlay {
                     cg_rect(Rect::new(c.x - rr, c.y - rr, 2.0 * rr, 2.0 * rr)),
                 );
             }
-            if *t != ShotTool::Size {
+            if *t == ShotTool::Marker {
+                let on_ui = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
+                draw_highlighter_icon(ctx, *f, on_ui, session.marker_color);
+            } else if *t != ShotTool::Size {
                 let on_ui = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
                 let fg = if primary && !active { cfg.ui_color } else { on_ui };
                 draw_symbol(t.symbol(), *f, f.h * 0.42, false, fg);
@@ -7530,6 +7522,46 @@ mod overlay {
         if let Some((t, f)) = hovered {
             draw_button_tip(ctx, t.tooltip(), *f, sel, display.bounds(), cfg.contrast_color);
         }
+    }
+
+    /// Bold, thick chisel-tip highlighter icon (fat angled marker barrel +
+    /// slanted chisel nib + vivid highlight swipe underneath) so it reads
+    /// immediately as a highlighter and never looks like a thin pencil or text.
+    fn draw_highlighter_icon(ctx: &CGContext, f: Rect, fg: ShotColor, swipe: ShotColor) {
+        let s = f.w.min(f.h);
+        let cx = f.mid_x();
+        let cy = f.mid_y();
+        CGContext::save_g_state(Some(ctx));
+        // Vivid highlight stripe along the bottom under the chisel tip.
+        let bar_h = (s * 0.14).clamp(3.0, 5.5);
+        let bar = Rect::new(cx - s * 0.28, cy + s * 0.19, s * 0.56, bar_h);
+        fill_round(ctx, bar, 1.5, swipe.with_alpha(0.92));
+
+        // Rotate -42° around center for the fat highlighter barrel + chisel tip.
+        CGContext::translate_ctm(Some(ctx), cx + s * 0.02, cy - s * 0.04);
+        CGContext::rotate_ctm(Some(ctx), -0.74);
+
+        // Fat marker body (much thicker than a pencil).
+        let bw = s * 0.30;
+        let bh = s * 0.24;
+        let body = Rect::new(-bw * 0.35, -bh * 0.5, bw * 1.15, bh);
+        fill_round(ctx, body, 2.0, fg);
+
+        // Slanted flat chisel nib on the left end of the barrel.
+        set_fill(ctx, swipe);
+        CGContext::begin_path(Some(ctx));
+        CGContext::move_to_point(Some(ctx), body.x - 1.0, body.y + 1.0);
+        CGContext::add_line_to_point(Some(ctx), body.x - s * 0.14, body.y + bh * 0.28);
+        CGContext::add_line_to_point(Some(ctx), body.x - s * 0.18, body.max_y() - 0.5);
+        CGContext::add_line_to_point(Some(ctx), body.x - 1.0, body.max_y() - 1.0);
+        CGContext::close_path(Some(ctx));
+        CGContext::fill_path(Some(ctx));
+
+        // End cap accent notch on the barrel so it reads clearly as a marker.
+        set_fill(ctx, fg.with_alpha(0.55));
+        let cap = Rect::new(body.max_x() - s * 0.09, body.y, s * 0.09, bh);
+        fill_round(ctx, cap, 1.5, fg.with_alpha(0.7));
+        CGContext::restore_g_state(Some(ctx));
     }
 
     /// One tooltip pill next to a ring button, on the side away from the
@@ -12510,7 +12542,7 @@ mod tests {
         let d = ScreenshotConfig::default();
         assert!(d.enabled);
         assert_eq!(d.button_size, 34.0);
-        assert_eq!(d.buttons.len(), 20, "default ring has no inert size badge");
+        assert_eq!(d.buttons.len(), 19, "default ring has no inert size badge or pin");
         assert_eq!(d.save_path, "~/Desktop");
         assert_eq!(d.user_colors.first(), Some(&None), "picker swatch first");
 
@@ -12679,13 +12711,15 @@ mod tests {
         let all = shortcut_rows(false, |_, d| d.to_string());
         assert!(card.len() < all.len());
         assert!(card.iter().all(|r| all.contains(r)));
-        for key in ["Tab", "W", "L", "V", "\u{2318}T", "\u{2318}P", "Space"] {
+        for key in ["W", "L", "V", "\u{2318}T", "Space"] {
             assert!(card.iter().any(|(k, _)| k == key), "{key} is on the help card");
         }
-        // Obvious everyday shortcuts stay off the help card.
-        for obvious in ["Mouse", "Esc", "Delete", "\u{2318}Z / \u{21e7}\u{2318}Z"] {
-            assert!(!card.iter().any(|(k, _)| k == obvious), "{obvious} stays off the help card");
+        // Obvious / removed shortcuts stay off the help card (and Copy Text card).
+        for dropped in ["Mouse", "Esc", "Delete", "Tab", "\u{2318}P", "\u{2318}R", "\u{2318}Z / \u{21e7}\u{2318}Z"] {
+            assert!(!card.iter().any(|(k, _)| k == dropped), "{dropped} stays off the help card");
         }
+        assert_eq!(HELP_TEXT_KEYS.len(), 1);
+        assert_eq!(HELP_TEXT_KEYS[0].1, "Copy Text");
         let mut e = HashMap::new();
         e.insert("help-record".to_string(), "Film it".to_string());
         let c = ScreenshotConfig::from_entries(&e);
@@ -13527,10 +13561,10 @@ mod tests {
         assert_eq!(st["selection"]["w"], 300.0);
         assert_eq!(
             st["buttons"].as_array().unwrap().len(),
-            20,
+            19,
             "one button per ring tool"
         );
-        assert_eq!(st["buttons"][0]["name"], "pencil");
+        assert_eq!(st["buttons"][0]["name"], "text");
         assert_eq!(st["tool"], Value::Null);
         assert_eq!(st["canUndo"], false);
         assert_eq!(st["canRedo"], false);
@@ -14362,13 +14396,13 @@ mod tests {
         }));
         assert!(s.finished && s.outcome == Some(ShotOutcome::Copy));
 
-        // 2. Cmd+P pins the selection.
+        // 2. Cmd+P no longer pins (removed per owner decision).
         let mut s = session();
         s.test_select(Rect::new(200.0, 150.0, 400.0, 300.0), Some(0));
         assert!(s.handle_key(&KeyInput {
             key_code: 35, chars: Some('p'), cmd: true, ctrl: false, shift: false, opt: false, esc_streak: 0,
         }));
-        assert!(s.finished && s.outcome == Some(ShotOutcome::Pin));
+        assert!(!s.finished && s.outcome.is_none());
 
         // 3. Clicking outside the selection while a tool is armed never draws off-screen.
         let mut s = session();
